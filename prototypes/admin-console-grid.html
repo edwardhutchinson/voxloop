@@ -1,0 +1,1438 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoxLoop admin console — grid legibility prototype</title>
+<!--
+  THROWAWAY PROTOTYPE — issue #20 on edwardhutchinson/voxloop.
+  Question: does the role x loop permission grid (ADR-0011) actually stay legible
+  at pilot scale (~15 roles x ~20 loops, ~190 users), and where does it break?
+
+  Three variants of the admin console, switchable via ?variant=A|B|C and the
+  floating bar at the bottom. They disagree structurally:
+    A  The Wall        — the matrix IS the console. Density is the feature.
+    B  Row at a time   — master/detail. Nobody reads a matrix; they read one row.
+    C  Question-first  — the console answers the two questions; the grid is a store.
+
+  All state is in memory. Nothing persists. No backend. Assumptions stated in the
+  "About" panel (press ?).
+-->
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #151a21;
+    --panel-2: #1b212a;
+    --line: #262e39;
+    --line-soft: #1e252e;
+    --ink: #dfe5ec;
+    --ink-2: #9aa6b4;
+    --ink-3: #6b7887;
+    --accent: #6ea8fe;
+
+    /* the four rungs — cumulative ladder, so the ramp must read as ascending */
+    --r0-bg: transparent;      --r0-ink: #3a444f;
+    --r1-bg: #1c3040;          --r1-ink: #7fc2e8;   /* monitor  */
+    --r2-bg: #2c3a22;          --r2-ink: #a8d16a;   /* emit     */
+    --r3-bg: #4a3312;          --r3-ink: #f0b45f;   /* control  */
+
+    --warn: #e8b04b;
+    --danger: #e8685d;
+    --live: #57c785;
+    --tx: #e8685d;
+  }
+  :root[data-theme="light"] {
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --panel-2: #eef1f5;
+    --line: #d3d9e0;
+    --line-soft: #e4e8ed;
+    --ink: #1d242c;
+    --ink-2: #5c6773;
+    --ink-3: #8d99a6;
+    --accent: #2d6cdf;
+    --r0-bg: transparent;      --r0-ink: #c2cad3;
+    --r1-bg: #dceaf6;          --r1-ink: #1b6b9c;
+    --r2-bg: #e2edd2;          --r2-ink: #4d7a17;
+    --r3-bg: #f7e3c2;          --r3-ink: #9a5f0a;
+    --warn: #b8791a;
+    --danger: #c33d31;
+    --live: #2e8b57;
+    --tx: #c33d31;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; color: inherit; }
+
+  /* ---------- shared app chrome ---------- */
+  .app { display: flex; flex-direction: column; height: 100vh; }
+  .topbar {
+    display: flex; align-items: center; gap: 16px;
+    padding: 0 16px; height: 46px; flex: 0 0 46px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  .brand { font-weight: 650; letter-spacing: .02em; }
+  .brand span { color: var(--ink-3); font-weight: 400; margin-left: 8px; }
+  .topbar .spacer { flex: 1; }
+  .livechip {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 3px 9px; border-radius: 999px;
+    background: var(--panel-2); border: 1px solid var(--line);
+    color: var(--ink-2); font-size: 11.5px; font-variant-numeric: tabular-nums;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--live); }
+  .dot.tx { background: var(--tx); animation: pulse 1.1s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+
+  .tabs { display: flex; gap: 2px; }
+  .tab {
+    background: none; border: 0; padding: 6px 12px; border-radius: 6px;
+    color: var(--ink-2); cursor: pointer;
+  }
+  .tab:hover { background: var(--panel-2); color: var(--ink); }
+  .tab[aria-selected="true"] { background: var(--panel-2); color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
+
+  .body { flex: 1; min-height: 0; display: flex; }
+  .pane { min-width: 0; min-height: 0; overflow: auto; }
+
+  .muted { color: var(--ink-2); }
+  .dim { color: var(--ink-3); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+  .tnum { font-variant-numeric: tabular-nums; }
+
+  input[type="search"], input[type="text"], select {
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--ink);
+    border-radius: 6px; padding: 5px 9px; font: inherit;
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+  .btn {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 11px; cursor: pointer;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #0b1017; font-weight: 600; }
+  .btn.danger { border-color: var(--danger); color: var(--danger); }
+
+  /* ---------- rung swatches (shared vocabulary, rendered differently per variant) ---------- */
+  .rung-0 { background: var(--r0-bg); color: var(--r0-ink); }
+  .rung-1 { background: var(--r1-bg); color: var(--r1-ink); }
+  .rung-2 { background: var(--r2-bg); color: var(--r2-ink); }
+  .rung-3 { background: var(--r3-bg); color: var(--r3-ink); }
+
+  /* the ladder mark: N filled steps out of 3, ascending. Reads without a legend
+     because "higher stack = more authority" needs no key. */
+  .ladder { display: inline-flex; align-items: flex-end; gap: 1px; height: 11px; }
+  .ladder i { width: 3px; background: currentColor; opacity: .22; border-radius: .5px; }
+  .ladder i:nth-child(1) { height: 4px; }
+  .ladder i:nth-child(2) { height: 7px; }
+  .ladder i:nth-child(3) { height: 11px; }
+  .ladder.l1 i:nth-child(1),
+  .ladder.l2 i:nth-child(-n+2),
+  .ladder.l3 i { opacity: 1; }
+
+  /* ---------- VARIANT A : The Wall ---------- */
+  .wall-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .wall-tools {
+    display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+    border-bottom: 1px solid var(--line-soft); background: var(--panel);
+    flex: 0 0 auto;
+  }
+  .wall-scroll { flex: 1; overflow: auto; position: relative; }
+  table.wall { border-collapse: separate; border-spacing: 0; }
+  table.wall th, table.wall td { padding: 0; }
+
+  table.wall thead th.corner {
+    position: sticky; top: 0; left: 0; z-index: 5;
+    background: var(--panel); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  }
+  table.wall thead th.loop {
+    position: sticky; top: 0; z-index: 3;
+    height: 148px; vertical-align: bottom;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    border-left: 1px solid var(--line-soft);
+  }
+  .loophead { display: flex; flex-direction: column; align-items: center; gap: 5px; padding-bottom: 5px; }
+  .loophead .nm {
+    writing-mode: vertical-rl; transform: rotate(180deg);
+    white-space: nowrap; font-size: 11.5px; color: var(--ink-2);
+    max-height: 112px; overflow: hidden; text-overflow: ellipsis;
+  }
+  th.loop.hot .loophead .nm { color: var(--ink); }
+  th.loop.hot { background: var(--panel-2); }
+  .occ { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+  .occ.staffed { background: var(--live); }
+  .occ.away    { background: var(--warn); }
+  .occ.vacant  { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ink-3); }
+  .occ.txing   { background: var(--tx); animation: pulse 1.1s infinite; }
+  .newloop { color: var(--warn); font-size: 10px; line-height: 1; }
+
+  table.wall tbody th.role {
+    position: sticky; left: 0; z-index: 2;
+    background: var(--panel); border-right: 1px solid var(--line);
+    border-top: 1px solid var(--line-soft);
+    text-align: left; font-weight: 450; white-space: nowrap;
+    padding: 0 10px 0 10px; height: var(--cellh);
+    max-width: 210px;
+  }
+  tbody tr.hot th.role { background: var(--panel-2); color: var(--ink); }
+  .rolehead { display: flex; align-items: center; gap: 8px; }
+  .rolehead .nm { overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
+  .rolehead .cnt {
+    font-size: 10.5px; color: var(--ink-3); font-variant-numeric: tabular-nums;
+    min-width: 26px; text-align: right;
+  }
+  .rolehead .cnt.live { color: var(--live); }
+
+  td.cell {
+    width: var(--cellw); height: var(--cellh);
+    border-left: 1px solid var(--line-soft); border-top: 1px solid var(--line-soft);
+    text-align: center; cursor: pointer; position: relative;
+    transition: box-shadow .06s;
+  }
+  td.cell:hover { box-shadow: inset 0 0 0 2px var(--accent); }
+  td.cell.crosshair { filter: brightness(1.35); }
+  td.cell .mark { display: flex; align-items: center; justify-content: center; height: 100%; }
+  td.cell.staffing::after {
+    content: ""; position: absolute; top: 2px; right: 2px;
+    width: 0; height: 0; border-top: 5px solid var(--ink-2); border-left: 5px solid transparent;
+    opacity: .8;
+  }
+  td.cell.gap { background: repeating-linear-gradient(45deg, transparent, transparent 3px, var(--warn) 3px, var(--warn) 4px); opacity: .5; }
+  td.cell.livehere { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--live) 55%, transparent); }
+
+  .colsum { height: 22px; }
+  tfoot td, tfoot th {
+    position: sticky; bottom: 0; z-index: 2; background: var(--panel);
+    border-top: 1px solid var(--line); font-size: 10.5px; color: var(--ink-3);
+    text-align: center; font-variant-numeric: tabular-nums;
+  }
+  tfoot th { left: 0; z-index: 4; text-align: left; padding-left: 10px; font-weight: 450; }
+
+  /* eligibility wall */
+  .elig-wall td.ecell { width: 26px; height: 22px; text-align: center; cursor: pointer;
+    border-left: 1px solid var(--line-soft); border-top: 1px solid var(--line-soft); }
+  .elig-wall td.ecell.on { background: var(--r1-bg); color: var(--r1-ink); }
+  .elig-wall td.ecell.on.signedin { background: var(--r2-bg); color: var(--r2-ink); }
+
+  /* ---------- VARIANT B : Row at a time ---------- */
+  .rail {
+    flex: 0 0 268px; border-right: 1px solid var(--line); background: var(--panel);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .rail-head { padding: 10px 12px; border-bottom: 1px solid var(--line-soft); display: flex; gap: 8px; }
+  .seg { display: flex; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { background: none; border: 0; padding: 4px 10px; cursor: pointer; color: var(--ink-2); font-size: 12px; }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: #0b1017; font-weight: 600; }
+  .rail-list { overflow: auto; flex: 1; }
+  .rail-item {
+    display: flex; align-items: center; gap: 9px; width: 100%;
+    padding: 8px 12px; background: none; border: 0; border-bottom: 1px solid var(--line-soft);
+    cursor: pointer; text-align: left;
+  }
+  .rail-item:hover { background: var(--panel-2); }
+  .rail-item[aria-current="true"] { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
+  .rail-item .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rail-item .meta { font-size: 10.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  .spark { display: inline-flex; gap: 1px; }
+  .spark i { width: 3px; height: 12px; border-radius: 1px; background: var(--r0-ink); opacity: .35; }
+  .spark i.l1 { background: var(--r1-ink); opacity: 1; }
+  .spark i.l2 { background: var(--r2-ink); opacity: 1; }
+  .spark i.l3 { background: var(--r3-ink); opacity: 1; }
+
+  .detail { flex: 1; overflow: auto; padding: 18px 22px 90px; }
+  .detail h2 { margin: 0 0 2px; font-size: 19px; font-weight: 620; }
+  .detail .sub { color: var(--ink-2); margin-bottom: 18px; }
+  .group { margin-bottom: 22px; }
+  .group > h3 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .09em; color: var(--ink-3);
+    margin: 0 0 8px; display: flex; align-items: center; gap: 8px;
+  }
+  .group > h3::after { content: ""; flex: 1; height: 1px; background: var(--line-soft); }
+  .lrow {
+    display: flex; align-items: center; gap: 12px; padding: 7px 10px;
+    border: 1px solid var(--line-soft); border-radius: 7px; margin-bottom: 4px;
+    background: var(--panel);
+  }
+  .lrow:hover { border-color: var(--line); }
+  .lrow .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lrow .live { font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+  .lrow .live b { color: var(--live); font-weight: 600; }
+  .lrow .live b.tx { color: var(--tx); }
+  .rung-picker { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .rung-picker button {
+    background: var(--panel-2); border: 0; border-left: 1px solid var(--line);
+    padding: 3px 9px; font-size: 11px; cursor: pointer; color: var(--ink-3);
+  }
+  .rung-picker button:first-child { border-left: 0; }
+  .rung-picker button[aria-pressed="true"] { font-weight: 650; }
+  .rung-picker button[aria-pressed="true"][data-r="0"] { background: var(--panel); color: var(--ink-2); }
+  .rung-picker button[aria-pressed="true"][data-r="1"] { background: var(--r1-bg); color: var(--r1-ink); }
+  .rung-picker button[aria-pressed="true"][data-r="2"] { background: var(--r2-bg); color: var(--r2-ink); }
+  .rung-picker button[aria-pressed="true"][data-r="3"] { background: var(--r3-bg); color: var(--r3-ink); }
+
+  .minimap {
+    position: fixed; right: 18px; bottom: 74px; z-index: 40;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px;
+    box-shadow: 0 8px 26px rgba(0,0,0,.4);
+  }
+  .minimap .mm { display: grid; gap: 1px; }
+  .minimap .mm i { width: 4px; height: 4px; border-radius: .5px; background: var(--r0-ink); opacity: .3; }
+  .minimap .mm i.l1 { background: var(--r1-ink); opacity: 1; }
+  .minimap .mm i.l2 { background: var(--r2-ink); opacity: 1; }
+  .minimap .mm i.l3 { background: var(--r3-ink); opacity: 1; }
+  .minimap .mm i.cur { outline: 1px solid var(--accent); }
+  .minimap .cap { font-size: 10px; color: var(--ink-3); margin-bottom: 6px; }
+
+  /* ---------- VARIANT C : Question-first ---------- */
+  .qwrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .qbar { padding: 20px 26px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .qline { display: flex; align-items: center; gap: 10px; font-size: 20px; flex-wrap: wrap; }
+  .qline select { font-size: 19px; padding: 5px 10px; border-radius: 8px; max-width: 380px; }
+  .qswitch { display: flex; gap: 6px; margin-bottom: 12px; }
+  .qswitch button {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px;
+    padding: 5px 14px; cursor: pointer; color: var(--ink-2); font-size: 12.5px;
+  }
+  .qswitch button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #0b1017; font-weight: 600; }
+  .answer { flex: 1; overflow: auto; padding: 20px 26px 90px; }
+  .acols { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+  .acard { border: 1px solid var(--line-soft); border-radius: 9px; background: var(--panel); overflow: hidden; }
+  .acard h4 {
+    margin: 0; padding: 8px 12px; font-size: 11px; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--ink-3); border-bottom: 1px solid var(--line-soft); display: flex; gap: 8px; align-items: center;
+  }
+  .acard h4 .n { margin-left: auto; font-size: 12px; letter-spacing: 0; color: var(--ink-2); }
+  .arow { display: flex; align-items: center; gap: 9px; padding: 6px 12px; border-bottom: 1px solid var(--line-soft); }
+  .arow:last-child { border-bottom: 0; }
+  .arow .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .via { font-size: 10.5px; color: var(--ink-3); }
+  .via b { color: var(--ink-2); font-weight: 500; }
+  .prov { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chip {
+    font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--ink-2); background: var(--panel-2);
+    white-space: nowrap;
+  }
+  .chip.win { border-color: currentColor; }
+  .qempty { color: var(--ink-3); padding: 40px 0; text-align: center; }
+
+  /* ---------- shared: request queue / presets / blast radius ---------- */
+  .side {
+    flex: 0 0 300px; border-left: 1px solid var(--line); background: var(--panel);
+    overflow: auto; padding: 14px;
+  }
+  .side h3 { font-size: 11px; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-3); margin: 0 0 10px; }
+  .req { border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px; margin-bottom: 9px; background: var(--panel-2); }
+  .req .who { font-weight: 600; }
+  .req .ask { color: var(--ink-2); margin: 4px 0 6px; }
+  .req .why { color: var(--ink-3); font-style: italic; margin-bottom: 8px; font-size: 12px; }
+  .req .acts { display: flex; gap: 6px; }
+  .req .acts .btn { padding: 3px 9px; font-size: 11.5px; }
+
+  dialog {
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    border-radius: 12px; padding: 0; max-width: 560px; width: 92vw;
+    box-shadow: 0 24px 70px rgba(0,0,0,.6);
+  }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
+  .dlg-h { padding: 16px 20px 12px; border-bottom: 1px solid var(--line-soft); }
+  .dlg-h h3 { margin: 0 0 4px; font-size: 16px; }
+  .dlg-b { padding: 16px 20px; max-height: 52vh; overflow: auto; }
+  .dlg-f { padding: 12px 20px 16px; display: flex; gap: 8px; justify-content: flex-end; border-top: 1px solid var(--line-soft); }
+  .impact { border-left: 3px solid var(--warn); background: var(--panel-2); padding: 10px 12px; border-radius: 0 7px 7px 0; margin-bottom: 12px; }
+  .impact.severe { border-left-color: var(--danger); }
+  .impact h5 { margin: 0 0 6px; font-size: 12.5px; }
+  .impact ul { margin: 6px 0 0; padding-left: 18px; color: var(--ink-2); }
+
+  /* ---------- floating switcher ---------- */
+  .switcher {
+    position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; z-index: 100;
+    display: flex; align-items: center; gap: 4px;
+    background: #0a0d12; color: #e8edf3; border: 1px solid #38424f;
+    border-radius: 999px; padding: 5px 6px;
+    box-shadow: 0 10px 34px rgba(0,0,0,.55);
+    font-size: 12.5px;
+  }
+  :root[data-theme="light"] .switcher { background: #12171e; }
+  .switcher button {
+    background: none; border: 0; color: inherit; cursor: pointer;
+    padding: 5px 10px; border-radius: 999px;
+  }
+  .switcher button:hover { background: #222a35; }
+  .switcher .lbl { padding: 0 10px; white-space: nowrap; font-weight: 600; }
+  .switcher .lbl em { font-style: normal; color: #8e9bab; font-weight: 400; }
+  .switcher .div { width: 1px; height: 20px; background: #38424f; margin: 0 4px; }
+  .switcher select {
+    background: #1a212a; border: 1px solid #38424f; color: #e8edf3;
+    border-radius: 999px; padding: 4px 8px; font-size: 11.5px;
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div class="switcher" id="switcher"></div>
+
+<dialog id="dlg"></dialog>
+
+<script>
+/* =====================================================================
+   0.  Deterministic fake world
+   ===================================================================== */
+function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const rnd = mulberry(20250816);
+const pick = a => a[Math.floor(rnd()*a.length)];
+const chance = p => rnd() < p;
+
+const RUNGS = ['none','monitor','emit','control'];
+const RUNG_SHORT = ['—','MON','EMIT','CTRL'];
+
+const BASE_LOOPS = [
+  ['fd',      'Flight Director Net', true],
+  ['opscoord','Ops Coordination',    true],
+  ['ground',  'Ground Network',      true],
+  ['health',  'Spacecraft Health',   true],
+  ['power',   'Power & Thermal',     true],
+  ['aocs',    'AOCS',                true],
+  ['comms',   'Comms / RF',          true],
+  ['payload', 'Payload Ops',         true],
+  ['anom1',   'Anomaly 1',           true],
+  ['anom2',   'Anomaly 2',           true],
+  ['conf1',   'Conference 1',        true],
+  ['conf2',   'Conference 2',        true],
+  ['conf3',   'Conference 3',        true],
+  ['sim',     'Sim & Training',      true],
+  ['range',   'Range Safety',        true],
+  ['launch',  'Launch Ops',          true],
+  ['recov',   'Recovery',            true],
+  ['pao',     'Public Affairs',      true],
+  ['engsup',  'Engineering Support', false],  // created after install -> Observer gap
+  ['facil',   'Site Facilities',     false],  // created after install -> Observer gap
+];
+
+const BASE_ROLES = [
+  ['fdir',    'Flight Director',            1],
+  ['opsco',   'Ops Coordinator',            1],
+  ['shift',   'Shift Lead',                 1],
+  ['gctrl',   'Ground Controller',          2],
+  ['sch',     'Spacecraft Health Engineer', 2],
+  ['pwr',     'Power & Thermal Engineer',   2],
+  ['aocse',   'AOCS Engineer',              2],
+  ['comse',   'Comms Engineer',             2],
+  ['plop',    'Payload Operator',           3],
+  ['anlead',  'Anomaly Lead',               1],
+  ['simsup',  'Sim Supervisor',             1],
+  ['rso',     'Range Safety Officer',       1],
+  ['supeng',  'Support Engineer',           8],
+  ['paoff',   'Public Affairs Officer',     2],
+  ['obs',     'Observer',                  99],
+];
+
+// explicit grid — realism matters more than brevity here
+const GRID_SPEC = {
+  fdir:   { fd:3, opscoord:3, ground:2, health:2, power:2, aocs:2, comms:2, payload:2,
+            anom1:3, anom2:3, conf1:2, conf2:2, conf3:2, range:2, launch:3, recov:2, pao:2, sim:1 },
+  opsco:  { fd:2, opscoord:3, ground:2, health:1, power:1, aocs:1, comms:2, payload:1,
+            anom1:2, anom2:2, conf1:2, conf2:2, conf3:2, launch:2, recov:2, pao:2, sim:1, engsup:2 },
+  shift:  { fd:2, opscoord:2, ground:3, health:3, power:3, aocs:3, comms:3, payload:2,
+            anom1:3, anom2:2, conf1:2, conf2:2, conf3:2, sim:2, engsup:2 },
+  gctrl:  { fd:1, opscoord:2, ground:3, comms:2, health:1, anom1:2, conf1:2, launch:2, sim:2, engsup:2 },
+  sch:    { fd:1, opscoord:2, health:3, power:2, aocs:2, comms:1, anom1:2, anom2:2, conf1:2, conf2:2, sim:2, engsup:2 },
+  pwr:    { fd:1, opscoord:1, health:2, power:3, aocs:1, anom1:2, conf2:2, sim:2, engsup:2 },
+  aocse:  { fd:1, opscoord:1, health:2, aocs:3, power:1, anom1:2, conf2:2, sim:2, engsup:2 },
+  comse:  { fd:1, opscoord:1, ground:2, comms:3, health:1, anom1:2, conf3:2, launch:2, sim:2, engsup:2 },
+  plop:   { fd:1, opscoord:1, payload:3, health:1, comms:1, anom2:2, conf3:2, sim:2, engsup:2 },
+  anlead: { fd:2, opscoord:2, health:2, power:2, aocs:2, comms:2, payload:2, anom1:3, anom2:3,
+            conf1:2, conf2:2, conf3:2, engsup:2 },
+  simsup: { sim:3, conf3:2, ground:1, health:1, opscoord:1 },
+  rso:    { fd:2, range:3, launch:2, recov:2, opscoord:1, ground:1 },
+  supeng: { opscoord:1, ground:1, health:1, power:1, aocs:1, comms:1, payload:1, engsup:2, conf3:1, sim:1 },
+  paoff:  { pao:3, fd:1, opscoord:1, launch:1, recov:1 },
+  obs:    {}, // filled at build time: monitor on every loop present at install
+};
+
+// which (role, loop) pairs count as staffing
+const STAFFING = {
+  fdir:['fd'], opsco:['opscoord'], shift:['opscoord'], gctrl:['ground'], sch:['health'],
+  pwr:['power'], aocse:['aocs'], comse:['comms'], plop:['payload'],
+  anlead:['anom1','anom2'], simsup:['sim'], rso:['range'], paoff:['pao'], supeng:['engsup'],
+};
+
+const FIRST = ['Ana','Ben','Cara','Dan','Elin','Femi','Gita','Hugo','Ines','Jo','Kai','Lena','Mo','Nils','Oona','Pia','Quinn','Ravi','Sara','Tom','Ulla','Vik','Wren','Xan','Yara','Zeke','Alex','Bea','Cole','Dara','Erik','Fay','Gus','Hana','Ivo','Juno','Kit','Liv','Mika','Noor'];
+const LAST  = ['Adeyemi','Bakker','Costa','Duval','Eriksen','Farrow','Gallo','Haugen','Ibarra','Jansen','Kovac','Lindqvist','Moreau','Nakamura','Okafor','Pereira','Quintero','Rossi','Silva','Tanaka','Ulrich','Vermeulen','Walsh','Xu','Yilmaz','Zhang','Novak','Petrov','Rahman','Sorensen'];
+
+function buildWorld(nLoops, nRoles, nUsers) {
+  const loops = BASE_LOOPS.slice(0, Math.min(nLoops, BASE_LOOPS.length))
+    .map(([id,name,inst]) => ({id, name, atInstall: inst}));
+  for (let i = loops.length; i < nLoops; i++)
+    loops.push({ id:'aux'+i, name:'Aux Net '+(i - BASE_LOOPS.length + 1), atInstall: false });
+
+  const roles = BASE_ROLES.slice(0, Math.min(nRoles, BASE_ROLES.length))
+    .map(([id,name,max]) => ({id, name, max}));
+  for (let i = roles.length; i < nRoles; i++)
+    roles.push({ id:'team'+i, name:'Support Team '+(i - BASE_ROLES.length + 1), max: 4 });
+
+  // grid
+  const grid = {};
+  for (const r of roles) {
+    grid[r.id] = {};
+    for (const l of loops) grid[r.id][l.id] = 0;
+  }
+  for (const r of roles) {
+    const spec = GRID_SPEC[r.id];
+    if (spec) { for (const [lid, v] of Object.entries(spec)) if (grid[r.id][lid] !== undefined) grid[r.id][lid] = v; }
+    else if (r.id.startsWith('team')) {
+      // procedural extra roles: a handful of loops each
+      for (const l of loops) if (chance(0.18)) grid[r.id][l.id] = chance(0.35) ? 2 : 1;
+    }
+  }
+  // Observer: monitor on every loop that existed at install, and nothing else.
+  if (grid.obs) for (const l of loops) grid.obs[l.id] = l.atInstall ? 1 : 0;
+
+  const staffing = {};
+  for (const r of roles) { staffing[r.id] = {}; for (const l of loops) staffing[r.id][l.id] = false; }
+  for (const [rid, lids] of Object.entries(STAFFING))
+    if (staffing[rid]) for (const lid of lids) if (staffing[rid][lid] !== undefined && grid[rid][lid] >= 2) staffing[rid][lid] = true;
+
+  // users + eligibility
+  const users = [];
+  const seen = new Set();
+  const opRoles = roles.filter(r => r.id !== 'obs');
+  for (let i = 0; i < nUsers; i++) {
+    let name;
+    do { name = pick(FIRST) + ' ' + pick(LAST); } while (seen.has(name));
+    seen.add(name);
+    const elig = new Set(['obs']);                    // everyone is eligible for Observer
+    const n = chance(0.58) ? 1 : chance(0.72) ? 2 : 3;
+    for (let k = 0; k < n; k++) if (chance(0.62)) elig.add(pick(opRoles).id);
+    users.push({ id:'u'+i, name, elig:[...elig] });
+  }
+  // guarantee a few genuinely multi-role users — the union case the ticket flags
+  const setElig = (i, ids) => { if (users[i]) users[i].elig = ids; };
+  setElig(3,  ['obs','shift','gctrl','anlead']);
+  setElig(9,  ['obs','sch','anlead']);
+  setElig(17, ['obs','fdir','opsco','shift']);
+  setElig(24, ['obs','supeng','comse','simsup']);
+  // smaller scales truncate the role list, so drop anything that isn't there
+  const roleIds = new Set(roles.map(r => r.id));
+  for (const u of users) {
+    u.elig = u.elig.filter(r => roleIds.has(r));
+    if (!u.elig.length) u.elig = [roles[roles.length - 1].id];
+  }
+
+  // live sessions
+  const sessions = [];
+  const filled = {};
+  for (const r of roles) filled[r.id] = 0;
+  for (const u of users) {
+    if (!chance(0.19)) continue;
+    const cand = u.elig.filter(rid => filled[rid] < (roles.find(x=>x.id===rid)?.max ?? 1));
+    if (!cand.length) continue;
+    const rid = chance(0.82) ? (cand.find(c => c !== 'obs') ?? 'obs') : 'obs';
+    if (filled[rid] >= (roles.find(x=>x.id===rid)?.max ?? 1)) continue;
+    filled[rid]++;
+    const may = loops.filter(l => grid[rid][l.id] >= 1);
+    const subs = may.filter(() => chance(0.6)).map(l => l.id);
+    const arms = loops.filter(l => grid[rid][l.id] >= 2 && chance(0.4)).map(l => l.id);
+    sessions.push({ user:u.id, role:rid, subs:new Set(subs), arms:new Set(arms),
+                    offConsole: chance(0.08), muted:new Set(subs.filter(()=>chance(0.06))),
+                    keyed:false });
+  }
+  // a few live transmissions
+  const keyable = sessions.filter(s => s.arms.size);
+  for (let i = 0; i < Math.min(4, keyable.length); i++) keyable[i].keyed = true;
+
+  // access requests
+  const loopIds = new Set(loops.map(l => l.id));
+  const requests = [
+    { u:3,  kind:'cell', role:'gctrl',  loop:'anom2', rung:2,
+      why:'Covering ground for the anomaly team on the Thursday pass; cannot answer on Anomaly 2.' },
+    { u:41, kind:'elig', role:'anlead',
+      why:'Certified on the anomaly board last month, not yet eligible.' },
+    { u:12, kind:'cell', role:'supeng', loop:'health', rung:1,
+      why:'Need to hear Spacecraft Health while on call. Monitor only.' },
+    { u:63, kind:'cell', role:'paoff',  loop:'engsup', rung:1,
+      why:'Engineering Support was created last week and PAO cannot see it.' },
+    { u:24, kind:'elig', role:'comse',
+      why:'Backfill for Comms during the December shift rotation.' },
+  ].filter(r => users[r.u] && grid[r.role] && (r.kind !== 'cell' || loopIds.has(r.loop)))
+   .map(r => ({ ...r, user: users[r.u].id }));
+
+  const presets = [
+    { id:'p1', role:'fdir',   name:'All stations',  loops: loops.filter(l=>grid.fdir?.[l.id]>=2).map(l=>l.id) },
+    { id:'p2', role:'fdir',   name:'Anomaly only',  loops:['anom1','anom2','opscoord'] },
+    { id:'p3', role:'shift',  name:'Engineers',     loops:['health','power','aocs','comms'] },
+    { id:'p4', role:'anlead', name:'Board',         loops:['anom1','anom2','fd'] },
+  ].filter(p => grid[p.role]);
+
+  return { loops, roles, grid, staffing, users, sessions, requests, presets };
+}
+
+/* =====================================================================
+   1.  Derived reads — the model's two questions, computed once
+   ===================================================================== */
+const W = {};   // current world
+const S = {     // ui state
+  variant: 'A', tab: 'grid', theme: 'dark',
+  scale: 'pilot',
+  selRole: 'fdir', selLoop: 'fd', railMode: 'roles',
+  qMode: 'user', qLoop: 'anom1', qUser: null, qRole: 'fdir',
+  hotRole: null, hotLoop: null,
+  search: '', eligSearch: '',
+};
+
+const roleById = id => W.roles.find(r => r.id === id);
+const loopById = id => W.loops.find(l => l.id === id);
+const userById = id => W.users.find(u => u.id === id);
+const perm     = (rid, lid) => W.grid[rid]?.[lid] ?? 0;
+
+const sessionsOfRole = rid => W.sessions.filter(s => s.role === rid);
+const occupantsOf    = rid => sessionsOfRole(rid).map(s => userById(s.user));
+
+/** Loop occupancy per ADR-0005: staffed / away / vacant. */
+function occupancy(lid) {
+  const staffers = W.sessions.filter(s => W.staffing[s.role]?.[lid]);
+  if (!staffers.length) return 'vacant';
+  const live = staffers.filter(s => s.subs.has(lid) && !s.offConsole && !s.muted.has(lid));
+  return live.length ? 'staffed' : 'away';
+}
+const transmittingOn = lid => W.sessions.filter(s => s.keyed && s.arms.has(lid));
+
+/** Column read: who can hear loop X — grouped by rung, with live occupants. */
+function columnRead(lid) {
+  return W.roles
+    .map(r => ({ role:r, rung: perm(r.id, lid), staffing: W.staffing[r.id]?.[lid],
+                 live: sessionsOfRole(r.id).length,
+                 hearing: sessionsOfRole(r.id).filter(s => s.subs.has(lid) && !s.muted.has(lid)).length }))
+    .filter(x => x.rung > 0)
+    .sort((a,b) => b.rung - a.rung || a.role.name.localeCompare(b.role.name));
+}
+
+/** Row read: what can this role reach. */
+function rowRead(rid) {
+  return W.loops
+    .map(l => ({ loop:l, rung: perm(rid, l.id), staffing: W.staffing[rid]?.[l.id] }))
+    .sort((a,b) => b.rung - a.rung || a.loop.name.localeCompare(b.loop.name));
+}
+
+/** The hard one: union across every role a user is eligible for. */
+function userReach(uid) {
+  const u = userById(uid);
+  const out = W.loops.map(l => {
+    const per = u.elig.map(rid => ({ rid, rung: perm(rid, l.id) })).filter(x => x.rung > 0);
+    const best = per.reduce((m, x) => Math.max(m, x.rung), 0);
+    return { loop:l, rung: best, via: per.sort((a,b)=>b.rung-a.rung),
+             contested: per.length > 1 && new Set(per.map(p=>p.rung)).size > 1 };
+  });
+  return out.sort((a,b) => b.rung - a.rung || a.loop.name.localeCompare(b.loop.name));
+}
+
+/** Blast radius of changing one cell — computed before the edit commits. */
+function blastRadius(rid, lid, from, to) {
+  const ss = sessionsOfRole(rid);
+  const cutsTx  = to < 2 && from >= 2 ? ss.filter(s => s.keyed && s.arms.has(lid)) : [];
+  const disarms = to < 2 && from >= 2 ? ss.filter(s => s.arms.has(lid)) : [];
+  const dropSub = to < 1 && from >= 1 ? ss.filter(s => s.subs.has(lid)) : [];
+  const wasStaffing = W.staffing[rid]?.[lid] && to < 2;
+  const otherStaffers = W.roles.filter(r => r.id !== rid && W.staffing[r.id]?.[lid]).length;
+  const occAfter = wasStaffing ? (otherStaffers ? 'staffed' : 'vacant') : null;
+  const losesControl = from >= 3 && to < 3 ? ss.length : 0;
+  return { ss, cutsTx, disarms, dropSub, wasStaffing, occAfter, otherStaffers, losesControl,
+           severe: cutsTx.length > 0 || (wasStaffing && occAfter === 'vacant') };
+}
+
+/* =====================================================================
+   2.  Small render helpers
+   ===================================================================== */
+const el = (t, c, h) => { const n = document.createElement(t); if (c) n.className = c; if (h != null) n.innerHTML = h; return n; };
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ladder = r => `<span class="ladder l${r}"><i></i><i></i><i></i></span>`;
+function occDot(lid) {
+  const o = occupancy(lid), tx = transmittingOn(lid).length;
+  return `<span class="occ ${tx ? 'txing' : o}" title="${tx ? tx+' transmitting' : o}"></span>`;
+}
+
+/* =====================================================================
+   3.  VARIANT A — The Wall
+       Bet: the matrix IS the console. All 300 cells on screen at once,
+       frozen headers, crosshair, live state overlaid on the axes.
+   ===================================================================== */
+function renderA(root) {
+  const app = el('div', 'app');
+  app.appendChild(topbar('A — The Wall', ['grid','eligibility','presets']));
+  const body = el('div', 'body');
+
+  const wrap = el('div', 'wall-wrap');
+  const tools = el('div', 'wall-tools');
+  tools.innerHTML = `
+    <span class="muted">${S.tab === 'eligibility' ? 'Users × roles' : 'Roles × loops'}</span>
+    <input type="search" id="wsearch" placeholder="filter…" value="${esc(S.search)}" style="width:170px">
+    <span class="dim">|</span>
+    <span class="dim">click a cell to raise · shift-click to lower · hover for the two reads</span>
+    <span style="flex:1"></span>
+    <span class="dim" id="crossread">—</span>`;
+  wrap.appendChild(tools);
+
+  const scroll = el('div', 'wall-scroll');
+  scroll.appendChild(S.tab === 'eligibility' ? eligWall() : S.tab === 'presets' ? presetPanel() : permWall());
+  wrap.appendChild(scroll);
+  body.appendChild(wrap);
+  body.appendChild(requestSide());
+  app.appendChild(body);
+  root.appendChild(app);
+
+  tools.querySelector('#wsearch').addEventListener('input', e => { S.search = e.target.value; render(); });
+}
+
+function permWall() {
+  const cw = W.loops.length > 26 ? 22 : 30, ch = W.roles.length > 20 ? 20 : 26;
+  const t = el('table', 'wall');
+  t.style.setProperty('--cellw', cw + 'px');
+  t.style.setProperty('--cellh', ch + 'px');
+
+  const q = S.search.toLowerCase();
+  const loops = W.loops;
+  const roles = q ? W.roles.filter(r => r.name.toLowerCase().includes(q)) : W.roles;
+
+  // head
+  const thead = el('thead'), hr = el('tr');
+  hr.appendChild(el('th', 'corner', `<div style="padding:0 10px;text-align:left;color:var(--ink-3);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase">Role \\ Loop</div>`));
+  for (const l of loops) {
+    const th = el('th', 'loop' + (S.hotLoop === l.id ? ' hot' : ''));
+    th.innerHTML = `<div class="loophead">
+        <span class="nm">${esc(l.name)}</span>
+        ${l.atInstall ? '' : '<span class="newloop" title="Created after install — Observer has no cell here">new</span>'}
+        ${occDot(l.id)}
+      </div>`;
+    th.addEventListener('click', () => openColumn(l.id));
+    hr.appendChild(th);
+  }
+  thead.appendChild(hr); t.appendChild(thead);
+
+  // body
+  const tb = el('tbody');
+  for (const r of roles) {
+    const tr = el('tr'); if (S.hotRole === r.id) tr.className = 'hot';
+    const live = sessionsOfRole(r.id).length;
+    const th = el('th', 'role');
+    th.innerHTML = `<div class="rolehead">
+        <span class="nm" title="${esc(r.name)}">${esc(r.name)}</span>
+        <span class="cnt ${live ? 'live' : ''}" title="${live} signed in of max ${r.max}">${live}/${r.max > 90 ? '∞' : r.max}</span>
+      </div>`;
+    th.addEventListener('click', () => openRow(r.id));
+    tr.appendChild(th);
+
+    for (const l of loops) {
+      const v = perm(r.id, l.id);
+      const td = el('td', 'cell rung-' + v);
+      if (W.staffing[r.id]?.[l.id]) td.classList.add('staffing');
+      if (r.id === 'obs' && !l.atInstall) td.classList.add('gap');
+      const hearing = sessionsOfRole(r.id).filter(s => s.subs.has(l.id)).length;
+      if (v > 0 && hearing) td.classList.add('livehere');
+      td.innerHTML = `<div class="mark">${v ? ladder(v) : '<span style="opacity:.35">·</span>'}</div>`;
+      td.title = `${r.name} → ${l.name}: ${RUNGS[v]}`;
+      td.addEventListener('mouseenter', () => {
+        S.hotRole = r.id; S.hotLoop = l.id;
+        document.getElementById('crossread').innerHTML =
+          `<b style="color:var(--ink)">${esc(r.name)}</b> ${v ? 'may ' + RUNGS[v] : 'cannot reach'} <b style="color:var(--ink)">${esc(l.name)}</b>` +
+          (hearing ? ` · <span style="color:var(--live)">${hearing} hearing it now</span>` : '');
+        for (const c of t.querySelectorAll('.crosshair')) c.classList.remove('crosshair');
+        for (const c of tr.querySelectorAll('td.cell')) c.classList.add('crosshair');
+        const idx = loops.indexOf(l) + 2;
+        for (const c of t.querySelectorAll(`tbody td.cell:nth-child(${idx})`)) c.classList.add('crosshair');
+        tr.classList.add('hot');
+        const th2 = t.querySelectorAll('thead th.loop')[loops.indexOf(l)];
+        for (const c of t.querySelectorAll('thead th.loop.hot')) c.classList.remove('hot');
+        th2.classList.add('hot');
+      });
+      td.addEventListener('click', e => proposeEdit(r.id, l.id, e.shiftKey ? v - 1 : v + 1));
+      tr.appendChild(td);
+    }
+    tb.appendChild(tr);
+  }
+  t.appendChild(tb);
+
+  // column summary: how many roles can hear / speak on this loop
+  const tf = el('tfoot'), fr = el('tr');
+  fr.appendChild(el('th', null, 'roles with reach'));
+  for (const l of loops) {
+    const c = W.roles.filter(r => perm(r.id, l.id) >= 1).length;
+    const e = W.roles.filter(r => perm(r.id, l.id) >= 2).length;
+    fr.appendChild(el('td', null, `<span title="${c} may monitor, ${e} may emit">${c}<span style="opacity:.45">/${e}</span></span>`));
+  }
+  tf.appendChild(fr); t.appendChild(tf);
+  return t;
+}
+
+function eligWall() {
+  const q = S.eligSearch.toLowerCase();
+  const users = W.users.filter(u => !q || u.name.toLowerCase().includes(q));
+  const roles = W.roles;
+  const t = el('table', 'wall elig-wall');
+  const thead = el('thead'), hr = el('tr');
+  hr.appendChild(el('th', 'corner', `<div style="padding:0 10px;text-align:left;color:var(--ink-3);font-size:10.5px;text-transform:uppercase;letter-spacing:.08em">User \\ Role</div>`));
+  for (const r of roles) {
+    const th = el('th', 'loop');
+    th.innerHTML = `<div class="loophead"><span class="nm">${esc(r.name)}</span>
+      <span class="cnt dim tnum" style="font-size:10px">${sessionsOfRole(r.id).length}</span></div>`;
+    hr.appendChild(th);
+  }
+  thead.appendChild(hr); t.appendChild(thead);
+  const tb = el('tbody');
+  for (const u of users) {
+    const tr = el('tr');
+    const sess = W.sessions.find(s => s.user === u.id);
+    const th = el('th', 'role');
+    th.innerHTML = `<div class="rolehead"><span class="nm">${esc(u.name)}</span>
+      ${sess ? `<span class="cnt live" title="signed in as ${esc(roleById(sess.role).name)}">●</span>` : ''}</div>`;
+    tr.appendChild(th);
+    for (const r of roles) {
+      const on = u.elig.includes(r.id);
+      const signed = sess && sess.role === r.id;
+      const td = el('td', 'ecell' + (on ? ' on' : '') + (signed ? ' signedin' : ''));
+      td.innerHTML = on ? (signed ? '◉' : '○') : '';
+      td.title = `${u.name} ${on ? 'may sign into' : 'may not sign into'} ${r.name}${signed ? ' — signed in now' : ''}`;
+      td.addEventListener('click', () => {
+        if (on && signed) return alert(`Revoking eligibility ends ${u.name}'s session immediately (CONTEXT.md: Eligibility).`);
+        u.elig = on ? u.elig.filter(x => x !== r.id) : [...u.elig, r.id];
+        render();
+      });
+      tr.appendChild(td);
+    }
+    tb.appendChild(tr);
+  }
+  t.appendChild(tb);
+  const holder = el('div');
+  const bar = el('div', 'wall-tools');
+  bar.innerHTML = `<input type="search" id="esearch" placeholder="find a person…" value="${esc(S.eligSearch)}" style="width:220px">
+    <span class="dim">${users.length} of ${W.users.length} users × ${roles.length} roles = <b class="tnum">${users.length * roles.length}</b> cells</span>`;
+  holder.appendChild(bar); holder.appendChild(t);
+  setTimeout(() => {
+    const i = holder.querySelector('#esearch');
+    if (i) i.addEventListener('input', e => { S.eligSearch = e.target.value; render(); });
+  });
+  return holder;
+}
+
+/* =====================================================================
+   4.  VARIANT B — Row at a time
+       Bet: nobody reads a 15×20 matrix. They read one row, and they need
+       the live consequences of every cell sitting next to the cell.
+   ===================================================================== */
+function renderB(root) {
+  const app = el('div', 'app');
+  app.appendChild(topbar('B — Row at a time', ['grid','eligibility','presets']));
+  const body = el('div', 'body');
+
+  const rail = el('div', 'rail');
+  const head = el('div', 'rail-head');
+  head.innerHTML = `<div class="seg">
+      <button data-m="roles" aria-pressed="${S.railMode==='roles'}">Roles</button>
+      <button data-m="loops" aria-pressed="${S.railMode==='loops'}">Loops</button>
+    </div><input type="search" id="bsearch" placeholder="filter" value="${esc(S.search)}" style="flex:1;min-width:0">`;
+  rail.appendChild(head);
+  const list = el('div', 'rail-list');
+  const q = S.search.toLowerCase();
+
+  if (S.railMode === 'roles') {
+    for (const r of W.roles.filter(r => !q || r.name.toLowerCase().includes(q))) {
+      const live = sessionsOfRole(r.id).length;
+      const b = el('button', 'rail-item');
+      b.setAttribute('aria-current', S.selRole === r.id);
+      b.innerHTML = `<span class="nm">${esc(r.name)}</span>
+        <span class="spark">${W.loops.map(l => `<i class="l${perm(r.id,l.id)}"></i>`).join('')}</span>
+        <span class="meta">${live}/${r.max>90?'∞':r.max}</span>`;
+      b.addEventListener('click', () => { S.selRole = r.id; render(); });
+      list.appendChild(b);
+    }
+  } else {
+    for (const l of W.loops.filter(l => !q || l.name.toLowerCase().includes(q))) {
+      const b = el('button', 'rail-item');
+      b.setAttribute('aria-current', S.selLoop === l.id);
+      const nRoles = W.roles.filter(r => perm(r.id, l.id) >= 1).length;
+      b.innerHTML = `${occDot(l.id)}<span class="nm">${esc(l.name)}</span>
+        ${l.atInstall ? '' : '<span class="chip" style="color:var(--warn)">new</span>'}
+        <span class="meta">${nRoles} roles</span>`;
+      b.addEventListener('click', () => { S.selLoop = l.id; render(); });
+      list.appendChild(b);
+    }
+  }
+  rail.appendChild(list);
+  body.appendChild(rail);
+
+  const detail = el('div', 'pane detail');
+  if (S.tab === 'eligibility')      detailEligibility(detail);
+  else if (S.tab === 'presets')     detail.appendChild(presetPanel());
+  else if (S.railMode === 'roles')  detailRole(detail, S.selRole);
+  else                              detailLoop(detail, S.selLoop);
+  body.appendChild(detail);
+  body.appendChild(requestSide());
+  app.appendChild(body);
+  root.appendChild(app);
+  root.appendChild(minimap());
+
+  head.querySelectorAll('[data-m]').forEach(b =>
+    b.addEventListener('click', () => { S.railMode = b.dataset.m; S.tab = 'grid'; render(); }));
+  head.querySelector('#bsearch').addEventListener('input', e => { S.search = e.target.value; render(); });
+}
+
+function detailRole(root, rid) {
+  const r = roleById(rid);
+  const occ = occupantsOf(rid);
+  root.appendChild(el('h2', null, esc(r.name)));
+  root.appendChild(el('div', 'sub',
+    `${occ.length} of ${r.max > 90 ? '∞' : r.max} signed in${occ.length ? ' — ' + occ.map(u=>esc(u.name)).join(', ') : ''} ·
+     ${W.users.filter(u=>u.elig.includes(rid)).length} eligible`));
+
+  const rows = rowRead(rid);
+  for (const rung of [3,2,1,0]) {
+    const set = rows.filter(x => x.rung === rung);
+    if (!set.length) continue;
+    const g = el('div', 'group');
+    g.appendChild(el('h3', null, `${RUNGS[rung]}${rung===0?' — no reach':''} <span class="dim">${set.length}</span>`));
+    for (const x of set) {
+      const row = el('div', 'lrow');
+      const hearing = sessionsOfRole(rid).filter(s => s.subs.has(x.loop.id) && !s.muted.has(x.loop.id)).length;
+      const txing   = sessionsOfRole(rid).filter(s => s.keyed && s.arms.has(x.loop.id)).length;
+      row.innerHTML = `${occDot(x.loop.id)}
+        <span class="nm">${esc(x.loop.name)}</span>
+        ${x.staffing ? '<span class="chip">staffs</span>' : ''}
+        ${x.loop.atInstall ? '' : '<span class="chip" style="color:var(--warn)">new</span>'}
+        <span class="live">${txing ? `<b class="tx">${txing} transmitting</b> · ` : ''}${hearing ? `<b>${hearing} hearing</b>` : '<span class="dim">nobody hearing</span>'}</span>`;
+      const pick = el('div', 'rung-picker');
+      for (let v = 0; v < 4; v++) {
+        const b = el('button', null, RUNG_SHORT[v]);
+        b.dataset.r = v; b.setAttribute('aria-pressed', v === x.rung);
+        b.addEventListener('click', () => proposeEdit(rid, x.loop.id, v));
+        pick.appendChild(b);
+      }
+      row.appendChild(pick);
+      g.appendChild(row);
+    }
+    root.appendChild(g);
+  }
+
+  // eligibility rendered INSIDE the role — B's structural claim: eligibility is
+  // a property of the role, not a 190×15 second matrix.
+  const g = el('div', 'group');
+  g.appendChild(el('h3', null, 'Who may sign into this role'));
+  const elig = W.users.filter(u => u.elig.includes(rid));
+  const box = el('div', null, elig.map(u => {
+    const s = W.sessions.find(x => x.user === u.id && x.role === rid);
+    return `<span class="chip" style="${s?'border-color:var(--live);color:var(--live)':''}">${s?'● ':''}${esc(u.name)}</span>`;
+  }).join(' ') || '<span class="dim">nobody</span>');
+  box.className = 'prov';
+  g.appendChild(box);
+  root.appendChild(g);
+}
+
+function detailLoop(root, lid) {
+  const l = loopById(lid);
+  root.appendChild(el('h2', null, `${esc(l.name)}`));
+  const tx = transmittingOn(lid);
+  root.appendChild(el('div', 'sub',
+    `${occupancy(lid)}${tx.length ? ` · <b style="color:var(--tx)">${tx.length} transmitting now</b>` : ''}
+     ${l.atInstall ? '' : ' · <b style="color:var(--warn)">created after install — Observer has no cell here</b>'}`));
+  const col = columnRead(lid);
+  for (const rung of [3,2,1]) {
+    const set = col.filter(x => x.rung === rung);
+    if (!set.length) continue;
+    const g = el('div', 'group');
+    g.appendChild(el('h3', null, `may ${RUNGS[rung]} <span class="dim">${set.length} roles</span>`));
+    for (const x of set) {
+      const row = el('div', 'lrow');
+      row.innerHTML = `<span class="nm">${esc(x.role.name)}</span>
+        ${x.staffing ? '<span class="chip">staffing role</span>' : ''}
+        <span class="live">${x.live ? `<b>${x.hearing}/${x.live} hearing</b>` : '<span class="dim">nobody signed in</span>'}</span>`;
+      const pick = el('div', 'rung-picker');
+      for (let v = 0; v < 4; v++) {
+        const b = el('button', null, RUNG_SHORT[v]);
+        b.dataset.r = v; b.setAttribute('aria-pressed', v === x.rung);
+        b.addEventListener('click', () => proposeEdit(x.role.id, lid, v));
+        pick.appendChild(b);
+      }
+      row.appendChild(pick);
+      g.appendChild(row);
+    }
+    root.appendChild(g);
+  }
+  const none = W.roles.filter(r => perm(r.id, lid) === 0);
+  const g = el('div', 'group');
+  g.appendChild(el('h3', null, `cannot reach it <span class="dim">${none.length} roles</span>`));
+  const box = el('div', 'prov', none.map(r => `<span class="chip">${esc(r.name)}</span>`).join(' '));
+  g.appendChild(box);
+  root.appendChild(g);
+}
+
+function detailEligibility(root) {
+  root.appendChild(el('h2', null, 'Eligibility'));
+  root.appendChild(el('div', 'sub', `${W.users.length} users · a user's reach is the union of every role they may sign into`));
+  const bar = el('div', 'group');
+  bar.innerHTML = `<input type="search" id="b-esearch" placeholder="find a person…" value="${esc(S.eligSearch)}" style="width:260px">`;
+  root.appendChild(bar);
+  const q = S.eligSearch.toLowerCase();
+  const list = W.users.filter(u => !q || u.name.toLowerCase().includes(q)).slice(0, 60);
+  for (const u of list) {
+    const row = el('div', 'lrow');
+    const s = W.sessions.find(x => x.user === u.id);
+    const ops = u.elig.filter(r => r !== 'obs');
+    row.innerHTML = `<span class="nm">${esc(u.name)}</span>
+      ${s ? `<span class="chip" style="border-color:var(--live);color:var(--live)">● ${esc(roleById(s.role).name)}</span>` : ''}
+      <span class="prov" style="flex:2">${u.elig.map(r=>`<span class="chip">${esc(roleById(r).name)}</span>`).join('')}</span>
+      <span class="live">${ops.length > 1 ? `<b style="color:var(--warn)">union of ${u.elig.length}</b>` : `<span class="dim">${u.elig.length} role${u.elig.length>1?'s':''}</span>`}</span>`;
+    const b = el('button', 'btn', 'reach →');
+    b.addEventListener('click', () => { S.variant='C'; S.qMode='user'; S.qUser=u.id; syncUrl(); render(); });
+    row.appendChild(b);
+    root.appendChild(row);
+  }
+  setTimeout(() => {
+    const i = root.querySelector('#b-esearch');
+    if (i) i.addEventListener('input', e => { S.eligSearch = e.target.value; render(); });
+  });
+}
+
+function minimap() {
+  const m = el('div', 'minimap');
+  const cur = S.railMode === 'roles' ? S.selRole : S.selLoop;
+  const grid = el('div', 'mm');
+  grid.style.gridTemplateColumns = `repeat(${W.loops.length}, 4px)`;
+  for (const r of W.roles) for (const l of W.loops) {
+    const i = el('i', 'l' + perm(r.id, l.id) +
+      ((S.railMode==='roles' && r.id===cur) || (S.railMode==='loops' && l.id===cur) ? ' cur' : ''));
+    grid.appendChild(i);
+  }
+  m.appendChild(el('div', 'cap', `${W.roles.length} roles × ${W.loops.length} loops`));
+  m.appendChild(grid);
+  return m;
+}
+
+/* =====================================================================
+   5.  VARIANT C — Question-first
+       Bet: admins don't read grids, they ask two questions. The console
+       answers them; the grid is a store you drop into from an answer.
+   ===================================================================== */
+function renderC(root) {
+  const app = el('div', 'app');
+  app.appendChild(topbar('C — Question-first', null));
+  const body = el('div', 'body');
+  const wrap = el('div', 'qwrap');
+
+  const bar = el('div', 'qbar');
+  const sw = el('div', 'qswitch');
+  for (const [m, lbl] of [['loop','Who can hear a loop?'], ['user','What can a person reach?'], ['role','What can a role reach?']]) {
+    const b = el('button', null, lbl);
+    b.setAttribute('aria-pressed', S.qMode === m);
+    b.addEventListener('click', () => { S.qMode = m; render(); });
+    sw.appendChild(b);
+  }
+  bar.appendChild(sw);
+
+  const line = el('div', 'qline');
+  if (S.qMode === 'loop') {
+    line.innerHTML = `<span class="muted">Who can hear</span>`;
+    const sel = el('select');
+    sel.innerHTML = W.loops.map(l => `<option value="${l.id}" ${l.id===S.qLoop?'selected':''}>${esc(l.name)}</option>`).join('');
+    sel.addEventListener('change', e => { S.qLoop = e.target.value; render(); });
+    line.appendChild(sel);
+    line.appendChild(el('span', 'muted', '?'));
+  } else if (S.qMode === 'user') {
+    if (!S.qUser) S.qUser = W.users[3].id;
+    line.innerHTML = `<span class="muted">What can</span>`;
+    const sel = el('select');
+    sel.innerHTML = W.users.map(u => `<option value="${u.id}" ${u.id===S.qUser?'selected':''}>${esc(u.name)}${u.elig.length>2?'  ('+u.elig.length+' roles)':''}</option>`).join('');
+    sel.addEventListener('change', e => { S.qUser = e.target.value; render(); });
+    line.appendChild(sel);
+    line.appendChild(el('span', 'muted', 'reach?'));
+  } else {
+    line.innerHTML = `<span class="muted">What can</span>`;
+    const sel = el('select');
+    sel.innerHTML = W.roles.map(r => `<option value="${r.id}" ${r.id===S.qRole?'selected':''}>${esc(r.name)}</option>`).join('');
+    sel.addEventListener('change', e => { S.qRole = e.target.value; render(); });
+    line.appendChild(sel);
+    line.appendChild(el('span', 'muted', 'reach?'));
+  }
+  bar.appendChild(line);
+  wrap.appendChild(bar);
+
+  const ans = el('div', 'answer');
+  if (S.qMode === 'loop') answerLoop(ans, S.qLoop);
+  else if (S.qMode === 'user') answerUser(ans, S.qUser);
+  else answerRole(ans, S.qRole);
+  wrap.appendChild(ans);
+
+  body.appendChild(wrap);
+  body.appendChild(requestSide(true));
+  app.appendChild(body);
+  root.appendChild(app);
+}
+
+function answerLoop(root, lid) {
+  const l = loopById(lid), col = columnRead(lid), tx = transmittingOn(lid);
+  const hd = el('div');
+  hd.style.marginBottom = '16px';
+  hd.innerHTML = `<div style="font-size:15px">
+      <b>${col.filter(x=>x.rung>=1).length} roles</b> may hear it,
+      <b>${col.filter(x=>x.rung>=2).length}</b> may speak on it,
+      <b>${col.filter(x=>x.rung>=3).length}</b> hold control.
+      <span class="muted">Right now it is <b>${occupancy(lid)}</b>${tx.length?`, <b style="color:var(--tx)">${tx.length} transmitting</b>`:''}.</span>
+    </div>
+    ${l.atInstall ? '' : `<div class="impact" style="margin-top:10px"><h5>Created after install</h5>
+      <span class="muted">Observer has no cell on ${esc(l.name)}, so every listen-only user is blind to it until an administrator fills it in.</span></div>`}`;
+  root.appendChild(hd);
+
+  const cols = el('div', 'acols');
+  for (const rung of [3,2,1,0]) {
+    const set = rung === 0
+      ? W.roles.filter(r => perm(r.id, lid) === 0).map(r => ({role:r, rung:0, live:sessionsOfRole(r.id).length, hearing:0}))
+      : col.filter(x => x.rung === rung);
+    if (!set.length) continue;
+    const c = el('div', 'acard');
+    c.appendChild(el('h4', null, `${ladder(rung)} ${RUNGS[rung]}<span class="n tnum">${set.length}</span>`));
+    for (const x of set) {
+      const row = el('div', 'arow');
+      row.innerHTML = `<span class="nm">${esc(x.role.name)}</span>
+        ${x.staffing ? '<span class="chip">staffs</span>' : ''}
+        <span class="via">${x.live ? `${x.hearing}/${x.live} hearing` : ''}</span>`;
+      row.style.cursor = 'pointer';
+      row.addEventListener('click', () => proposeEdit(x.role.id, lid, x.rung === 3 ? 0 : x.rung + 1));
+      c.appendChild(row);
+    }
+    cols.appendChild(c);
+  }
+  root.appendChild(cols);
+}
+
+function answerUser(root, uid) {
+  const u = userById(uid), reach = userReach(uid);
+  const s = W.sessions.find(x => x.user === uid);
+  const hd = el('div'); hd.style.marginBottom = '16px';
+  const contested = reach.filter(x => x.contested).length;
+  hd.innerHTML = `<div style="font-size:15px">
+      Eligible for <b>${u.elig.length}</b> role${u.elig.length>1?'s':''} —
+      ${u.elig.map(r => `<span class="chip">${esc(roleById(r).name)}</span>`).join(' ')}
+      ${s ? `<span class="chip" style="border-color:var(--live);color:var(--live)">● signed in as ${esc(roleById(s.role).name)}</span>` : ''}
+    </div>
+    <div class="muted" style="margin-top:8px">
+      Reach is the <b>union</b> across those rows: ${reach.filter(x=>x.rung>=1).length} loops audible,
+      ${reach.filter(x=>x.rung>=2).length} speakable, ${reach.filter(x=>x.rung>=3).length} controllable
+      — but only ever <b>one row at a time</b>, because a session is bound to one role.
+      ${contested ? `<b style="color:var(--warn)">${contested} loops differ depending on which role they sign into.</b>` : ''}
+    </div>`;
+  root.appendChild(hd);
+
+  const cols = el('div', 'acols');
+  for (const rung of [3,2,1,0]) {
+    const set = reach.filter(x => x.rung === rung);
+    if (!set.length) continue;
+    const c = el('div', 'acard');
+    c.appendChild(el('h4', null, `${ladder(rung)} ${rung===0?'out of reach':RUNGS[rung]}<span class="n tnum">${set.length}</span>`));
+    for (const x of set) {
+      const row = el('div', 'arow');
+      row.innerHTML = `<span class="nm">${esc(x.loop.name)}</span>
+        <span class="prov" style="flex:0 0 auto">${x.via.map((v,i) =>
+          `<span class="chip ${i===0?'win':''}" style="${i===0?`color:var(--r${v.rung}-ink)`:''}" title="${esc(roleById(v.rid).name)} → ${RUNGS[v.rung]}">${esc(roleById(v.rid).name.split(' ')[0])} ${RUNG_SHORT[v.rung]}</span>`).join('')}</span>
+        ${x.contested ? '<span class="chip" style="color:var(--warn)">differs</span>' : ''}`;
+      c.appendChild(row);
+    }
+    cols.appendChild(c);
+  }
+  root.appendChild(cols);
+}
+
+function answerRole(root, rid) {
+  const rows = rowRead(rid), r = roleById(rid);
+  const hd = el('div'); hd.style.marginBottom = '16px';
+  hd.innerHTML = `<div style="font-size:15px">
+     <b>${rows.filter(x=>x.rung>=1).length}</b> loops audible ·
+     <b>${rows.filter(x=>x.rung>=2).length}</b> speakable ·
+     <b>${rows.filter(x=>x.rung>=3).length}</b> controlled ·
+     staffs <b>${rows.filter(x=>x.staffing).length}</b>
+     <span class="muted"> — ${sessionsOfRole(rid).length} signed in, ${W.users.filter(u=>u.elig.includes(rid)).length} eligible</span></div>
+     ${rows.filter(x=>x.staffing).length === 0 && rid !== 'obs'
+       ? `<div class="impact" style="margin-top:10px"><h5>Staffs nothing</h5><span class="muted">No loop names ${esc(r.name)} as a staffing role, so nobody can force a takeover of it — ADR-0012 says this must be surfaced, not discovered.</span></div>` : ''}`;
+  root.appendChild(hd);
+  const cols = el('div', 'acols');
+  for (const rung of [3,2,1,0]) {
+    const set = rows.filter(x => x.rung === rung);
+    if (!set.length) continue;
+    const c = el('div', 'acard');
+    c.appendChild(el('h4', null, `${ladder(rung)} ${rung===0?'out of reach':RUNGS[rung]}<span class="n tnum">${set.length}</span>`));
+    for (const x of set) {
+      const row = el('div', 'arow');
+      row.innerHTML = `${occDot(x.loop.id)}<span class="nm">${esc(x.loop.name)}</span>
+        ${x.staffing ? '<span class="chip">staffs</span>' : ''}`;
+      row.style.cursor = 'pointer';
+      row.addEventListener('click', () => proposeEdit(rid, x.loop.id, x.rung === 3 ? 0 : x.rung + 1));
+      c.appendChild(row);
+    }
+    cols.appendChild(c);
+  }
+  root.appendChild(cols);
+}
+
+/* =====================================================================
+   6.  Shared surfaces — request queue, presets, blast-radius dialog
+   ===================================================================== */
+function requestSide(compact) {
+  const s = el('div', 'side');
+  s.appendChild(el('h3', null, `Access requests <span class="tnum">${W.requests.length}</span>`));
+  if (!W.requests.length) s.appendChild(el('div', 'dim', 'Queue empty.'));
+  for (const q of W.requests) {
+    const u = userById(q.user);
+    const d = el('div', 'req');
+    const ask = q.kind === 'cell'
+      ? `<b>${RUNGS[q.rung]}</b> for <b>${esc(roleById(q.role).name)}</b> on <b>${esc(loopById(q.loop).name)}</b>`
+      : `eligibility for <b>${esc(roleById(q.role).name)}</b>`;
+    d.innerHTML = `<div class="who">${esc(u.name)}</div>
+      <div class="ask">${ask}</div>
+      <div class="why">“${esc(q.why)}”</div>`;
+    const acts = el('div', 'acts');
+    const yes = el('button', 'btn primary', q.kind === 'cell' ? 'Open the cell' : 'Grant');
+    yes.addEventListener('click', () => {
+      if (q.kind === 'cell') proposeEdit(q.role, q.loop, q.rung, q);
+      else { u.elig = [...new Set([...u.elig, q.role])]; W.requests = W.requests.filter(x => x !== q); render(); }
+    });
+    const no = el('button', 'btn', 'Decline');
+    no.addEventListener('click', () => { W.requests = W.requests.filter(x => x !== q); render(); });
+    acts.appendChild(yes); acts.appendChild(no);
+    d.appendChild(acts);
+    s.appendChild(d);
+  }
+
+  s.appendChild(el('h3', null, 'Live now'));
+  const tx = W.sessions.filter(x => x.keyed);
+  const live = el('div');
+  live.innerHTML = `<div class="muted" style="margin-bottom:8px">${W.sessions.length} signed in · ${tx.length} transmitting</div>` +
+    tx.map(x => `<div class="lrow" style="padding:5px 8px;margin-bottom:3px">
+        <span class="dot tx"></span>
+        <span class="nm">${esc(userById(x.user).name)}</span>
+        <span class="via">${esc(roleById(x.role).name)} → ${[...x.arms].map(a=>esc(loopById(a).name)).join(', ')}</span>
+      </div>`).join('');
+  s.appendChild(live);
+  return s;
+}
+
+function presetPanel() {
+  const p = el('div', 'detail');
+  p.appendChild(el('h2', null, 'Role presets'));
+  p.appendChild(el('div', 'sub', 'A preset is a momentary arm-set, and it can never reach past the grid (ADR-0013). Loops outside the role’s <b>emit</b> row are shown struck through — they silently narrow at use.'));
+  for (const pr of W.presets) {
+    const g = el('div', 'group');
+    g.appendChild(el('h3', null, `${esc(roleById(pr.role).name)} · ${esc(pr.name)} <span class="dim">${pr.loops.length} loops</span>`));
+    const box = el('div', 'prov');
+    box.innerHTML = W.loops.map(l => {
+      const inSet = pr.loops.includes(l.id);
+      const may = perm(pr.role, l.id) >= 2;
+      if (!inSet) return '';
+      return `<span class="chip" style="${may ? `border-color:var(--r2-ink);color:var(--r2-ink)` : 'text-decoration:line-through;color:var(--ink-3)'}">${esc(l.name)}</span>`;
+    }).join('');
+    g.appendChild(box);
+    const excl = pr.loops.filter(lid => perm(pr.role, lid) < 2);
+    if (excl.length) g.appendChild(el('div', 'dim', `${excl.length} loop(s) excluded at use — the role has no emit there.`));
+    p.appendChild(g);
+  }
+  p.appendChild(el('div', 'sub', '<span class="dim">Personal presets are personalisation, not configuration — they are not managed here.</span>'));
+  return p;
+}
+
+function proposeEdit(rid, lid, to, req) {
+  to = Math.max(0, Math.min(3, to));
+  const from = perm(rid, lid);
+  if (from === to) return;
+  const b = blastRadius(rid, lid, from, to);
+  const r = roleById(rid), l = loopById(lid);
+
+  const commit = () => {
+    W.grid[rid][lid] = to;
+    if (to < 2) W.staffing[rid][lid] = false;
+    for (const s of sessionsOfRole(rid)) {
+      if (to < 2) { s.arms.delete(lid); if (!s.arms.size) s.keyed = false; }
+      if (to < 1) { s.subs.delete(lid); s.muted.delete(lid); }
+    }
+    if (req) W.requests = W.requests.filter(x => x !== req);
+    dlg.close(); render();
+  };
+
+  // A raise that touches nobody live commits without ceremony.
+  if (to > from && !b.ss.length) return commit();
+
+  const impacts = [];
+  if (b.cutsTx.length)  impacts.push(`<b style="color:var(--danger)">Cuts ${b.cutsTx.length} live transmission${b.cutsTx.length>1?'s':''} mid-word</b> — ${b.cutsTx.map(s=>esc(userById(s.user).name)).join(', ')}.`);
+  if (b.disarms.length) impacts.push(`Disarms ${l.name} for ${b.disarms.length} session${b.disarms.length>1?'s':''}.`);
+  if (b.dropSub.length) impacts.push(`Drops ${b.dropSub.length} subscription${b.dropSub.length>1?'s':''}; each user is told why.`);
+  if (b.wasStaffing)    impacts.push(b.occAfter === 'vacant'
+    ? `${esc(r.name)} was the last staffing role for ${esc(l.name)} — <b>the loop goes vacant</b>, and nobody is accountable for answering it.`
+    : `${esc(r.name)} stops staffing ${esc(l.name)}; ${b.otherStaffers} other staffing role${b.otherStaffers>1?'s':''} still cover${b.otherStaffers>1?'':'s'} it.`);
+  if (b.losesControl)   impacts.push(`${b.losesControl} occupant${b.losesControl>1?'s lose':' loses'} operational authority on ${esc(l.name)} — outstanding Cuts on this loop become unclearable by them.`);
+  if (to > from && b.ss.length) impacts.push(`${b.ss.length} occupant${b.ss.length>1?'s':''} gain this immediately, mid-session.`);
+
+  dlg.innerHTML = `
+    <div class="dlg-h">
+      <h3>${esc(r.name)} → ${esc(l.name)}</h3>
+      <div class="muted">${ladder(from)} <b>${RUNGS[from]}</b> &nbsp;→&nbsp; ${ladder(to)} <b>${RUNGS[to]}</b>${req?' · resolving an access request':''}</div>
+    </div>
+    <div class="dlg-b">
+      ${req ? `<div class="impact"><h5>Reason on file</h5><span class="muted">${esc(userById(req.user).name)}: “${esc(req.why)}”</span></div>` : ''}
+      ${impacts.length ? `<div class="impact ${b.severe?'severe':''}">
+          <h5>${b.severe ? 'This is felt immediately, by people mid-task' : 'What changes right now'}</h5>
+          <ul>${impacts.map(i=>`<li>${i}</li>`).join('')}</ul></div>`
+        : `<div class="muted">Nobody is signed into ${esc(r.name)}. Nothing changes until someone signs in.</div>`}
+      <div class="muted" style="margin-top:12px;font-size:12px">
+        Every occupant of ${esc(r.name)} is affected — there is no per-user exception layer (ADR-0011).
+        ${W.users.filter(u=>u.elig.includes(rid)).length} users are eligible for this role.
+      </div>
+    </div>
+    <div class="dlg-f">
+      <button class="btn" id="x">Cancel</button>
+      <button class="btn ${b.severe?'danger':'primary'}" id="ok">${b.severe ? 'Apply anyway' : 'Apply'}</button>
+    </div>`;
+  dlg.showModal();
+  dlg.querySelector('#x').onclick = () => dlg.close();
+  dlg.querySelector('#ok').onclick = commit;
+}
+
+function openRow(rid)  { S.variant='C'; S.qMode='role'; S.qRole=rid; syncUrl(); render(); }
+function openColumn(l) { S.variant='C'; S.qMode='loop'; S.qLoop=l;   syncUrl(); render(); }
+
+/* =====================================================================
+   7.  Chrome + switcher
+   ===================================================================== */
+function topbar(title, tabs) {
+  const t = el('div', 'topbar');
+  t.innerHTML = `<div class="brand">VoxLoop <span>admin console</span></div>`;
+  if (tabs) {
+    const tb = el('div', 'tabs');
+    for (const k of tabs) {
+      const b = el('button', 'tab', k[0].toUpperCase() + k.slice(1));
+      b.setAttribute('aria-selected', S.tab === k);
+      b.addEventListener('click', () => { S.tab = k; render(); });
+      tb.appendChild(b);
+    }
+    t.appendChild(tb);
+  }
+  t.appendChild(el('div', 'spacer'));
+  const tx = W.sessions.filter(s => s.keyed).length;
+  const vac = W.loops.filter(l => occupancy(l.id) === 'vacant').length;
+  t.appendChild(el('div', 'livechip', `<span class="dot"></span> ${W.sessions.length} signed in`));
+  t.appendChild(el('div', 'livechip', `<span class="dot tx"></span> ${tx} transmitting`));
+  t.appendChild(el('div', 'livechip', `${vac} loops vacant`));
+  t.appendChild(el('div', 'livechip', `${W.roles.length} × ${W.loops.length} grid`));
+  return t;
+}
+
+const VARIANTS = { A: ['A', 'The Wall', renderA], B: ['B', 'Row at a time', renderB], C: ['C', 'Question-first', renderC] };
+const SCALES = {
+  pilot:  ['Pilot — 15 × 20',   15, 20, 190],
+  loops:  ['Stress loops — 15 × 40', 15, 40, 190],
+  roles:  ['Stress roles — 50 × 20', 50, 20, 190],
+  both:   ['Stress both — 50 × 40',  50, 40, 400],
+  small:  ['Small site — 6 × 8',      6,  8,  40],
+};
+
+function renderSwitcher() {
+  const sw = document.getElementById('switcher');
+  const [k, name] = VARIANTS[S.variant];
+  sw.innerHTML = `
+    <button id="prev" title="previous variant (←)">‹</button>
+    <span class="lbl">${k} <em>— ${name}</em></span>
+    <button id="next" title="next variant (→)">›</button>
+    <span class="div"></span>
+    <select id="scale">${Object.entries(SCALES).map(([id,[lbl]]) =>
+      `<option value="${id}" ${id===S.scale?'selected':''}>${lbl}</option>`).join('')}</select>
+    <button id="theme" title="toggle theme">${S.theme === 'dark' ? '◐ dark' : '◑ light'}</button>
+    <button id="about" title="what this is">?</button>`;
+  const keys = Object.keys(VARIANTS);
+  const go = d => { S.variant = keys[(keys.indexOf(S.variant) + d + keys.length) % keys.length]; syncUrl(); render(); };
+  sw.querySelector('#prev').onclick = () => go(-1);
+  sw.querySelector('#next').onclick = () => go(1);
+  sw.querySelector('#scale').onchange = e => { S.scale = e.target.value; rebuild(); syncUrl(); render(); };
+  sw.querySelector('#theme').onclick = () => {
+    S.theme = S.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = S.theme; renderSwitcher();
+  };
+  sw.querySelector('#about').onclick = about;
+}
+
+function about() {
+  dlg.innerHTML = `
+    <div class="dlg-h"><h3>Throwaway prototype — issue #20</h3>
+      <div class="muted">Does the role × loop permission grid stay legible?</div></div>
+    <div class="dlg-b">
+      <p>Three structurally different admin consoles over the <em>same</em> in-memory world.
+      Flip with ‹ › or the ← → keys; change scale to find the break point.</p>
+      <ul class="muted">
+        <li><b>A — The Wall.</b> The matrix is the console. Every cell on screen, frozen headers,
+            crosshair, live state on the axes. Bet: density is the feature.</li>
+        <li><b>B — Row at a time.</b> Master/detail. One row (or column) read at full size with live
+            consequences beside every cell. Eligibility lives <em>inside</em> the role, not as a second matrix.</li>
+        <li><b>C — Question-first.</b> The console asks ADR-0011's two questions directly, and adds the
+            third it doesn't cover: what a <em>person</em> reaches, as a union across roles.</li>
+      </ul>
+      <p class="muted"><b>Assumptions.</b> Dark theme by default (admin console may be used mid-event in a
+      dimmed room) — toggle to check. Live sessions, subscriptions, arms and four in-flight transmissions are
+      synthetic but consistent. Editing is real but in-memory; reload resets. No backend, no persistence.</p>
+      <p class="muted"><b>Deliberately absent:</b> the operator console (#12), per-entity permissions,
+      personal presets, audit trail.</p>
+    </div>
+    <div class="dlg-f"><button class="btn primary" id="ok">Close</button></div>`;
+  dlg.showModal();
+  dlg.querySelector('#ok').onclick = () => dlg.close();
+}
+
+function syncUrl() {
+  const u = new URL(location);
+  u.searchParams.set('variant', S.variant);
+  u.searchParams.set('scale', S.scale);
+  history.replaceState(null, '', u);
+}
+
+function rebuild() {
+  const [, nRoles, nLoops, nUsers] = SCALES[S.scale];
+  Object.assign(W, buildWorld(nLoops, nRoles, nUsers));
+  if (!roleById(S.selRole)) S.selRole = W.roles[0].id;
+  if (!loopById(S.selLoop)) S.selLoop = W.loops[0].id;
+  if (!loopById(S.qLoop))   S.qLoop   = W.loops[0].id;
+  if (!roleById(S.qRole))   S.qRole   = W.roles[0].id;
+  if (!userById(S.qUser))   S.qUser   = W.users[3].id;
+}
+
+const dlg = document.getElementById('dlg');
+function render() {
+  const root = document.getElementById('app');
+  root.innerHTML = '';
+  document.querySelectorAll('.minimap').forEach(n => n.remove());
+  VARIANTS[S.variant][2](root);
+  renderSwitcher();
+}
+
+addEventListener('keydown', e => {
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+  if (dlg.open) return;
+  const keys = Object.keys(VARIANTS);
+  if (e.key === 'ArrowLeft')  { S.variant = keys[(keys.indexOf(S.variant) - 1 + keys.length) % keys.length]; syncUrl(); render(); }
+  if (e.key === 'ArrowRight') { S.variant = keys[(keys.indexOf(S.variant) + 1) % keys.length]; syncUrl(); render(); }
+  if (e.key === '?') about();
+});
+
+// boot
+{
+  const p = new URLSearchParams(location.search);
+  S.variant = VARIANTS[p.get('variant')] ? p.get('variant') : 'A';
+  S.scale = SCALES[p.get('scale')] ? p.get('scale') : 'pilot';
+  document.documentElement.dataset.theme = S.theme;
+  rebuild();
+  render();
+}
+</script>
+</body>
+</html>
