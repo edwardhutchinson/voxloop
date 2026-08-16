@@ -58,6 +58,14 @@ _Avoid_: off console (the user-facing phrasing for the action, not the state), i
 The seeded role every new user is eligible for: `monitor` on every loop present at install, `emit` on none. It is how listen-only is expressed — a role, never a property of a user.
 _Avoid_: listen-only user, guest, viewer, spectator
 
+**Reach**:
+The set of loops a role may monitor, emit to or control, read straight off that role's permissions. Reach belongs to a (user, role) pair and is never composed across the several roles a user may be eligible for — a session is bound to one role, so a person's reach is only ever one role's worth at a time.
+_Avoid_: access, scope, what someone can do, effective permissions
+
+**Unreviewed loop**:
+A loop created after install, on which system administration has not yet set or explicitly dismissed each role's permission. It exists so that a cell nobody has ruled on is distinguishable from one deliberately left at `none` — most sharply for `Observer`, which is seeded only against the loops present at install and is therefore blind to every later loop until someone says otherwise.
+_Avoid_: new loop, unconfigured loop, draft
+
 **Access request**:
 A user's ask for reach they do not hold, resolved by system administration editing configuration — a grid cell, or an eligibility grant. It never produces a per-user exception, because there are none.
 _Avoid_: permission request, escalation, override
