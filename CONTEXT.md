@@ -65,8 +65,16 @@ _Avoid_: admin, supervisor, elevated permissions
 ### Voice
 
 **Emission**:
-Sending voice to one or more loops. Emission is always to a loop, never to a user, and is either momentary (held) or latched (press to open, press to close).
+Sending voice to one or more loops. Emission is always to a loop, never to a user, and is either momentary (held) or latched (press to open, press to close). It decomposes into two acts with different enforcement — *arming* and *keying* — which must not be collapsed into one.
 _Avoid_: transmit, broadcast, push-to-talk (which names the input, not the act), talk
+
+**Arming**:
+Selecting a loop as a destination for emission. Arming says where voice *would* go; it is enforced by the server, which will not route to a loop the role lacks `send` on, so an unarmed loop is unreachable rather than merely unselected.
+_Avoid_: selecting, enabling, talk-select, opening
+
+**Keying**:
+Actually emitting on the armed loops. Keying says whether voice *is* going. It is performed by the client for latency and signalled to the server, which remains the sole authority for telling anyone else that it is happening.
+_Avoid_: push-to-talk (which names the input), transmitting, going live
 
 **Monitoring**:
 Receiving the audio of a loop. A user monitors a loop; they do not "join" it, because a loop has no membership of its own.
@@ -79,6 +87,10 @@ _Avoid_: channel selection, tuning, membership
 **Monitoring directive**:
 A live instruction issued by operational authority requiring named roles to monitor named loops. It only ever adds subscriptions, never removes them; it applies to anyone occupying a targeted role, including those who sign in after it was issued; and it remains in force until explicitly cleared.
 _Avoid_: mandatory subscription, forced listen, watch order, monitoring request
+
+**Loop health**:
+Whether a subscriber is actually receiving a loop's audio path — a third axis, distinct from whether anyone is talking on it and from whether it is `staffed`. A quiet loop and an unreachable loop sound identical, so they must never look identical.
+_Avoid_: connection status, signal strength, online
 
 **Attribution**:
 The identity carried by a transmission. Every transmission is attributed to the role its emitter is signed into, with the individual user as a secondary reference — there is no way to emit as oneself rather than as one's role.

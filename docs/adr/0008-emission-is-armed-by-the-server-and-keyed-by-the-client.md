@@ -1,0 +1,23 @@
+# Emission is armed by the server and keyed by the client
+
+Emission decomposes into two acts with different enforcement.
+
+**Arming** — selecting a loop as a destination — is enforced by the server, in the media plane. The server will not create a fan-out entry from a talker's stream to a loop whose (role, loop) pair lacks `send`. A client cannot reach an unarmed loop because the route does not exist; there is nothing to bypass.
+
+**Keying** — actually transmitting on the armed loops — is performed by the client muting its local track, and **signalled** to the server. The server, not the client, is the sole authority for what it tells everyone else: every "X is talking" indicator any operator sees is a server broadcast, corroborated against mediasoup's `AudioLevelObserver`. An operator's own transmitting lamp is lit by the server's acknowledgement coming back, never by their own button going down.
+
+**Keying server-side was considered and rejected.** Publishing and unpublishing the track on each key press would make the key as enforceable as the arm, but it puts a renegotiation on the most latency-critical action in the product. Key-to-first-audio under 100 ms is the number that makes this feel like a radio rather than a conference call ([ADR-0010](./0010-opus-mono-and-the-latency-budget.md)), and renegotiating on key would clip the first 100–300 ms of every transmission — precisely the *"Flight, CAPCOM"* that identifies the speaker.
+
+**openvocs' posture was also rejected.** [#15](https://github.com/edwardhutchinson/voxloop/issues/15) found that openvocs enforces the arm server-side but leaves the key entirely local: `switch_ptt` does not exist, the real `talking` event does nothing to the audio path, and PTT is `track.enabled = false` in the browser. Their `SECURE_VOICE_PTT` flag exists because that is uncomfortable, and it disables the mechanism rather than fixing it. The map requires that state shown always be factual, and an indicator sourced from a peer's claim is not that.
+
+**The residual risk is stated rather than left implicit.** A compromised or defective client can keep sending audio while claiming to be muted. Two things bound it: the arm boundary means such a client can only ever reach loops its role is already permitted to emit on, so it cannot manufacture reach it does not have; and `AudioLevelObserver` makes the discrepancy detectable server-side, because the server can see audio arriving from a participant who claims to be unkeyed. This is accepted for v1 and written down deliberately — [#15](https://github.com/edwardhutchinson/voxloop/issues/15) found openvocs' admin API performs no authorisation check at all while the database API beside it checks properly, which is exactly what happens to a security property nobody wrote down.
+
+**Revoking `send` mid-transmission cuts it instantly.** The server closes the fan-out entry, mid-word if necessary, tells the talker why, and tells the loop that a transmission was cut rather than ended. Letting the current transmission finish sounds humane, but it gives the administrator's silence action an unbounded and invisible delay — the opposite of what is wanted in an emergency. Telling the loop matters because a voice vanishing mid-word is otherwise indistinguishable from a fault.
+
+## Consequences
+
+- **`AudioLevelObserver` runs in v1.** It is not optional instrumentation; it is what makes the talking indicators honest and the residual above detectable.
+- **The transmitting lamp costs one round trip to light.** Audio is already flowing by then, so this is a display latency, not an audio latency — but the console must not pre-light the lamp locally to hide it, because that reintroduces exactly the misrepresentation this ADR exists to prevent.
+- **Cut transmissions are announced to the loop**, which means the signalling protocol needs a distinct event for "cut by authority" separate from "talker released the key".
+- **An administrator's silence action takes effect in the media plane**, so it is enforced identically whether the target's client is cooperative, stale or hostile.
+- **Whether the individual user or only the role can be silenced** is a permission-model question, not settled here. [ADR-0002](./0002-permissions-attach-to-role-and-loop.md) allows both a role-wide change and a user-scoped override; which one an operational silence action uses belongs to [#7](https://github.com/edwardhutchinson/voxloop/issues/7).
