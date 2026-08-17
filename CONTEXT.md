@@ -101,8 +101,12 @@ Selecting a loop as a destination for emission. Arming says where voice *would* 
 _Avoid_: selecting, enabling, talk-select, opening
 
 **Keying**:
-Actually emitting on the armed loops. Keying says whether voice *is* going. It is performed by the client for latency and signalled to the server, which remains the sole authority for telling anyone else that it is happening.
+Actually emitting on the armed loops. Keying says whether voice *is* going. It is performed by the client for latency and signalled to the server, which remains the sole authority for telling anyone else that it is happening. It is driven by the intent of the input sources, never by any one of them directly.
 _Avoid_: push-to-talk (which names the input), transmitting, going live
+
+**Input source**:
+Something a user can key with — a keyboard binding, an on-screen control, a peripheral, a native hotkey. A source reports only two things about itself, an *intent* (whether it currently wants to emit) and its *liveness* (whether it is present and working); it never knows which emission mode it is serving. Sources are additive: a user may have several, and keying follows whether any live one wants to emit.
+_Avoid_: push-to-talk button, PTT key, input device (which is the hardware, not the binding), control
 
 **Preset**:
 A named set of loops that momentarily replaces the loops a user has armed while keyed, reverting the moment they unkey. It is an ergonomic shortcut across loops the role may already emit on — never extra reach — and it narrows as readily as it widens.
