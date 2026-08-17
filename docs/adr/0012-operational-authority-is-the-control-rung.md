@@ -4,7 +4,7 @@
 
 **Scoping by loop rather than by people** is the substance of the decision. Scoping by people requires the system to answer "does this lead own that person", which churns with every shift change and every re-staffing, and has no natural home in a model where users carry nothing but eligibility. Scoping by loop needs no new concept at all — every operational action is already loop-shaped: cut an emission *on a loop*, direct monitoring *of a loop*. A shift lead is expressed as `control` on the three loops they run, which is a row in the grid an administrator can read like any other.
 
-**Forcing a takeover is the awkward case**, because it targets a *role* rather than a loop. Rather than admit a second authority axis, it is derived: you may force a takeover of a role if you hold `control` on a loop that role is a **staffing role** for. This reuses a concept that already exists for occupancy and keeps the model to one grid.
+**Forcing a takeover is the awkward case**, because it targets a *role* rather than a loop. Rather than admit a second authority axis, it is derived: you may force a takeover of a role if you hold `control` on a loop that role is a **staffing role** for. This reuses a concept that already exists for staffing state and keeps the model to one grid.
 
 ## Consequences
 

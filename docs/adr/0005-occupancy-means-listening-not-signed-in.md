@@ -1,5 +1,7 @@
 # A loop is staffed when someone is listening to it, not when someone is signed in
 
+> **Amended by [ADR-0017](./0017-loop-health-is-measured-not-asserted.md) and [ADR-0019](./0019-presence-is-one-versioned-document-scoped-to-reach.md).** The three-valued state this ADR governs is now called **staffing state**, reserving *occupancy* for roles; the filename is left alone so existing links survive. And `staffed` now means *demonstrably hearing*, not merely *subscribed* — beacon loss and an unreachable session both drop a loop to `away`, alongside off console and muted.
+
 Staffing is a flag on the (role, loop) pair — a loop may have several staffing roles or none — and a loop counts as `staffed` only when an occupant of one of those roles is **currently subscribed to it**. Being signed into a staffing role is not enough.
 
 The originating brief asks for one thing above all here: before you key up to the Support Engineers loop, you need to know whether anyone is actually behind it. Deriving that from sign-in answers a proxy question instead — someone holds the position, but may have dropped the loop from their console — and a tile that reads `staffed` when nobody will hear you is the exact misrepresentation the product cannot afford.

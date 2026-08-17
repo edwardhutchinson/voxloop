@@ -18,4 +18,4 @@ This is a conscious retreat from the brief, taken for two reasons. Mission-contr
 
 - **A determined bad actor is not stoppable by degrees.** The escalation is Cut, then force sign-out, then account lock. Anyone unhappy with that should reopen the question rather than reintroduce per-user denies quietly.
 - **Cut needs a distinct signalling event** from the target's own unkey, and from ADR-0008's revocation cut — the operator must be told which happened and why.
-- **Force sign-out has a loud side effect**: the role goes vacant and every loop it staffs changes occupancy. Correct for a last-resort action, but the console must make it obvious before the act, not after.
+- **Force sign-out has a loud side effect**: the role goes vacant and every loop it staffs changes staffing state. Correct for a last-resort action, but the console must make it obvious before the act, not after.

@@ -29,12 +29,16 @@ The limit on how many users may be signed into a role at once. Single-occupant a
 _Avoid_: cardinality, capacity, seats
 
 **Staffing role**:
-A role marked as counting toward a particular loop's occupancy. It is set per (role, loop), so a loop may have several staffing roles or none, and it can only be set where the role may emit on that loop — a role that cannot answer cannot staff.
+A role marked as counting toward a particular loop's staffing state. It is set per (role, loop), so a loop may have several staffing roles or none, and it can only be set where the role may emit on that loop — a role that cannot answer cannot staff.
 _Avoid_: owner, host, primary role
 
-**Occupancy**:
-Whether anyone is behind a loop: `staffed` (an occupant of one of its staffing roles is subscribed to it, available, and not muting it), `away` (such occupants exist but all have declared themselves off console or muted the loop) or `vacant` (neither). Occupancy asks who is actually hearing the loop, not who is merely signed in.
-_Avoid_: online/offline, presence, availability
+**Occupant**:
+A user currently signed into a role. Roles have occupants; loops have a staffing state — the two must not be run together.
+_Avoid_: member, holder, incumbent
+
+**Staffing state**:
+Whether anyone is behind a loop: `staffed` (an occupant of one of its staffing roles is demonstrably hearing it), `away` (such occupants exist but none is hearing it) or `vacant` (neither). It asks who is actually hearing the loop, not who is merely signed in, and it always carries the reason when `away`.
+_Avoid_: occupancy (which belongs to roles), online/offline, presence, availability
 
 **Session**:
 A user's single live connection, bound to exactly one role. A user has at most one at a time; signing in elsewhere ends the previous session and tells it why.
@@ -49,8 +53,12 @@ A notification sent to the occupant of a single-occupant role by an eligible use
 _Avoid_: handover, kick, steal
 
 **Away**:
-The occupancy state of a loop whose staffing-role occupants have all declared themselves off console or muted it — materially different from `vacant`, where nobody is signed in at all.
-_Avoid_: off console (the user-facing phrasing for the action, not the state), idle, AFK
+The staffing state of a loop whose staffing-role occupants exist but none is hearing it — because they are off console, have muted it, are unreachable, or are not receiving its beacon. Materially different from `vacant`, where nobody is signed in at all.
+_Avoid_: idle, AFK, unavailable
+
+**Off console**:
+A user's assertion that they have stepped away. It drops the staffing state of the loops they staff to `away` and changes nothing else — subscriptions stand and audio keeps flowing. It is never inferred, and only keying clears it.
+_Avoid_: away (which is the resulting loop state, not the act), idle, AFK, break
 
 ### Authority
 
@@ -112,10 +120,6 @@ _Avoid_: channel selection, tuning, membership
 A live instruction issued by operational authority requiring named roles to monitor named loops. It only ever adds subscriptions, never removes them; it applies to anyone occupying a targeted role, including those who sign in after it was issued; and it remains in force until explicitly cleared.
 _Avoid_: mandatory subscription, forced listen, watch order, monitoring request
 
-**Loop health**:
-Whether a subscriber is actually receiving a loop's audio path — a third axis, distinct from whether anyone is talking on it and from whether it is `staffed`. A quiet loop and an unreachable loop sound identical, so they must never look identical.
-_Avoid_: connection status, signal strength, online
-
 **Mute**:
 A user silencing a loop in their own ears, affecting nobody else. It is a personalisation, not a permission and not an unsubscribe — the subscription stands, so loop health and talking indicators keep arriving. Muting a loop one staffs drops it to `away`, because a loop nobody can hear is not staffed.
 _Avoid_: silence, deafen, pause, unsubscribe
@@ -127,3 +131,33 @@ _Avoid_: mute (which is the personal act), kick, silence, gag
 **Attribution**:
 The identity carried by a transmission. Every transmission is attributed to the role its emitter is signed into, with the individual user as a secondary reference — there is no way to emit as oneself rather than as one's role.
 _Avoid_: talker identity, speaker name, caller ID
+
+### State
+
+**Observed state**:
+A fact the server has seen for itself — a transport connected, a producer sending, a subscription held, an arm set. It is true as of the version it was published in.
+_Avoid_: known state, verified state, real state
+
+**Asserted state**:
+A claim a user has made about themselves, of which there is exactly one: off console. It is only ever as true as the moment it was asserted, so it is always shown alongside how long ago the claimant last did anything deliberate. It is never inferred and never rendered like observed state.
+_Avoid_: reported state, self-reported, declared status
+
+**Presence document**:
+The single versioned document, one per session, carrying every state that session may see. It is pushed by the server and rendered atomically, so what is on screen was simultaneously true; it is scoped to the loops the session's role may monitor.
+_Avoid_: state feed, snapshot, sync payload
+
+**Connection state**:
+A session's standing with the signalling channel: `confirmed`, `unconfirmed` (heartbeats missed, displayed state frozen and marked stale, emission still permitted) or `disconnected` (emission withdrawn at both ends). It describes the state channel, never the audio path.
+_Avoid_: online/offline, connectivity, network status
+
+**Loop health**:
+Whether a session is actually receiving a loop, measured from the arrival of that loop's beacon — a third axis, distinct from whether anyone is talking on it and from its staffing state. It is per (session, loop), so two subscribers may correctly disagree. A quiet loop and an unreachable loop sound identical, so they must never look identical.
+_Avoid_: connection status, signal strength, online
+
+**Loop beacon**:
+A silent low-rate stream the server emits on every loop, counted by each subscriber, whose arrival is what loop health is measured from. It proves the loop reaches a session; it does not prove any particular talker would be heard.
+_Avoid_: keepalive, heartbeat (which is the signalling channel's), ping, tone
+
+**Audience**:
+The set of people who would actually hear a given emission, resolved per (role, user) into hearing, present but not hearing, and not subscribed. It is shown before keying, not only during, and it is computed rather than stored.
+_Avoid_: listeners, subscribers (which is who chose to listen, not who will hear), recipients
