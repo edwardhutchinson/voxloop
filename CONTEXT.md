@@ -7,25 +7,59 @@ A software voice loop system for operations centres: people listen to and speak 
 ### Core entities
 
 **User**:
-An account belonging to a person. A user is never a destination for voice and never carries operational permissions of their own — both attach to the role they are signed into.
+An account belonging to a person. A user is never a destination for voice and never carries operational permissions of their own — both attach to the role they have assumed.
 _Avoid_: entity, account, operator, client
 
 **Role**:
-A staffable position that users sign into, such as `Flight Director` or `Support Engineer`. It is the carrier of permissions and console layout, and it is a slot users step into — not a group of users.
+A staffable position that users assume, such as `Flight Director` or `Support Engineer`. It is the carrier of permissions and console layout, and it is a slot users step into — not a group of users.
 _Avoid_: position, station, group, team, entity
 
 **Loop**:
 An audio conference: a many-to-many bus that can be monitored and emitted to. A loop is never a person and never a role, and it is the only thing voice can be addressed to.
 _Avoid_: channel, group, conference, net, entity
 
+### Identity
+
+**Principal**:
+Anything that authenticates to VoxLoop. There are exactly two kinds — a user, who is a person, and a service principal, which is not. Everything downstream of authentication deals in principals, never in how one proved itself.
+_Avoid_: identity, actor, client, caller
+
+**Service principal**:
+A non-human principal, such as a text-to-speech service, holding a long-lived administered token and bound to a role. The binding gives it that role's reach and its attribution, but never occupancy — a loop is not staffed because a service can speak on it.
+_Avoid_: service account, bot, robot user, integration user
+
+**Sign in**:
+Authenticating to VoxLoop as a whole, by presenting credentials as a principal. It is the outermost act — it establishes who you are and nothing else, conferring no role, no reach and no audio. Signing out ends it.
+_Avoid_: log in (a plain synonym, not a distinct act), assume (which is the separate act of taking a role), authenticate
+
+**Lobby**:
+The state of a signed-in user who has not assumed a role: no session, no audio, no authority, read-only. It shows the roles that user is eligible for, who occupies them, and the staffing state of the loops those roles staff — enough to answer *should I assume a role, and which?* and deliberately nothing more.
+_Avoid_: home, dashboard, waiting room, idle, lounge
+
+**Enrolment code**:
+A single-use code issued by system administration by which a user sets their own password. It is the only way a password is ever set or reset, because VoxLoop has no mail path to send a link down, and it is handed over out of band.
+_Avoid_: invite, invitation link, reset link, activation token
+
+**External identity**:
+The durable pair of issuer and subject naming a user in a customer's identity provider, stored against the user record and linked only by an explicit administrative act. An email address is never one, and never stands in for one.
+_Avoid_: SSO identity, federated id, email, subject
+
+**Audit log**:
+The append-only record of authentication events, configuration changes and operational authority acts — decisions about the system, never the traffic through it. Who talked, and when, is not in it.
+_Avoid_: activity log, event log, history, journal
+
 ### Occupancy
 
-**Sign-in**:
-The explicit act by which a user takes up a role, making the role occupied. Occupancy is only ever established this way — never inferred from membership or presence.
-_Avoid_: log in (which is authentication, a separate act), check in
+**Assume**:
+The explicit act by which a signed-in user takes up a role, making the role occupied and creating their session. Occupancy is only ever established this way — never inferred from membership or presence, and never from being signed in.
+_Avoid_: sign in (which is authentication to the application), log in, check in, claim
+
+**Relinquish**:
+Giving up an assumed role, ending the session and returning the user to the lobby. It is a full stop rather than a transition: audio ceases, subscriptions and arms are gone, and staffed loops drop — so changing role is a relinquish followed by an assume, and is never presented as seamless.
+_Avoid_: sign out (which ends the whole authenticated state), release, drop, switch
 
 **Max occupants**:
-The limit on how many users may be signed into a role at once. Single-occupant and multi-occupant roles are the same concept under different limits, not different kinds of thing.
+The limit on how many users may occupy a role at once. Single-occupant and multi-occupant roles are the same concept under different limits, not different kinds of thing.
 _Avoid_: cardinality, capacity, seats
 
 **Staffing role**:
@@ -33,27 +67,27 @@ A role marked as counting toward a particular loop's staffing state. It is set p
 _Avoid_: owner, host, primary role
 
 **Occupant**:
-A user currently signed into a role. Roles have occupants; loops have a staffing state — the two must not be run together.
+A user who has assumed a role and not yet relinquished it. Roles have occupants; loops have a staffing state — the two must not be run together.
 _Avoid_: member, holder, incumbent
 
 **Staffing state**:
-Whether anyone is behind a loop: `staffed` (an occupant of one of its staffing roles is demonstrably hearing it), `away` (such occupants exist but none is hearing it) or `vacant` (neither). It asks who is actually hearing the loop, not who is merely signed in, and it always carries the reason when `away`.
+Whether anyone is behind a loop: `staffed` (an occupant of one of its staffing roles is demonstrably hearing it), `away` (such occupants exist but none is hearing it) or `vacant` (neither). It asks who is actually hearing the loop, not who has merely assumed a staffing role, and it always carries the reason when `away`.
 _Avoid_: occupancy (which belongs to roles), online/offline, presence, availability
 
 **Session**:
-A user's single live connection, bound to exactly one role. A user has at most one at a time; signing in elsewhere ends the previous session and tells it why.
-_Avoid_: connection, client, device, login
+A user's single live connection to the voice loops, created by assuming a role and bound to exactly one. A user has at most one at a time, though they may be signed in on several machines; assuming a role elsewhere ends the previous session and tells it why. Losing the signalling channel does not end it.
+_Avoid_: connection, client, device, login, sign-in (which is the outer act and outlives every session)
 
 **Eligibility**:
-The unconditional grant permitting a user to sign into a role. It carries no permissions of its own and no conditions; revoking it while the user is signed in ends their occupancy immediately, with the reason shown to them.
+The unconditional grant permitting a user to assume a role. It carries no permissions of its own and no conditions; revoking it while the user occupies the role ends their occupancy immediately, returning them to the lobby, with the reason shown to them.
 _Avoid_: assignment, membership, entitlement
 
 **Takeover request**:
-A notification sent to the occupant of a single-occupant role by an eligible user who wants it. Sign-in to an occupied single-occupant role is always refused rather than granted silently, so a takeover only ever happens by the incumbent's consent or by operational authority.
+A notification sent to the occupant of a single-occupant role by an eligible user who wants it. Assuming an occupied single-occupant role is always refused rather than granted silently, so a takeover only ever happens by the incumbent's consent or by operational authority.
 _Avoid_: handover, kick, steal
 
 **Away**:
-The staffing state of a loop whose staffing-role occupants exist but none is hearing it — because they are off console, have muted it, are unreachable, or are not receiving its beacon. Materially different from `vacant`, where nobody is signed in at all.
+The staffing state of a loop whose staffing-role occupants exist but none is hearing it — because they are off console, have muted it, are unreachable, or are not receiving its beacon. Materially different from `vacant`, where nobody occupies a staffing role at all.
 _Avoid_: idle, AFK, unavailable
 
 **Off console**:
@@ -121,7 +155,7 @@ The live choice to monitor a particular loop, held per session. Distinct from pe
 _Avoid_: channel selection, tuning, membership
 
 **Monitoring directive**:
-A live instruction issued by operational authority requiring named roles to monitor named loops. It only ever adds subscriptions, never removes them; it applies to anyone occupying a targeted role, including those who sign in after it was issued; and it remains in force until explicitly cleared.
+A live instruction issued by operational authority requiring named roles to monitor named loops. It only ever adds subscriptions, never removes them; it applies to anyone occupying a targeted role, including those who assume it after it was issued; and it remains in force until explicitly cleared.
 _Avoid_: mandatory subscription, forced listen, watch order, monitoring request
 
 **Mute**:
@@ -133,7 +167,7 @@ An operational authority holder stopping another user's emission, latched until 
 _Avoid_: mute (which is the personal act), kick, silence, gag
 
 **Attribution**:
-The identity carried by a transmission. Every transmission is attributed to the role its emitter is signed into, with the individual user as a secondary reference — there is no way to emit as oneself rather than as one's role.
+The identity carried by a transmission. Every transmission is attributed to the role its emitter has assumed, with the individual user as a secondary reference — there is no way to emit as oneself rather than as one's role.
 _Avoid_: talker identity, speaker name, caller ID
 
 ### State
