@@ -127,7 +127,7 @@ _Avoid_: admin, supervisor, elevated permissions
 ### Voice
 
 **Emission**:
-Sending voice to one or more loops. Emission is always to a loop, never to a user, and is either momentary (held) or latched (press to open, press to close). It decomposes into two acts with different enforcement — *arming* and *keying* — which must not be collapsed into one.
+Sending voice to one or more loops. Emission is always to a loop, never to a user, and a user's emission is either momentary (held) or latched (press to open, press to close). It decomposes into two acts with different enforcement — *arming* and *keying* — which must not be collapsed into one.
 _Avoid_: transmit, broadcast, push-to-talk (which names the input, not the act), talk
 
 **Arming**:
@@ -167,8 +167,16 @@ An operational authority holder stopping another user's emission, latched until 
 _Avoid_: mute (which is the personal act), kick, silence, gag
 
 **Attribution**:
-The identity carried by a transmission. Every transmission is attributed to the role its emitter has assumed, with the individual user as a secondary reference — there is no way to emit as oneself rather than as one's role.
+The identity carried by a transmission. Every transmission is attributed to the role its emitter has assumed — or, for a service principal, the role it is bound to — with the individual user as a secondary reference. There is no way to emit as oneself rather than as one's role.
 _Avoid_: talker identity, speaker name, caller ID
+
+**Announcement**:
+A synthesised transmission emitted by a service principal on loops its bound role may emit to, heard by whoever is subscribed and not muted. It is an ordinary transmission in every respect — it overrides nothing, and it runs for the length of its audio rather than being held or latched.
+_Avoid_: broadcast (retired in favour of *preset*), notification (which is sent to a person, not a loop), alert, injection, message
+
+**Pronunciation dictionary**:
+The deployment's single list of literal replacements applied to an announcement's text before it is spoken, so that the site's own acronyms are read aloud correctly. It is configuration, held once for the whole deployment, and it applies to the attributed role's name as readily as to the caller's words.
+_Avoid_: lexicon, phonetic overrides, word list
 
 ### State
 
