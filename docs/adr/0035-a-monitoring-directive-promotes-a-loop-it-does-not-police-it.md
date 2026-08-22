@@ -1,0 +1,17 @@
+# A monitoring directive promotes a loop; it does not police it
+
+> **Amends [ADR-0004](./0004-monitoring-directives-are-enforced-and-additive.md)**, which made directed subscriptions undroppable. They are droppable.
+
+A monitoring directive adds the named loops to the consoles of everyone occupying the named roles, marked as directed and with the reason shown. From that moment the subscription is an ordinary one: the operator may drop it, mute it, or reorder it like any other. The directive's job is to *put the loop in front of them*; what they do about it is theirs.
+
+ADR-0004 chose enforcement on the grounds that a request which can be declined does not deliver certainty during a critical pass. That certainty turns out to be unavailable at any price — an operator who cannot drop a directed loop can still mute it, turn it to zero, or walk away from the console, and the directive would report success in all three cases. Enforcement bought the *appearance* of a guarantee, and paid for it by taking control of an operator's own console away during the busiest moment of their shift.
+
+**A directive applies once per session**: at the moment it is issued to whoever is occupying the role then, and at the moment of assuming the role for anyone who arrives later while it stands. Dismissal is therefore session-scoped — an operator who drops a directed loop, relinquishes and assumes again is offered it again. This keeps ADR-0004's genuine insight, that a directive must not fail quietly for late arrivals, without the policing.
+
+## Consequences
+
+- **Nothing in VoxLoop makes a subscription undroppable any more.** [ADR-0005](./0005-occupancy-means-listening-not-signed-in.md) named the monitoring directive as the tool for cases where staffing genuinely must not be dropped; there is now no such tool, and if one is ever needed it must be designed rather than assumed to exist.
+- **The issuer is not told a directive was dismissed**, and v1 adds no uptake reporting. The feedback already exists where it is actionable: the issuer is the person about to speak on that loop, and the transmit bar tells them `2 hearing, 4 present, not hearing` before they key ([ADR-0034](./0034-the-transmit-bar-is-always-visible-and-the-audience-is-a-count.md)). A directive-uptake dashboard would be a second surface answering a question the transmit bar answers better and later.
+- **Operational authority can compel a subscription and cannot compel hearing.** This was always true via mute — the same shape as an announcement being defeated by mute ([ADR-0029](./0029-an-announcement-is-an-ordinary-transmission.md)) — and is now stated rather than implied.
+- **ADR-0004's additive-only rule is untouched and remains load-bearing.** A directive still only ever adds; the exclusive form, where the directed set replaces an operator's subscriptions, stays rejected for the original reason.
+- **Acknowledgement as a read receipt is retired with the enforcement.** A loop that appears marked and explained needs no separate confirmation that the operator saw their console change.

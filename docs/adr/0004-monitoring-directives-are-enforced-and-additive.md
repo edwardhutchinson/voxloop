@@ -1,5 +1,7 @@
 # Monitoring directives are enforced, and additive only
 
+> ⚠️ **Amended by [ADR-0035](./0035-a-monitoring-directive-promotes-a-loop-it-does-not-police-it.md).** The enforcement below is retired: a directed subscription is **droppable**, and the acknowledgement read receipt goes with it. A directive now *promotes* a loop rather than policing it. The additive-only rule, and the requirement that directives target roles so they bind late arrivals, both survive intact — read this ADR for those, not for enforcement.
+
 An operational authority holder can require named roles to monitor named loops — before a critical pass, say — and the operators subscribed by it cannot drop those loops while the directive is in force. Acknowledgement is a read receipt confirming the operator has seen that their console changed, not consent that could be withheld.
 
 An advisory version was considered and rejected: if the point is to be sure everyone is listening to the right thing during a critical operation, a request that can be declined does not deliver it, and the admin discovers the decline at the worst possible moment.
@@ -10,4 +12,4 @@ Enforcement is only safe because directives are **additive**. Adding a loop to a
 
 - A directive targets roles, not users, so it binds whoever occupies them, including operators who sign in after it was issued. Anything else fails quietly for late arrivals.
 - Directives do not auto-expire; one timing out mid-pass would be a hazard. They stay in force until a holder of operational authority clears them.
-- Operators get more in their ears at the busiest moment and cannot shed it. Directed loops must therefore be visibly marked as directed, so nobody mistakes them for their own choice.
+- Operators get more in their ears at the busiest moment. Directed loops must therefore be visibly marked as directed, and carry the reason, so nobody mistakes them for their own choice. *(They can shed it — see [ADR-0035](./0035-a-monitoring-directive-promotes-a-loop-it-does-not-police-it.md); this consequence originally read "and cannot shed it".)*

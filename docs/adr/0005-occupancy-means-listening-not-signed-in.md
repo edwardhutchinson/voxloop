@@ -14,4 +14,4 @@ Two constraints keep the signal honest:
 ## Consequences
 
 - One operator tidying their console can make a loop read `vacant` for everyone else. That is correct, but it should not be an invisible side effect — dropping a loop you staff should tell you so as you do it.
-- Where staffing genuinely must not be droppable, the tool is a [monitoring directive](./0004-monitoring-directives-are-enforced-and-additive.md), which is a deliberate act by operational authority rather than a permanent configuration setting.
+- ⚠️ **Where staffing genuinely must not be droppable, there is no tool.** This originally named the [monitoring directive](./0004-monitoring-directives-are-enforced-and-additive.md) as that tool, but [ADR-0035](./0035-a-monitoring-directive-promotes-a-loop-it-does-not-police-it.md) made directed subscriptions droppable. Nothing in VoxLoop now compels a subscription to be kept, and if that is ever genuinely needed it has to be designed.

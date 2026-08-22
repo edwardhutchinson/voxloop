@@ -91,7 +91,7 @@ The staffing state of a loop whose staffing-role occupants exist but none is hea
 _Avoid_: idle, AFK, unavailable
 
 **Off console**:
-A user's assertion that they have stepped away. It drops the staffing state of the loops they staff to `away` and changes nothing else — subscriptions stand and audio keeps flowing. It is never inferred, and only keying clears it.
+A user's assertion that they have stepped away. It drops the staffing state of the loops they staff to `away` and changes nothing else — subscriptions stand and audio keeps flowing. It is never inferred — not from idleness, focus or mouse movement — and it is cleared only by a deliberate act, either keying or clearing the assertion explicitly.
 _Avoid_: away (which is the resulting loop state, not the act), idle, AFK, break
 
 ### Authority
@@ -155,8 +155,12 @@ The live choice to monitor a particular loop, held per session. Distinct from pe
 _Avoid_: channel selection, tuning, membership
 
 **Monitoring directive**:
-A live instruction issued by operational authority requiring named roles to monitor named loops. It only ever adds subscriptions, never removes them; it applies to anyone occupying a targeted role, including those who assume it after it was issued; and it remains in force until explicitly cleared.
+A live instruction issued by operational authority that puts named loops on the consoles of everyone occupying named roles. It only ever adds subscriptions, never removes them, and it applies once per session — when issued, and again to anyone who assumes a targeted role while it stands. It promotes a loop rather than policing it: once added, the subscription is an ordinary one the operator may drop, mute or reorder.
 _Avoid_: mandatory subscription, forced listen, watch order, monitoring request
+
+**Directed subscription**:
+A subscription a monitoring directive added rather than the operator choosing it. It is marked as directed and carries the reason, and it is droppable like any other — the marking exists so nobody mistakes it for their own choice, not to stop them dismissing it.
+_Avoid_: forced subscription, mandatory loop, pinned loop
 
 **Mute**:
 A user silencing a loop in their own ears, affecting nobody else. It is a personalisation, not a permission and not an unsubscribe — the subscription stands, so loop health and talking indicators keep arriving. Muting a loop one staffs drops it to `away`, because a loop nobody can hear is not staffed.
@@ -167,7 +171,7 @@ An operational authority holder stopping another user's emission, latched until 
 _Avoid_: mute (which is the personal act), kick, silence, gag
 
 **Attribution**:
-The identity carried by a transmission. Every transmission is attributed to the role its emitter has assumed — or, for a service principal, the role it is bound to — with the individual user as a secondary reference. There is no way to emit as oneself rather than as one's role.
+The identity carried by a transmission. Every transmission is attributed to the role its emitter has assumed — or, for a service principal, the role it is bound to — with the individual user as a secondary reference. There is no way to emit as oneself rather than as one's role. It is carried by the model and read by recording; the operator console never renders it, showing only that a loop is being spoken on.
 _Avoid_: talker identity, speaker name, caller ID
 
 **Announcement**:
@@ -205,5 +209,19 @@ A silent low-rate stream the server emits on every loop, counted by each subscri
 _Avoid_: keepalive, heartbeat (which is the signalling channel's), ping, tone
 
 **Audience**:
-The set of people who would actually hear a given emission, resolved per (role, user) into hearing, present but not hearing, and not subscribed. It is shown before keying, not only during, and it is computed rather than stored.
+The set of people who would actually hear a given emission, resolved per (role, user) into hearing, present but not hearing, and not subscribed. It is computed rather than stored, and it is shown before keying, not only during — as two counts rather than names, the third bucket being computed and deliberately not displayed.
 _Avoid_: listeners, subscribers (which is who chose to listen, not who will hear), recipients
+
+### Console
+
+**Board**:
+The console view showing one card per loop in reach. It is the glanceable view: a card carries the loop's staffing state as a word, not a sentence, and clicking its body toggles monitoring.
+_Avoid_: grid (which is the admin console's role × loop matrix), tiles, dashboard
+
+**Ledger**:
+The console view showing one compact table row per loop in reach. It is the reading view, and it is where state too long for a card lives — the staffing reason above all. It holds the same loops in the same order as the board.
+_Avoid_: list, table, detail view
+
+**Transmit bar**:
+The strip present in both console views carrying the armed set in words, the audience counts and the key state. It answers *who am I about to talk to*, so it is never scrolled away and never worded differently between the views.
+_Avoid_: status bar, toolbar, PTT bar
