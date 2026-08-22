@@ -1,0 +1,1105 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoxLoop operator console — prototype</title>
+<!--
+  THROWAWAY PROTOTYPE — issue #12 on edwardhutchinson/voxloop.
+  Question: what does the operator console look like? Does the loop model and the
+  presence model (ADR-0013 arm-independent-of-subscription, ADR-0016 observed vs
+  asserted, ADR-0017 loop health, ADR-0019 one versioned document) survive contact
+  with a screen at pilot scale (~20 loops in reach)?
+
+  Three variants, switchable via ?variant=A|B|C and the floating bar at the bottom.
+  They disagree structurally about what the console IS:
+
+    A  The Board        - the brief's imagined grid. One tile per loop, every state
+                          dimension on the tile. Density is the feature.
+    B  Hearing/Speaking - split by ACT, not by loop. Two columns, and a loop may sit
+                          in both. The arm set is never off screen.
+    C  Ledger + Transmit- refuses the grid. One dominant transmit panel over a dense
+                          compact ledger. Telemetry-adjacent, minimal motion.
+
+  All state is in memory. Nothing persists. No backend, no audio. Assumptions and
+  known cheats are in the About panel (press ?).
+
+  Keying: hold ` for momentary, Shift+` toggles latch, or use the on-screen key.
+  Both are input sources per ADR-0021 and both report level + liveness.
+-->
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #151a21;
+    --panel-2: #1b212a;
+    --panel-3: #212936;
+    --line: #262e39;
+    --line-soft: #1e252e;
+    --ink: #dfe5ec;
+    --ink-2: #9aa6b4;
+    --ink-3: #6b7887;
+    --accent: #6ea8fe;
+
+    /* permission rungs, matching the admin prototype */
+    --r1-ink: #7fc2e8;   /* monitor */
+    --r2-ink: #a8d16a;   /* emit    */
+    --r3-ink: #f0b45f;   /* control */
+
+    /* staffing state - the "is anyone behind this loop" axis */
+    --staffed: #57c785;
+    --away: #e8b04b;
+    --vacant: #7b8798;
+
+    --warn: #e8b04b;
+    --danger: #e8685d;
+    --tx: #e8685d;          /* someone is emitting */
+    --me-tx: #ff7a6e;       /* I am emitting */
+    --armed: #ffa94d;       /* armed, not keyed */
+    --stale: #b07fd4;
+
+    --radius: 6px;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  }
+  :root[data-theme="light"] {
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --panel-2: #eef1f5;
+    --panel-3: #e4e9f0;
+    --line: #d3d9e0;
+    --line-soft: #e4e8ed;
+    --ink: #1d242c;
+    --ink-2: #5c6773;
+    --ink-3: #8d99a6;
+    --accent: #2d6cdf;
+    --r1-ink: #1b6b9c;
+    --r2-ink: #4d7a17;
+    --r3-ink: #9a5f0a;
+    --staffed: #2e8b57;
+    --away: #b8791a;
+    --vacant: #8d99a6;
+    --warn: #b8791a;
+    --danger: #c33d31;
+    --tx: #c33d31;
+    --me-tx: #b8322a;
+    --armed: #b86a12;
+    --stale: #7a4fa8;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  h1,h2,h3 { margin: 0; font-weight: 600; }
+
+  /* ---------- shared chrome ---------- */
+  .topbar {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 14px;
+    padding: 0 14px; height: 46px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { font-weight: 700; letter-spacing: .12em; font-size: 11px; color: var(--ink-3); }
+  .role-badge {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 4px 10px; border-radius: var(--radius);
+    background: var(--panel-2); border: 1px solid var(--line);
+  }
+  .role-badge b { font-size: 13px; }
+  .role-badge span { font-size: 11px; color: var(--ink-2); }
+  .spacer { flex: 1; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 9px; border-radius: 999px;
+    font-size: 11px; border: 1px solid var(--line); background: var(--panel-2);
+    color: var(--ink-2);
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); flex: 0 0 auto; }
+  .pill.ok .dot { background: var(--staffed); }
+  .pill.warn { color: var(--stale); border-color: var(--stale); }
+  .pill.warn .dot { background: var(--stale); }
+  .pill.bad { color: var(--danger); border-color: var(--danger); }
+  .pill.bad .dot { background: var(--danger); }
+
+  .btn {
+    padding: 4px 10px; border-radius: var(--radius);
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--ink-2);
+  }
+  .btn:hover { background: var(--panel-3); color: var(--ink); }
+  .btn.on { background: var(--warn); border-color: var(--warn); color: #16191d; font-weight: 600; }
+  .btn.danger { border-color: var(--danger); color: var(--danger); }
+
+  /* banners: the console freezes and stale-marks rather than blanking (ADR-0019) */
+  .banner {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 14px; font-size: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .banner.stale { background: color-mix(in srgb, var(--stale) 16%, var(--bg)); color: var(--stale); }
+  .banner.cut   { background: color-mix(in srgb, var(--danger) 18%, var(--bg)); color: var(--danger); }
+  .banner.latch { background: color-mix(in srgb, var(--me-tx) 22%, var(--bg)); color: var(--me-tx); font-weight: 600; }
+  .banner.offc  { background: color-mix(in srgb, var(--away) 14%, var(--bg)); color: var(--away); }
+
+  main { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+
+  /* stale freeze - displayed state is frozen, not blanked */
+  body.is-stale main { filter: saturate(.45); }
+
+  .mono { font-family: var(--mono); font-size: 11px; }
+  .muted-txt { color: var(--ink-3); }
+  .sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
+
+  /* rung glyphs */
+  .rung { font-family: var(--mono); font-size: 10px; letter-spacing: .06em; }
+  .rung.monitor { color: var(--r1-ink); }
+  .rung.emit    { color: var(--r2-ink); }
+  .rung.control { color: var(--r3-ink); }
+
+  /* staffing pips */
+  .staffing { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; }
+  .staffing .sq { width: 8px; height: 8px; border-radius: 2px; }
+  .staffing.staffed { color: var(--staffed); } .staffing.staffed .sq { background: var(--staffed); }
+  .staffing.away    { color: var(--away); }    .staffing.away .sq    { background: var(--away); }
+  .staffing.vacant  { color: var(--vacant); }  .staffing.vacant .sq  { background: transparent; border: 1px solid var(--vacant); }
+
+  /* health: a quiet loop and an unreachable loop must never look identical */
+  .health-bad { color: var(--danger); font-weight: 600; }
+
+  /* ===================== VARIANT A - The Board ===================== */
+  #vA { height: 100%; display: flex; flex-direction: column; }
+  #vA .board {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    padding: 12px;
+    display: grid; gap: 8px;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    align-content: start;
+  }
+  .tile {
+    position: relative;
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--panel); padding: 8px 9px 8px 12px;
+    min-height: 96px; display: flex; flex-direction: column; gap: 5px;
+  }
+  .tile::before {
+    content:""; position:absolute; left:0; top:0; bottom:0; width:4px;
+    border-radius: var(--radius) 0 0 var(--radius); background: var(--vacant);
+  }
+  .tile.st-staffed::before { background: var(--staffed); }
+  .tile.st-away::before    { background: var(--away); }
+  .tile.sub  { background: var(--panel-2); }
+  .tile.armed { border-color: var(--armed); }
+  .tile.tx    { border-color: var(--tx); background: color-mix(in srgb, var(--tx) 12%, var(--panel-2)); }
+  .tile.metx  { border-color: var(--me-tx); background: color-mix(in srgb, var(--me-tx) 22%, var(--panel-2)); }
+  .tile.unreachable { border-style: dashed; border-color: var(--danger); }
+  .tile-head { display: flex; align-items: baseline; gap: 6px; }
+  .tile-name { font-weight: 600; font-size: 12.5px; flex: 1; }
+  .tile-talkers { font-size: 11px; color: var(--tx); min-height: 15px; }
+  .tile-talkers.none { color: var(--ink-3); }
+  .tile-foot { margin-top: auto; display: flex; align-items: center; gap: 5px; }
+  .mini {
+    font-size: 10px; padding: 2px 6px; border-radius: 3px;
+    border: 1px solid var(--line); background: transparent; color: var(--ink-3);
+  }
+  .mini.on { background: var(--accent); border-color: var(--accent); color: #0d1117; font-weight: 700; }
+  .mini.arm.on { background: var(--armed); border-color: var(--armed); }
+  .mini.mute.on { background: var(--away); border-color: var(--away); }
+  .mini:disabled { opacity: .3; cursor: not-allowed; }
+  .vol { width: 46px; accent-color: var(--ink-3); }
+
+  /* ===================== VARIANT B - Hearing / Speaking ===================== */
+  #vB { height: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+  #vB .col { min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  #vB .col + .col { border-left: 1px solid var(--line); }
+  .col-head {
+    flex: 0 0 auto; padding: 8px 14px; background: var(--panel);
+    border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 8px;
+  }
+  .col-head h2 { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; }
+  .col-head .count { font-size: 11px; color: var(--ink-3); }
+  .col-body { flex: 1 1 auto; overflow-y: auto; padding: 8px 10px; }
+  .hrow {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 8px; border-radius: var(--radius);
+    border: 1px solid transparent; background: var(--panel);
+    margin-bottom: 5px;
+  }
+  .hrow.tx { background: color-mix(in srgb, var(--tx) 13%, var(--panel)); }
+  .hrow.bad { border-color: var(--danger); }
+  .hrow .nm { flex: 1; font-weight: 600; font-size: 12.5px; }
+  .hrow .who { font-size: 11px; color: var(--tx); }
+  .tray { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
+  .tray h3 { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 6px; }
+  .chipset { display: flex; flex-wrap: wrap; gap: 5px; }
+  .chip {
+    font-size: 11px; padding: 3px 8px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--ink-2);
+  }
+  .chip:hover { border-color: var(--accent); color: var(--ink); }
+  .chip.big { font-size: 13px; font-weight: 600; padding: 5px 12px; border-radius: var(--radius); }
+  .chip.armchip { border-color: var(--armed); color: var(--armed); background: color-mix(in srgb, var(--armed) 14%, var(--panel)); }
+  .say-it {
+    font-size: 15px; font-weight: 600; line-height: 1.5;
+    padding: 10px 12px; border-radius: var(--radius);
+    border: 1px solid var(--armed); background: color-mix(in srgb, var(--armed) 10%, var(--panel));
+  }
+  .say-it.empty { border-color: var(--line); color: var(--ink-3); font-weight: 400; font-size: 13px; }
+  .say-it.live { border-color: var(--me-tx); background: color-mix(in srgb, var(--me-tx) 22%, var(--panel)); }
+  .aud { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+  .aud .box { border: 1px solid var(--line); border-radius: var(--radius); padding: 7px 8px; background: var(--panel); }
+  .aud .box h4 { font-size: 10px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); margin: 0 0 5px; font-weight: 600; }
+  .aud .box .n { font-size: 20px; font-weight: 700; line-height: 1; }
+  .aud .hearing .n { color: var(--staffed); }
+  .aud .present .n { color: var(--away); }
+  .aud .nosub .n { color: var(--vacant); }
+  .aud .box ul { margin: 6px 0 0; padding: 0; list-style: none; font-size: 10.5px; color: var(--ink-2); }
+  .aud .box li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* ===================== VARIANT C - Ledger + Transmit ===================== */
+  #vC { height: 100%; display: flex; flex-direction: column; }
+  .transmit {
+    flex: 0 0 auto; padding: 14px 16px;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+    display: grid; grid-template-columns: minmax(280px, 1.1fr) minmax(240px, 1fr) auto; gap: 18px; align-items: start;
+  }
+  .transmit.live { background: color-mix(in srgb, var(--me-tx) 16%, var(--panel)); }
+  .keystate { font-size: 26px; font-weight: 700; letter-spacing: .02em; line-height: 1.1; }
+  .keystate.idle { color: var(--ink-3); }
+  .keystate.mom  { color: var(--me-tx); }
+  .keystate.latch{ color: var(--me-tx); }
+  .keybtn {
+    width: 128px; height: 128px; border-radius: 50%;
+    border: 3px solid var(--line); background: var(--panel-2);
+    font-size: 13px; font-weight: 700; letter-spacing: .08em; color: var(--ink-2);
+    display: flex; align-items: center; justify-content: center; text-align: center;
+    user-select: none; -webkit-user-select: none;
+  }
+  .keybtn.live { border-color: var(--me-tx); background: var(--me-tx); color: #12161b; }
+  .keybtn:disabled { opacity: .35; cursor: not-allowed; }
+  .ledger { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+  table.lg { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.lg th {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--panel-2); border-bottom: 1px solid var(--line);
+    text-align: left; padding: 5px 8px; font-size: 10px; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--ink-3); font-weight: 600;
+  }
+  table.lg td { padding: 3px 8px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+  table.lg tr.sub td { background: var(--panel); }
+  table.lg tr.tx td { background: color-mix(in srgb, var(--tx) 12%, var(--panel)); }
+  table.lg tr.metx td { background: color-mix(in srgb, var(--me-tx) 20%, var(--panel)); }
+  table.lg td.nm { font-weight: 600; }
+  table.lg td.talkers { color: var(--tx); font-size: 11px; }
+  table.lg .cellbtn {
+    width: 22px; height: 18px; padding: 0; border-radius: 3px; font-size: 10px;
+    border: 1px solid var(--line); background: transparent; color: var(--ink-3);
+  }
+  table.lg .cellbtn.on { color: #0d1117; font-weight: 700; }
+  table.lg .cellbtn.sub.on { background: var(--accent); border-color: var(--accent); }
+  table.lg .cellbtn.arm.on { background: var(--armed); border-color: var(--armed); }
+  table.lg .cellbtn.mute.on { background: var(--away); border-color: var(--away); }
+  table.lg .cellbtn:disabled { opacity: .25; cursor: not-allowed; }
+
+  /* ===================== scenario drawer + switcher ===================== */
+  .drawer {
+    position: fixed; top: 46px; right: 0; bottom: 0; width: 320px; z-index: 50;
+    background: var(--panel); border-left: 1px solid var(--line);
+    padding: 14px; overflow-y: auto;
+    transform: translateX(100%); transition: transform .16s ease;
+  }
+  .drawer.open { transform: none; }
+  .drawer h3 { font-size: 11px; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-3); margin: 14px 0 7px; }
+  .drawer h3:first-child { margin-top: 0; }
+  .drawer p { color: var(--ink-2); font-size: 12px; margin: 0 0 8px; }
+  .drawer .btn { display: block; width: 100%; text-align: left; margin-bottom: 5px; }
+  .drawer ul { margin: 0 0 10px; padding-left: 16px; color: var(--ink-2); font-size: 11.5px; }
+  .drawer li { margin-bottom: 4px; }
+
+  .switcher {
+    position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 60;
+    display: flex; align-items: stretch; gap: 0;
+    background: #000; color: #fff; border-radius: 999px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.55); border: 1px solid #3a3a3a;
+    font-family: var(--mono); font-size: 11px; overflow: hidden;
+  }
+  :root[data-theme="light"] .switcher { background: #101418; }
+  .switcher button { background: transparent; border: 0; color: #fff; padding: 7px 13px; }
+  .switcher button:hover { background: #262626; }
+  .switcher .label { padding: 7px 14px; border-left: 1px solid #3a3a3a; border-right: 1px solid #3a3a3a; white-space: nowrap; }
+  .switcher .label b { color: #ffd479; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="brand">VOXLOOP</span>
+  <div class="role-badge">
+    <b id="roleName">Flight Director</b>
+    <span id="userName">E. Hutchinson</span>
+  </div>
+  <span id="connPill" class="pill ok"><span class="dot"></span><span id="connText">confirmed</span></span>
+  <span class="spacer"></span>
+  <button class="btn" id="offConsoleBtn">Off console</button>
+  <button class="btn" id="themeBtn">Theme</button>
+  <button class="btn" id="drawerBtn">Scenarios &amp; about  ?</button>
+</div>
+
+<div id="banners"></div>
+
+<main>
+  <section id="vA" hidden>
+    <div class="board" id="board"></div>
+    <div id="aStrip"></div>
+  </section>
+
+  <section id="vB" hidden>
+    <div class="col">
+      <div class="col-head"><h2>Hearing</h2><span class="count" id="bHearCount"></span></div>
+      <div class="col-body" id="bHear"></div>
+    </div>
+    <div class="col">
+      <div class="col-head"><h2>Speaking</h2><span class="count" id="bSpeakCount"></span></div>
+      <div class="col-body" id="bSpeak"></div>
+    </div>
+  </section>
+
+  <section id="vC" hidden>
+    <div class="transmit" id="cTransmit"></div>
+    <div class="ledger"><table class="lg" id="cLedger"></table></div>
+  </section>
+</main>
+
+<div class="drawer" id="drawer">
+  <h3>Scenarios</h3>
+  <p>Each one forces a case that is hard to judge on paper. Flip variants with the bar at the bottom to see how each renders it.</p>
+  <button class="btn" data-scn="chatter">Three loops talking at once</button>
+  <button class="btn" data-scn="deaf">Your headset dies (loop health lost)</button>
+  <button class="btn" data-scn="stale">Signalling goes unconfirmed</button>
+  <button class="btn" data-scn="hotmic">You latch open and walk away</button>
+  <button class="btn" data-scn="vacant">Ground Control goes away (vs vacant)</button>
+  <button class="btn" data-scn="muteaway">Mute a loop you staff</button>
+  <button class="btn" data-scn="cut">You are cut mid-transmission</button>
+  <button class="btn" data-scn="blind">Arm a loop you do not monitor</button>
+  <button class="btn" data-scn="sourcedied">PTT source dies while you hold it</button>
+  <button class="btn danger" data-scn="reset">Reset to nominal</button>
+
+  <h3>Presets</h3>
+  <p>Momentary, arm-set-only, reverts on unkey (ADR-0013).</p>
+  <div class="chipset" id="presetChips"></div>
+
+  <h3>Keying</h3>
+  <ul>
+    <li>Hold <b>`</b> - momentary</li>
+    <li><b>Shift+`</b> - toggle latch</li>
+    <li>On-screen key is a second input source; both report level + liveness</li>
+  </ul>
+
+  <h3>What this prototype fakes</h3>
+  <ul>
+    <li>No audio, no WebRTC, no server. Talkers are simulated on a timer.</li>
+    <li>Staffing state is <i>derived</i> here (occupant of a staffing role, subscribed, unmuted, healthy) so ADR-0005 can be seen working, not asserted.</li>
+    <li>Audience is computed per (role, user) from a fixed roster of 16 occupants.</li>
+    <li>The permission grid is fixed: this session is <b>Flight Director</b> and its reach is the 20 loops shown. Loops outside reach do not exist here.</li>
+    <li>Volume is a slider that changes nothing. Loudest-wins overlap is not simulated.</li>
+    <li>Announcements, breakout, admin console and access requests are all out of scope for this prototype.</li>
+  </ul>
+
+  <h3>Things to look for</h3>
+  <ul>
+    <li>Can you tell <b>armed but not subscribed</b> from <b>subscribed but not armed</b> at a glance?</li>
+    <li>Does a hot latch survive being ignored?</li>
+    <li>Does <b>away</b> read differently enough from <b>vacant</b> to stop a wasted transmission?</li>
+    <li>When the state freezes, is it obvious that what you are reading is old?</li>
+    <li>At 20 loops, which variant is a wall?</li>
+  </ul>
+</div>
+
+<div class="switcher">
+  <button id="prevV" title="Previous variant">&#9664;</button>
+  <span class="label"><b id="vKey">A</b> &mdash; <span id="vName"></span></span>
+  <button id="nextV" title="Next variant">&#9654;</button>
+</div>
+
+<script>
+/* =======================================================================
+   DATA - all in memory, nothing persists
+   ======================================================================= */
+
+const ME = { user: "E. Hutchinson", role: "Flight Director" };
+
+/* This session's reach: the Flight Director row of the grid (ADR-0011).
+   Loops outside reach are not in the model at all - you cannot see them. */
+const LOOPS = [
+  { id: "flight",   name: "Flight",              perm: "control", staffRole: "Flight Director" },
+  { id: "opscoord", name: "Ops Coordination",    perm: "control", staffRole: "Ops Coordinator" },
+  { id: "anomaly",  name: "Anomaly Response",    perm: "control", staffRole: "Anomaly Lead" },
+  { id: "ground",   name: "Ground Control",      perm: "emit",    staffRole: "Ground Controller" },
+  { id: "payload",  name: "Payload Ops",         perm: "emit",    staffRole: "Payload Officer" },
+  { id: "thermal",  name: "Thermal",             perm: "emit",    staffRole: "Thermal Engineer" },
+  { id: "power",    name: "Power",               perm: "emit",    staffRole: "Power Engineer" },
+  { id: "aocs",     name: "AOCS",                perm: "emit",    staffRole: "AOCS Engineer" },
+  { id: "comms",    name: "Comms",               perm: "emit",    staffRole: "Comms Engineer" },
+  { id: "prop",     name: "Propulsion",          perm: "emit",    staffRole: "Propulsion Engineer" },
+  { id: "dynamics", name: "Flight Dynamics",     perm: "emit",    staffRole: "Flight Dynamics Officer" },
+  { id: "gsalpha",  name: "Ground Station Alpha",perm: "emit",    staffRole: "Station Operator A" },
+  { id: "gsbravo",  name: "Ground Station Bravo",perm: "emit",    staffRole: "Station Operator B" },
+  { id: "safety",   name: "Safety",              perm: "emit",    staffRole: "Safety Officer" },
+  { id: "support",  name: "Support Engineers",   perm: "emit",    staffRole: "Support Engineer" },
+  { id: "conf1",    name: "Conference 1",        perm: "emit",    staffRole: null },
+  { id: "conf2",    name: "Conference 2",        perm: "emit",    staffRole: null },
+  { id: "netops",   name: "Network Ops",         perm: "monitor", staffRole: "Network Engineer" },
+  { id: "facilities",name:"Facilities",          perm: "monitor", staffRole: "Facilities Tech" },
+  { id: "sim",      name: "Simulation",          perm: "monitor", staffRole: null },
+];
+const L = Object.fromEntries(LOOPS.map(l => [l.id, l]));
+const RUNG = { monitor: 1, emit: 2, control: 3 };
+const canMonitor = l => RUNG[l.perm] >= 1;
+const canEmit    = l => RUNG[l.perm] >= 2;
+
+/* Other occupants. reach = loops their role may monitor; subs = what they chose.
+   Everything about who would hear you is computed from this. */
+function P(user, role, reach, subs, opts) {
+  return Object.assign({ user, role, reach, subs, muted: [], deaf: [], offConsole: false }, opts || {});
+}
+const PEOPLE = [
+  P("A. Okafor",   "Ops Coordinator",         ["flight","opscoord","anomaly","ground","safety","support"], ["flight","opscoord","ground","safety"]),
+  P("M. Lindqvist","Ground Controller",       ["flight","ground","comms","gsalpha","gsbravo","netops"],    ["flight","ground","gsalpha","gsbravo"]),
+  P("R. Bhatt",    "Ground Controller",       ["flight","ground","comms","gsalpha","gsbravo","netops"],    ["ground","comms"]),
+  P("S. Moreau",   "Payload Officer",         ["flight","payload","thermal","power","support"],            ["payload","thermal"]),
+  P("D. Ferreira", "Thermal Engineer",        ["flight","thermal","power","payload"],                      ["thermal","flight"],   { muted: ["flight"] }),
+  P("K. Nakamura", "Power Engineer",          ["flight","power","thermal","aocs"],                         ["power","flight"]),
+  P("J. Adeyemi",  "AOCS Engineer",           ["flight","aocs","dynamics","prop"],                         ["aocs","dynamics"]),
+  P("T. Novak",    "Comms Engineer",          ["flight","comms","gsalpha","gsbravo","netops"],             ["comms","gsalpha"]),
+  P("H. Weiss",    "Propulsion Engineer",     ["flight","prop","aocs","thermal"],                          ["prop"]),
+  P("C. Oyelaran", "Flight Dynamics Officer", ["flight","dynamics","aocs","prop"],                         ["dynamics","flight"]),
+  P("N. Petrova",  "Station Operator A",      ["gsalpha","comms","netops"],                                ["gsalpha"]),
+  P("Y. Tanaka",   "Station Operator B",      ["gsbravo","comms","netops"],                                ["gsbravo"],            { deaf: ["gsbravo"] }),
+  P("G. Mbeki",    "Safety Officer",          ["flight","safety","anomaly","opscoord","support"],          ["flight","safety","anomaly"]),
+  P("F. Ruiz",     "Anomaly Lead",            ["flight","anomaly","opscoord","safety"],                    ["anomaly","flight"]),
+  P("B. Kowalski", "Network Engineer",        ["netops","facilities","comms"],                             ["netops"]),
+  P("V. Singh",    "Facilities Tech",         ["facilities","netops"],                                     ["facilities"]),
+];
+
+const PRESETS = [
+  { id: "allstations", name: "All Stations", loops: LOOPS.filter(canEmit).map(l => l.id) },
+  { id: "flightops",   name: "Flight + Ops", loops: ["flight","opscoord"] },
+  { id: "gs",          name: "Both Ground Stations", loops: ["gsalpha","gsbravo"] },
+];
+
+/* This session (ADR-0019: one document, but here it is just an object) */
+const S = {
+  subs:   new Set(["flight","opscoord","ground","safety","anomaly","comms"]),
+  armed:  new Set(["flight"]),
+  muted:  new Set(),
+  vol:    Object.fromEntries(LOOPS.map(l => [l.id, 70])),
+  deaf:   new Set(),                 /* loops whose beacon has stopped arriving */
+  outputPathOk: true,                /* the client-side "is anything reaching my ears" check */
+  offConsole: false,
+  offConsoleSince: null,
+  lastDeliberate: Date.now(),
+  connection: "confirmed",           /* confirmed | unconfirmed | disconnected */
+  frozenSince: null,
+  cut: false,
+  key: "none",                       /* none | momentary | latched */
+  latchStartedAt: null,
+  preset: null,
+  sources: { hotkey: { live: true, level: false }, screen: { live: true, level: false } },
+  version: 1,
+};
+
+/* talkers: loopId -> array of {user, role} */
+let TALKING = { comms: [{ user: "T. Novak", role: "Comms Engineer" }] };
+
+/* =======================================================================
+   DERIVED STATE
+   ======================================================================= */
+
+const heardBy = (p, id) =>
+  p.subs.includes(id) && !p.muted.includes(id) && !p.deaf.includes(id) && !p.offConsole;
+
+/* ADR-0005 as amended by #8: staffed means demonstrably hearing, not signed in. */
+function staffing(loop) {
+  if (!loop.staffRole) return { state: "vacant", reason: "no staffing role set", who: [] };
+  const occ = PEOPLE.filter(p => p.role === loop.staffRole);
+  const mine = ME.role === loop.staffRole;
+  const all = mine
+    ? occ.concat([{ user: ME.user, role: ME.role, subs: [...S.subs], muted: [...S.muted], deaf: [...S.deaf], offConsole: S.offConsole }])
+    : occ;
+  if (!all.length) return { state: "vacant", reason: "nobody has assumed " + loop.staffRole, who: [] };
+  const hearing = all.filter(p => heardBy(p, loop.id));
+  if (hearing.length) return { state: "staffed", who: hearing };
+  const p = all[0];
+  let reason = "not subscribed";
+  if (p.offConsole) reason = "off console";
+  else if (p.muted.includes(loop.id)) reason = "muted it";
+  else if (p.deaf.includes(loop.id)) reason = "not receiving it";
+  return { state: "away", reason, who: all };
+}
+
+/* The three-way audience, shown before keying (CONTEXT: Audience). */
+function audience(loopIds) {
+  const hearing = [], present = [], nosub = [];
+  const seen = new Set();
+  for (const id of loopIds) {
+    for (const p of PEOPLE) {
+      if (!p.reach.includes(id)) continue;
+      const k = p.user;
+      if (seen.has(k)) continue;
+      if (heardBy(p, id)) { seen.add(k); hearing.push({ p, id }); }
+    }
+  }
+  for (const id of loopIds) {
+    for (const p of PEOPLE) {
+      if (!p.reach.includes(id) || seen.has(p.user)) continue;
+      seen.add(p.user);
+      if (p.subs.includes(id)) {
+        const why = p.offConsole ? "off console" : p.muted.includes(id) ? "muted" : "not receiving";
+        present.push({ p, id, why });
+      } else {
+        nosub.push({ p, id });
+      }
+    }
+  }
+  return { hearing, present, nosub };
+}
+
+/* Keying follows whether ANY live source wants to emit (ADR-0021). */
+function anySourceWants() {
+  return Object.values(S.sources).some(s => s.live && s.level);
+}
+const emissionAllowed = () => !S.cut && S.connection !== "disconnected";
+const effectiveArmed = () => (S.preset ? PRESETS.find(p => p.id === S.preset).loops : [...S.armed]);
+const isKeyed = () => S.key !== "none";
+
+/* Loop health per (session, loop) - ADR-0017 */
+function health(id) {
+  if (!S.subs.has(id)) return "n/a";
+  if (!S.outputPathOk) return "output";
+  return S.deaf.has(id) ? "lost" : "ok";
+}
+
+/* =======================================================================
+   ACTIONS
+   ======================================================================= */
+const touch = () => { S.lastDeliberate = Date.now(); S.version++; };
+
+function toggleSub(id) {
+  if (!canMonitor(L[id])) return;
+  S.subs.has(id) ? S.subs.delete(id) : S.subs.add(id);
+  touch(); render();
+}
+function toggleArm(id) {
+  if (!canEmit(L[id])) return;          /* the server would refuse anyway */
+  S.armed.has(id) ? S.armed.delete(id) : S.armed.add(id);
+  touch(); render();
+}
+function toggleMute(id) {
+  S.muted.has(id) ? S.muted.delete(id) : S.muted.add(id);
+  touch(); render();
+}
+function setVol(id, v) { S.vol[id] = +v; render(); }
+
+function reevaluate() {
+  const wants = anySourceWants();
+  if (S.key === "latched") {
+    /* a latch is not disturbed by a momentary press */
+  } else if (wants && emissionAllowed()) {
+    S.key = "momentary";
+  } else if (!wants && S.key === "momentary") {
+    S.key = "none";
+    S.preset = null;
+  }
+}
+function setSource(name, level) {
+  S.sources[name].level = level;
+  reevaluate();
+  touch(); render();
+}
+function toggleLatch() {
+  if (S.key === "latched") { S.key = "none"; S.latchStartedAt = null; }
+  else if (emissionAllowed()) { S.key = "latched"; S.latchStartedAt = Date.now(); }
+  touch(); render();
+}
+function applyPreset(pid) {
+  /* momentary: replaces the arm set only while keyed, reverts on unkey */
+  S.preset = pid; if (!isKeyed()) S.key = "momentary";
+  touch(); render();
+}
+function toggleOffConsole() {
+  S.offConsole = !S.offConsole;
+  S.offConsoleSince = S.offConsole ? Date.now() : null;
+  touch(); render();
+}
+
+/* =======================================================================
+   RENDER - shared chrome
+   ======================================================================= */
+const $ = s => document.querySelector(s);
+const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+const ago = t => { const s = Math.round((Date.now() - t) / 1000); return s < 60 ? s + "s" : Math.floor(s / 60) + "m " + (s % 60) + "s"; };
+const RUNGTXT = { monitor: "MON", emit: "EMIT", control: "CTRL" };
+
+function talkersOn(id) {
+  const list = (TALKING[id] || []).slice();
+  if (isKeyed() && effectiveArmed().includes(id)) list.push({ user: ME.user, role: ME.role, me: true });
+  return list;
+}
+const talkerLabel = t => t.role + (t.me ? " (you)" : "");
+
+function renderChrome() {
+  const stale = S.connection === "unconfirmed";
+  document.body.classList.toggle("is-stale", stale);
+  const cp = $("#connPill");
+  cp.className = "pill " + (S.connection === "confirmed" ? "ok" : S.connection === "unconfirmed" ? "warn" : "bad");
+  $("#connText").textContent = S.connection === "confirmed" ? "confirmed"
+    : S.connection === "unconfirmed" ? "unconfirmed - state frozen " + ago(S.frozenSince) + " ago"
+    : "disconnected - no emission path";
+
+  $("#offConsoleBtn").classList.toggle("on", S.offConsole);
+  $("#offConsoleBtn").textContent = S.offConsole ? "Off console - " + ago(S.offConsoleSince) : "Off console";
+
+  const b = $("#banners"); b.innerHTML = "";
+  if (S.key === "latched") {
+    const d = el("div", "banner latch");
+    d.append(el("span", null, "LATCHED OPEN - your microphone is live on " + effectiveArmed().map(i => L[i].name).join(", ") + " (" + ago(S.latchStartedAt) + ")"));
+    const btn = el("button", "btn", "Unlatch"); btn.onclick = toggleLatch; d.append(btn);
+    b.append(d);
+  }
+  if (S.cut) {
+    const d = el("div", "banner cut");
+    d.append(el("span", null, "You have been CUT by operational authority. Emission is closed at the server. Clear it yourself when your mic is sorted."));
+    const btn = el("button", "btn", "Clear cut"); btn.onclick = () => { S.cut = false; touch(); render(); }; d.append(btn);
+    b.append(d);
+  }
+  if (stale) {
+    b.append(el("div", "banner stale", "Signalling unconfirmed. Everything below was last true " + ago(S.frozenSince) + " ago and is frozen - not blank, not guessed. Push-to-talk still works."));
+  }
+  if (S.offConsole) {
+    b.append(el("div", "banner offc", "You asserted OFF CONSOLE " + ago(S.offConsoleSince) + " ago. Audio still flows. Loops you staff read AWAY to everyone else. Only keying clears it."));
+  }
+  if (!S.outputPathOk) {
+    b.append(el("div", "banner cut", "No audio is reaching your output device. Every loop reads unreachable because you are deaf, not because the loops are quiet."));
+  }
+}
+
+/* =======================================================================
+   VARIANT A - The Board
+   ======================================================================= */
+function renderA() {
+  const board = $("#board"); board.innerHTML = "";
+  for (const l of LOOPS) {
+    const st = staffing(l), h = health(l.id), tk = talkersOn(l.id);
+    const armed = effectiveArmed().includes(l.id), sub = S.subs.has(l.id);
+    const meTx = isKeyed() && armed;
+
+    const t = el("div", "tile st-" + st.state);
+    t.classList.toggle("sub", sub);
+    t.classList.toggle("armed", armed);
+    t.classList.toggle("tx", tk.length > 0 && !meTx);
+    t.classList.toggle("metx", meTx);
+    t.classList.toggle("unreachable", h === "lost");
+
+    const head = el("div", "tile-head");
+    head.append(el("span", "tile-name", l.name));
+    head.append(el("span", "rung " + l.perm, RUNGTXT[l.perm]));
+    t.append(head);
+
+    const s = el("div", "staffing " + st.state);
+    s.append(el("span", "sq"));
+    s.append(el("span", null, st.state === "staffed" ? "staffed - " + st.who.length
+      : st.state === "away" ? "away - " + st.reason : "vacant"));
+    t.append(s);
+
+    const tl = el("div", "tile-talkers" + (tk.length ? "" : " none"));
+    tl.textContent = tk.length ? tk.map(talkerLabel).join(", ")
+      : h === "lost" ? "" : sub ? "quiet" : "not monitoring";
+    if (h === "lost") { const w = el("span", "health-bad", "NOT RECEIVING - beacon lost"); tl.append(w); }
+    t.append(tl);
+
+    const foot = el("div", "tile-foot");
+    const bs = el("button", "mini sub" + (sub ? " on" : ""), "MON");
+    bs.onclick = () => toggleSub(l.id); foot.append(bs);
+    const ba = el("button", "mini arm" + (S.armed.has(l.id) ? " on" : ""), "ARM");
+    ba.disabled = !canEmit(l); ba.onclick = () => toggleArm(l.id); foot.append(ba);
+    const bm = el("button", "mini mute" + (S.muted.has(l.id) ? " on" : ""), "MUTE");
+    bm.disabled = !sub; bm.onclick = () => toggleMute(l.id); foot.append(bm);
+    const v = document.createElement("input");
+    v.type = "range"; v.min = 0; v.max = 100; v.value = S.vol[l.id]; v.className = "vol"; v.disabled = !sub;
+    v.oninput = e => setVol(l.id, e.target.value);
+    foot.append(v);
+    t.append(foot);
+    board.append(t);
+  }
+
+  const armedIds = effectiveArmed(), a = audience(armedIds);
+  const strip = $("#aStrip"); strip.innerHTML = "";
+  const box = el("div"); box.style.cssText = "flex:0 0 auto;border-top:1px solid var(--line);background:var(--panel);padding:9px 14px;display:flex;align-items:center;gap:14px;";
+  const say = el("div", "say-it" + (armedIds.length ? "" : " empty") + (isKeyed() ? " live" : ""));
+  say.style.flex = "1";
+  say.textContent = armedIds.length
+    ? (isKeyed() ? "LIVE on " : "Will be heard on ") + armedIds.map(i => L[i].name).join(" + ")
+    : "Nothing armed - push-to-talk reaches nobody";
+  box.append(say);
+  box.append(el("div", "mono", a.hearing.length + " hearing / " + a.present.length + " present, not hearing / " + a.nosub.length + " not subscribed"));
+  const kb = el("button", "keybtn" + (isKeyed() ? " live" : ""), isKeyed() ? (S.key === "latched" ? "LATCHED" : "LIVE") : "PUSH");
+  kb.style.cssText = "width:74px;height:74px;font-size:11px;";
+  kb.disabled = !emissionAllowed();
+  kb.onmousedown = () => setSource("screen", true);
+  kb.onmouseup = kb.onmouseleave = () => setSource("screen", false);
+  box.append(kb);
+  strip.append(box);
+}
+
+/* =======================================================================
+   VARIANT B - Hearing / Speaking
+   ======================================================================= */
+function renderB() {
+  const hear = $("#bHear"); hear.innerHTML = "";
+  const subbed = LOOPS.filter(l => S.subs.has(l.id));
+  $("#bHearCount").textContent = subbed.length + " subscribed of " + LOOPS.filter(canMonitor).length + " in reach";
+
+  for (const l of subbed) {
+    const st = staffing(l), h = health(l.id), tk = talkersOn(l.id);
+    const r = el("div", "hrow" + (tk.length ? " tx" : "") + (h === "lost" ? " bad" : ""));
+    const nm = el("div", "nm", l.name);
+    if (effectiveArmed().includes(l.id)) { const c = el("span", "chip armchip", "ARMED"); c.style.marginLeft = "6px"; nm.append(c); }
+    r.append(nm);
+    if (h === "lost") r.append(el("span", "health-bad", "NOT RECEIVING"));
+    else r.append(el("span", "who", tk.length ? tk.map(talkerLabel).join(", ") : ""));
+    const s = el("span", "staffing " + st.state);
+    s.append(el("span", "sq"));
+    s.append(el("span", null, st.state === "away" ? "away - " + st.reason : st.state));
+    r.append(s);
+    const bm = el("button", "mini mute" + (S.muted.has(l.id) ? " on" : ""), "MUTE");
+    bm.onclick = () => toggleMute(l.id); r.append(bm);
+    const v = document.createElement("input");
+    v.type = "range"; v.min = 0; v.max = 100; v.value = S.vol[l.id]; v.className = "vol";
+    v.oninput = e => setVol(l.id, e.target.value); r.append(v);
+    const bs = el("button", "mini", "STOP"); bs.onclick = () => toggleSub(l.id); r.append(bs);
+    hear.append(r);
+  }
+
+  const tray = el("div", "tray");
+  tray.append(el("h3", null, "In reach, not subscribed"));
+  const cs = el("div", "chipset");
+  for (const l of LOOPS.filter(l => canMonitor(l) && !S.subs.has(l.id))) {
+    const st = staffing(l);
+    const c = el("button", "chip", l.name + "  " + (st.state === "staffed" ? "●" : st.state === "away" ? "◐" : "○"));
+    if (effectiveArmed().includes(l.id)) { c.classList.add("armchip"); c.textContent += "  ARMED, UNHEARD"; }
+    c.onclick = () => toggleSub(l.id);
+    cs.append(c);
+  }
+  tray.append(cs); hear.append(tray);
+
+  /* ---- speaking ---- */
+  const sp = $("#bSpeak"); sp.innerHTML = "";
+  const armedIds = effectiveArmed();
+  $("#bSpeakCount").textContent = armedIds.length + " armed of " + LOOPS.filter(canEmit).length + " you may emit to";
+
+  const say = el("div", "say-it" + (armedIds.length ? "" : " empty") + (isKeyed() ? " live" : ""));
+  say.textContent = armedIds.length
+    ? (isKeyed() ? "LIVE on: " : "You will be heard on: ") + armedIds.map(i => L[i].name).join("  +  ")
+    : "Nothing armed. Push-to-talk reaches nobody.";
+  if (S.preset) { const p = el("div", "mono muted-txt", "preset " + PRESETS.find(x => x.id === S.preset).name + " - reverts on unkey"); say.append(p); }
+  sp.append(say);
+
+  const a = audience(armedIds);
+  const aud = el("div", "aud");
+  const mk = (cls, title, arr, fmt) => {
+    const b = el("div", "box " + cls);
+    b.append(el("h4", null, title));
+    b.append(el("div", "n", String(arr.length)));
+    const ul = el("ul");
+    arr.slice(0, 6).forEach(x => ul.append(el("li", null, fmt(x))));
+    if (arr.length > 6) ul.append(el("li", "muted-txt", "+ " + (arr.length - 6) + " more"));
+    b.append(ul); return b;
+  };
+  aud.append(mk("hearing", "Hearing", a.hearing, x => x.p.role + " - " + x.p.user));
+  aud.append(mk("present", "Present, not hearing", a.present, x => x.p.role + " - " + x.why));
+  aud.append(mk("nosub", "Not subscribed", a.nosub, x => x.p.role));
+  sp.append(aud);
+
+  const keyWrap = el("div"); keyWrap.style.cssText = "display:flex;align-items:center;gap:14px;margin-top:14px;";
+  const kb = el("button", "keybtn" + (isKeyed() ? " live" : ""), isKeyed() ? (S.key === "latched" ? "LATCHED OPEN" : "LIVE") : "PUSH TO TALK");
+  kb.disabled = !emissionAllowed();
+  kb.onmousedown = () => setSource("screen", true);
+  kb.onmouseup = kb.onmouseleave = () => setSource("screen", false);
+  keyWrap.append(kb);
+  const lat = el("button", "btn" + (S.key === "latched" ? " on" : ""), S.key === "latched" ? "Unlatch" : "Latch open");
+  lat.disabled = !emissionAllowed(); lat.onclick = toggleLatch;
+  keyWrap.append(lat);
+  sp.append(keyWrap);
+
+  const tray2 = el("div", "tray");
+  tray2.append(el("h3", null, "May emit to, not armed"));
+  const cs2 = el("div", "chipset");
+  for (const l of LOOPS.filter(l => canEmit(l) && !S.armed.has(l.id))) {
+    const c = el("button", "chip", l.name);
+    if (!S.subs.has(l.id)) c.textContent += "  (not monitoring)";
+    c.onclick = () => toggleArm(l.id);
+    cs2.append(c);
+  }
+  tray2.append(cs2); sp.append(tray2);
+
+  const tray3 = el("div", "tray");
+  tray3.append(el("h3", null, "Presets - momentary, revert on unkey"));
+  const cs3 = el("div", "chipset");
+  for (const p of PRESETS) {
+    const c = el("button", "chip big" + (S.preset === p.id ? " armchip" : ""), p.name);
+    c.onmousedown = () => { applyPreset(p.id); setSource("screen", true); };
+    c.onmouseup = c.onmouseleave = () => { setSource("screen", false); S.preset = null; render(); };
+    cs3.append(c);
+  }
+  tray3.append(cs3); sp.append(tray3);
+
+  const src = el("div", "mono muted-txt");
+  src.style.marginTop = "12px";
+  src.textContent = "input sources: " + Object.entries(S.sources)
+    .map(([k, v]) => k + (v.live ? "" : " OFFLINE") + (v.level ? " WANTS" : "")).join("  |  ");
+  sp.append(src);
+}
+
+/* =======================================================================
+   VARIANT C - Ledger + Transmit
+   ======================================================================= */
+function renderC() {
+  const armedIds = effectiveArmed(), a = audience(armedIds);
+  const t = $("#cTransmit"); t.innerHTML = ""; t.classList.toggle("live", isKeyed());
+
+  const left = el("div");
+  left.append(el("div", "keystate " + (S.key === "none" ? "idle" : S.key === "latched" ? "latch" : "mom"),
+    S.key === "none" ? "IDLE" : S.key === "latched" ? "LATCHED OPEN" : "LIVE"));
+  const dest = el("div"); dest.style.marginTop = "8px";
+  if (!armedIds.length) dest.append(el("div", "muted-txt", "Nothing armed - push-to-talk reaches nobody"));
+  else {
+    const cs = el("div", "chipset");
+    for (const id of armedIds) {
+      const c = el("button", "chip armchip", L[id].name);
+      if (!S.subs.has(id)) c.textContent += " · blind";
+      c.onclick = () => toggleArm(id);
+      cs.append(c);
+    }
+    dest.append(cs);
+  }
+  if (S.key === "latched") dest.append(el("div", "mono", "open for " + ago(S.latchStartedAt)));
+  left.append(dest);
+  t.append(left);
+
+  const mid = el("div");
+  const grid = el("div"); grid.style.cssText = "display:grid;grid-template-columns:repeat(3,1fr);gap:10px;";
+  const mk = (label, n, colour, sub) => {
+    const b = el("div");
+    const h = el("div", null, label);
+    h.style.cssText = "font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);font-weight:600;";
+    b.append(h);
+    const v = el("div", null, String(n)); v.style.cssText = "font-size:24px;font-weight:700;line-height:1.1;color:" + colour + ";";
+    b.append(v);
+    b.append(el("div", "mono muted-txt", sub));
+    return b;
+  };
+  grid.append(mk("Hearing", a.hearing.length, "var(--staffed)", "would hear you"));
+  grid.append(mk("Present", a.present.length, "var(--away)", "muted / deaf / off"));
+  grid.append(mk("No sub", a.nosub.length, "var(--vacant)", "chose not to listen"));
+  mid.append(grid);
+  const names = el("div", "mono muted-txt");
+  names.style.marginTop = "8px";
+  names.textContent = a.hearing.slice(0, 8).map(x => x.p.role).join(", ") + (a.hearing.length > 8 ? " +" + (a.hearing.length - 8) : "");
+  mid.append(names);
+  t.append(mid);
+
+  const right = el("div"); right.style.cssText = "display:flex;align-items:center;gap:10px;";
+  const kb = el("button", "keybtn" + (isKeyed() ? " live" : ""), isKeyed() ? "LIVE" : "PUSH");
+  kb.disabled = !emissionAllowed();
+  kb.onmousedown = () => setSource("screen", true);
+  kb.onmouseup = kb.onmouseleave = () => setSource("screen", false);
+  right.append(kb);
+  const lat = el("button", "btn" + (S.key === "latched" ? " on" : ""), S.key === "latched" ? "UNLATCH" : "LATCH");
+  lat.disabled = !emissionAllowed(); lat.onclick = toggleLatch;
+  right.append(lat);
+  t.append(right);
+
+  /* ---- ledger ---- */
+  const tb = $("#cLedger"); tb.innerHTML = "";
+  const thead = el("thead"); const hr = el("tr");
+  ["Loop", "", "Staffing", "Health", "Talking", "Mon", "Arm", "Mute", "Vol"].forEach(h => hr.append(el("th", null, h)));
+  thead.append(hr); tb.append(thead);
+  const body = el("tbody");
+  for (const l of LOOPS) {
+    const st = staffing(l), h = health(l.id), tk = talkersOn(l.id);
+    const armed = effectiveArmed().includes(l.id), sub = S.subs.has(l.id);
+    const meTx = isKeyed() && armed;
+    const r = el("tr");
+    r.classList.toggle("sub", sub);
+    r.classList.toggle("tx", tk.length > 0 && !meTx);
+    r.classList.toggle("metx", meTx);
+
+    r.append(el("td", "nm", l.name));
+    const rr = el("td"); rr.append(el("span", "rung " + l.perm, RUNGTXT[l.perm])); r.append(rr);
+    const sc = el("td"); const sp2 = el("span", "staffing " + st.state);
+    sp2.append(el("span", "sq"));
+    sp2.append(el("span", null, st.state === "away" ? "away · " + st.reason : st.state));
+    sc.append(sp2); r.append(sc);
+    const hc = el("td");
+    hc.append(h === "lost" ? el("span", "health-bad", "NOT RECEIVING")
+      : h === "output" ? el("span", "health-bad", "NO OUTPUT")
+      : el("span", "muted-txt", h === "ok" ? "ok" : "—"));
+    r.append(hc);
+    r.append(el("td", "talkers", tk.map(talkerLabel).join(", ")));
+
+    const mkbtn = (cls, on, label, dis, fn) => {
+      const td = el("td");
+      const b = el("button", "cellbtn " + cls + (on ? " on" : ""), label);
+      b.disabled = dis; b.onclick = fn; td.append(b); return td;
+    };
+    r.append(mkbtn("sub", sub, "●", !canMonitor(l), () => toggleSub(l.id)));
+    r.append(mkbtn("arm", S.armed.has(l.id), "▲", !canEmit(l), () => toggleArm(l.id)));
+    r.append(mkbtn("mute", S.muted.has(l.id), "✕", !sub, () => toggleMute(l.id)));
+    const vt = el("td");
+    const v = document.createElement("input");
+    v.type = "range"; v.min = 0; v.max = 100; v.value = S.vol[l.id]; v.className = "vol"; v.disabled = !sub;
+    v.oninput = e => setVol(l.id, e.target.value);
+    vt.append(v); r.append(vt);
+    body.append(r);
+  }
+  tb.append(body);
+}
+
+/* =======================================================================
+   SWITCHER, SCENARIOS, SIMULATION
+   ======================================================================= */
+const VARIANTS = [
+  { key: "A", name: "The Board", node: "#vA", render: renderA },
+  { key: "B", name: "Hearing / Speaking", node: "#vB", render: renderB },
+  { key: "C", name: "Ledger + Transmit", node: "#vC", render: renderC },
+];
+function currentVariant() {
+  const k = (new URLSearchParams(location.search).get("variant") || "A").toUpperCase();
+  return VARIANTS.find(v => v.key === k) || VARIANTS[0];
+}
+function setVariant(k) {
+  const u = new URL(location.href); u.searchParams.set("variant", k);
+  history.replaceState(null, "", u); render();
+}
+function cycle(d) {
+  const i = VARIANTS.indexOf(currentVariant());
+  setVariant(VARIANTS[(i + d + VARIANTS.length) % VARIANTS.length].key);
+}
+
+function render() {
+  const v = currentVariant();
+  VARIANTS.forEach(x => { $(x.node).hidden = x !== v; });
+  $("#vKey").textContent = v.key;
+  $("#vName").textContent = v.name;
+  renderChrome();
+  v.render();
+}
+
+const SCENARIOS = {
+  chatter() {
+    TALKING = {
+      flight: [{ user: "A. Okafor", role: "Ops Coordinator" }],
+      comms:  [{ user: "T. Novak", role: "Comms Engineer" }],
+      ground: [{ user: "M. Lindqvist", role: "Ground Controller" }, { user: "R. Bhatt", role: "Ground Controller" }],
+    };
+  },
+  deaf() { S.deaf = new Set(["flight", "comms"]); },
+  stale() { S.connection = "unconfirmed"; S.frozenSince = Date.now() - 9000; },
+  hotmic() { S.armed = new Set(["flight", "opscoord", "ground"]); S.key = "latched"; S.latchStartedAt = Date.now() - 47000; },
+  vacant() {
+    /* Support Engineers is vacant at rest - nobody has assumed the role at all.
+       This puts an AWAY loop next to it so the two can be told apart on screen. */
+    PEOPLE.filter(p => p.role === "Ground Controller").forEach(p => { p.offConsole = true; });
+  },
+  sourcedied() {
+    /* the headset was unplugged while you were holding the key: liveness, not an edge */
+    S.sources.hotkey = { live: false, level: true };
+    reevaluate();
+  },
+  muteaway() { S.subs.add("flight"); S.muted.add("flight"); },
+  cut() { S.cut = true; S.key = "none"; S.sources.screen.level = false; S.sources.hotkey.level = false; },
+  blind() { S.armed = new Set(["flight", "payload", "thermal"]); S.subs.delete("payload"); S.subs.delete("thermal"); },
+  reset() {
+    S.subs = new Set(["flight", "opscoord", "ground", "safety", "anomaly", "comms"]);
+    S.armed = new Set(["flight"]); S.muted = new Set(); S.deaf = new Set();
+    S.outputPathOk = true; S.offConsole = false; S.offConsoleSince = null;
+    S.connection = "confirmed"; S.frozenSince = null; S.cut = false;
+    S.key = "none"; S.latchStartedAt = null; S.preset = null;
+    S.sources.hotkey = { live: true, level: false }; S.sources.screen = { live: true, level: false };
+    PEOPLE.forEach(p => { p.offConsole = false; });
+    TALKING = { comms: [{ user: "T. Novak", role: "Comms Engineer" }] };
+  },
+};
+
+/* ME is a Flight Director, and Flight is staffed by that role - so muting Flight
+   drops it to away, which is scenario `muteaway` showing ADR-0005 bite. */
+
+document.addEventListener("DOMContentLoaded", () => {
+  $("#prevV").onclick = () => cycle(-1);
+  $("#nextV").onclick = () => cycle(1);
+  $("#drawerBtn").onclick = () => $("#drawer").classList.toggle("open");
+  $("#offConsoleBtn").onclick = toggleOffConsole;
+  $("#themeBtn").onclick = () => {
+    const r = document.documentElement;
+    r.dataset.theme = r.dataset.theme === "dark" ? "light" : "dark";
+  };
+  document.querySelectorAll("[data-scn]").forEach(b => {
+    b.onclick = () => { SCENARIOS[b.dataset.scn](); touch(); render(); };
+  });
+  const pc = $("#presetChips");
+  for (const p of PRESETS) {
+    const c = el("button", "chip", p.name);
+    c.onmousedown = () => { applyPreset(p.id); setSource("screen", true); };
+    c.onmouseup = c.onmouseleave = () => { setSource("screen", false); S.preset = null; render(); };
+    pc.append(c);
+  }
+
+  /* keying is a LEVEL from each source, never an event (ADR-0021) */
+  const typing = e => /^(INPUT|TEXTAREA)$/.test(e.target.tagName) || e.target.isContentEditable;
+  addEventListener("keydown", e => {
+    if (typing(e)) return;
+    if (e.key === "?" ) { $("#drawer").classList.toggle("open"); return; }
+    if (e.key === "ArrowLeft")  { cycle(-1); return; }
+    if (e.key === "ArrowRight") { cycle(1); return; }
+    if (e.code === "Backquote") {
+      e.preventDefault();
+      if (e.shiftKey) { if (!e.repeat) toggleLatch(); }
+      else if (!e.repeat) setSource("hotkey", true);
+    }
+  });
+  addEventListener("keyup", e => {
+    if (e.code === "Backquote" && !e.shiftKey) setSource("hotkey", false);
+  });
+  /* losing focus must not leave an open mic: liveness, not an edge */
+  addEventListener("blur", () => { S.sources.hotkey.level = false; if (S.key === "momentary") { S.key = "none"; S.preset = null; } render(); });
+
+  /* simulated talker churn - deliberately no animation, state changes only */
+  setInterval(() => {
+    if (S.connection === "unconfirmed") return;   /* frozen state does not update */
+    const staffed = LOOPS.filter(l => staffing(l).state === "staffed");
+    if (!staffed.length) return;
+    const l = staffed[Math.floor(Math.random() * staffed.length)];
+    if (TALKING[l.id]) delete TALKING[l.id];
+    else {
+      const occ = PEOPLE.filter(p => p.reach.includes(l.id));
+      if (occ.length) { const p = occ[Math.floor(Math.random() * occ.length)]; TALKING[l.id] = [{ user: p.user, role: p.role }]; }
+    }
+    render();
+  }, 3200);
+
+  /* running ages must keep running */
+  setInterval(renderChrome, 1000);
+
+  render();
+});
+</script>
+</body>
+</html>
