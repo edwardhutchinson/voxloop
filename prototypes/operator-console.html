@@ -151,6 +151,9 @@
   .banner.offc  { background: color-mix(in srgb, var(--away) 14%, var(--bg)); color: var(--away); }
 
   main { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+  /* the variant sections set their own display, which beats the UA [hidden] rule -
+     without this the inactive variants still paint and push the active one out of view */
+  main > section[hidden] { display: none !important; }
 
   /* stale freeze - displayed state is frozen, not blanked */
   body.is-stale main { filter: saturate(.45); }
@@ -226,7 +229,7 @@
   }
   .col-head h2 { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; }
   .col-head .count { font-size: 11px; color: var(--ink-3); }
-  .col-body { flex: 1 1 auto; overflow-y: auto; padding: 8px 10px; }
+  .col-body { flex: 1 1 auto; overflow-y: auto; padding: 8px 10px 56px; }
   .hrow {
     display: flex; align-items: center; gap: 8px;
     padding: 7px 8px; border-radius: var(--radius);
@@ -285,7 +288,7 @@
   }
   .keybtn.live { border-color: var(--me-tx); background: var(--me-tx); color: #12161b; }
   .keybtn:disabled { opacity: .35; cursor: not-allowed; }
-  .ledger { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+  .ledger { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 52px; }
   table.lg { width: 100%; border-collapse: collapse; font-size: 12px; }
   table.lg th {
     position: sticky; top: 0; z-index: 2;
@@ -742,7 +745,7 @@ function renderA() {
 
   const armedIds = effectiveArmed(), a = audience(armedIds);
   const strip = $("#aStrip"); strip.innerHTML = "";
-  const box = el("div"); box.style.cssText = "flex:0 0 auto;border-top:1px solid var(--line);background:var(--panel);padding:9px 14px;display:flex;align-items:center;gap:14px;";
+  const box = el("div"); box.style.cssText = "flex:0 0 auto;border-top:1px solid var(--line);background:var(--panel);padding:9px 14px 52px;display:flex;align-items:center;gap:14px;";
   const say = el("div", "say-it" + (armedIds.length ? "" : " empty") + (isKeyed() ? " live" : ""));
   say.style.flex = "1";
   say.textContent = armedIds.length
