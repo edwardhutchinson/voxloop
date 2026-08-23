@@ -18,7 +18,7 @@ A single threshold would mean a VPN reroute mutes the Flight Director mid-senten
 
 The `unconfirmed` band is what makes disabling PTT safe rather than fragile. Its honest reading is *"we cannot confirm your transmission right now"* — which is true, and is a materially different statement from *"we know you are disconnected"*.
 
-Indicatively: `unconfirmed` after a few seconds, `disconnected` around ten. **The shape is settled here; the numbers belong to [#18](https://github.com/edwardhutchinson/voxloop/issues/18)**, tuned against the pilot's actual VPN.
+Indicatively: `unconfirmed` after a few seconds, `disconnected` around ten. **The shape is settled here; the numbers belong to [#18](https://github.com/edwardhutchinson/voxloop/issues/18)**, tuned against the pilot's actual VPN. *(Set by [ADR-0041](./0041-a-session-is-resumed-by-name.md): 5s and 12s, startup settings with a bounded ceiling.)*
 
 ## In-flight emission: momentary survives, latched does not
 
@@ -45,7 +45,7 @@ Blanking was rejected as its own lie: an empty console implies *nothing is happe
 ## Consequences
 
 - **The disconnect threshold is a safety parameter, not a display preference.** It sets how long a network hiccup can silence the loudest voice in the room, and it must be tuned on the pilot's network before v1 is called done.
-- **Reconnection must restore emission capability explicitly**, not as a side effect: PTT is re-enabled only after the signalling channel is back *and* state has resynchronised. [#18](https://github.com/edwardhutchinson/voxloop/issues/18) owns what is restored and what is deliberately not.
+- **Reconnection must restore emission capability explicitly**, not as a side effect: PTT is re-enabled only after the signalling channel is back *and* state has resynchronised. [#18](https://github.com/edwardhutchinson/voxloop/issues/18) owns what is restored and what is deliberately not. *(Answered by [ADR-0043](./0043-a-resume-restores-everything-except-the-key.md); the predicate is [ADR-0042](./0042-the-media-path-has-its-own-ladder.md)'s, which adds a second withdrawal condition this ADR did not anticipate.)*
 - **The client needs a local, server-independent announcement path** for the dropped latch and for the disabled PTT. This is the only user-facing message in the product that does not originate at the server.
 - **A latched emission is now interruptible by the network**, so the console must make a dropped latch unmissable — an operator who believes they are still transmitting is the failure this rule was meant to remove, arriving through the other door.
 - **Two sessions can be cut for reasons the other cannot see.** A session dropped at the `disconnected` threshold vanishes from loops it was emitting to; per ADR-0008 the loop must be told a transmission was cut rather than ended, and the reason available to listeners is *signalling lost*, not *talker released*.

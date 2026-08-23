@@ -75,8 +75,16 @@ Whether anyone is behind a loop: `staffed` (an occupant of one of its staffing r
 _Avoid_: occupancy (which belongs to roles), online/offline, presence, availability
 
 **Session**:
-A user's single live connection to the voice loops, created by assuming a role and bound to exactly one. A user has at most one at a time, though they may be signed in on several machines; assuming a role elsewhere ends the previous session and tells it why. Losing the signalling channel does not end it.
+A user's single live connection to the voice loops, created by assuming a role and bound to exactly one. A user has at most one at a time, though they may be signed in on several machines; assuming a role elsewhere ends the previous session and tells it why. Losing the signalling channel does not end it — the session is held for the reconnection window and resumed by name.
 _Avoid_: connection, client, device, login, sign-in (which is the outer act and outlives every session)
+
+**Resume**:
+Reattaching a client to a session it already holds, after losing and regaining the signalling channel. It is not an act the user performs and not a new session — everything the server holds simply becomes visible again — so it confers nothing, clears nothing, and is never evidence that a human came back to the chair.
+_Avoid_: reconnect (which is the channel's recovery, not the session's), rejoin, restore, re-assume
+
+**Reconnection window**:
+How long a session outlives the loss of its signalling channel before it is reaped. Reaching the end of it is a relinquish in every respect except that nobody chose it, and the user is left signed in, in the lobby, told why.
+_Avoid_: timeout, grace period, TTL, session expiry (which is the sign-in's)
 
 **Eligibility**:
 The unconditional grant permitting a user to assume a role. It carries no permissions of its own and no conditions; revoking it while the user occupies the role ends their occupancy immediately, returning them to the lobby, with the reason shown to them.
@@ -196,16 +204,24 @@ _Avoid_: reported state, self-reported, declared status
 The single versioned document, one per session, carrying every state that session may see. It is pushed by the server and rendered atomically, so what is on screen was simultaneously true; it is scoped to the loops the session's role may monitor.
 _Avoid_: state feed, snapshot, sync payload
 
+**Gap event**:
+Something done to a session while it had no signalling channel, told to the operator on resume because current state cannot reveal it — a dropped latch is indistinguishable from one never set. It is a bounded list of things done *to* them, never a diff of the world, and it persists until dismissed.
+_Avoid_: notification, missed event, changelog, diff, replay
+
 **State authority**:
 The single thing that holds every live fact about the running system — sessions, occupancy, subscriptions, arms, key state, connection state and loop health — and the only writer of any of them. Presence documents are projections it computes rather than records it keeps, which is what lets their versions be monotonic and what they show be simultaneously true. It holds nothing durable: everything it knows ends when the server does.
 _Avoid_: session store, state store, cache, registry
 
 **Connection state**:
-A session's standing with the signalling channel: `confirmed`, `unconfirmed` (heartbeats missed, displayed state frozen and marked stale, emission still permitted) or `disconnected` (emission withdrawn at both ends). It describes the state channel, never the audio path.
+A session's standing with the signalling channel: `confirmed`, `unconfirmed` (heartbeats missed, displayed state frozen and marked stale, emission still permitted) or `disconnected` (emission withdrawn at both ends, and the loops the session staffs drop to `away`). It describes the state channel, never the audio path — that is media path state, and the two fail independently in both directions.
 _Avoid_: online/offline, connectivity, network status
 
+**Media path state**:
+A session's standing with the audio transport: `connected`, `impaired` (a transient fault that routinely heals itself) or `lost` (emission withdrawn). It is the audio path's own ladder, read from both ends and merged pessimistically, and it is what makes a session that can be told everything and heard by nobody a state the console can show rather than a silence it cannot explain.
+_Avoid_: transport state, ICE state (which is one end's reading of it), audio health, connection state (which is the signalling channel's)
+
 **Loop health**:
-Whether a session is actually receiving a loop, measured from the arrival of that loop's beacon — a third axis, distinct from whether anyone is talking on it and from its staffing state. It is per (session, loop), so two subscribers may correctly disagree. A quiet loop and an unreachable loop sound identical, so they must never look identical.
+Whether a session is actually receiving a loop, measured from the arrival of that loop's beacon — a third axis, distinct from whether anyone is talking on it and from its staffing state. It is per (session, loop), so two subscribers may correctly disagree. A quiet loop and an unreachable loop sound identical, so they must never look identical. It is reported by the client over the signalling channel, so losing that channel stops the reports as a side effect — connection state answers for the loop then, and beacon loss is suppressed rather than counted as a second reason.
 _Avoid_: connection status, signal strength, online
 
 **Loop beacon**:

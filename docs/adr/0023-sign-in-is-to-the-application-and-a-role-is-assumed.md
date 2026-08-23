@@ -43,7 +43,7 @@ An absolute cap was proposed and rejected. Its case was attribution: with no cap
 | 24h with no deliberate act | n/a — clock runs only in the lobby | ends |
 | `disconnected` ([ADR-0018](./0018-no-signalling-channel-means-no-emission-path.md)) | **survives** | survives |
 
-The last row is load-bearing. Losing the signalling channel withdraws the emission path but does **not** end occupancy, or every VPN blip would cost an operator their subscriptions, arms and staffing. The session persists server-side for a reconnection window; **its length and what it restores belong to [#18](https://github.com/edwardhutchinson/voxloop/issues/18)**, stated here so neither ticket assumes the other owns it.
+The last row is load-bearing. Losing the signalling channel withdraws the emission path but does **not** end occupancy, or every VPN blip would cost an operator their subscriptions, arms and staffing. The session persists server-side for a reconnection window; **its length and what it restores belong to [#18](https://github.com/edwardhutchinson/voxloop/issues/18)**, stated here so neither ticket assumes the other owns it. *(Answered by [ADR-0041](./0041-a-session-is-resumed-by-name.md) — 120s, resumed by name — and [ADR-0043](./0043-a-resume-restores-everything-except-the-key.md).)*
 
 ## Consequences
 
