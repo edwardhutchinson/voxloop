@@ -196,6 +196,10 @@ _Avoid_: reported state, self-reported, declared status
 The single versioned document, one per session, carrying every state that session may see. It is pushed by the server and rendered atomically, so what is on screen was simultaneously true; it is scoped to the loops the session's role may monitor.
 _Avoid_: state feed, snapshot, sync payload
 
+**State authority**:
+The single thing that holds every live fact about the running system — sessions, occupancy, subscriptions, arms, key state, connection state and loop health — and the only writer of any of them. Presence documents are projections it computes rather than records it keeps, which is what lets their versions be monotonic and what they show be simultaneously true. It holds nothing durable: everything it knows ends when the server does.
+_Avoid_: session store, state store, cache, registry
+
 **Connection state**:
 A session's standing with the signalling channel: `confirmed`, `unconfirmed` (heartbeats missed, displayed state frozen and marked stale, emission still permitted) or `disconnected` (emission withdrawn at both ends). It describes the state channel, never the audio path.
 _Avoid_: online/offline, connectivity, network status
