@@ -95,7 +95,7 @@ A notification sent to the occupant of a single-occupant role by an eligible use
 _Avoid_: handover, kick, steal
 
 **Away**:
-The staffing state of a loop whose staffing-role occupants exist but none is hearing it — because they are off console, have muted it, are unreachable, or are not receiving its beacon. Materially different from `vacant`, where nobody occupies a staffing role at all.
+The staffing state of a loop whose staffing-role occupants exist but none is hearing it — because they are off console, have muted it, are unreachable, or are not receiving its beacon. It is a property of the loop computed across every occupant of every role that staffs it, so one occupant going quiet moves nothing while another is still hearing; there is no partial value between `staffed` and `away`. Materially different from `vacant`, where nobody occupies a staffing role at all.
 _Avoid_: idle, AFK, unavailable
 
 **Off console**:
@@ -146,6 +146,10 @@ _Avoid_: selecting, enabling, talk-select, opening
 Actually emitting on the armed loops. Keying says whether voice *is* going. It is performed by the client for latency and signalled to the server, which remains the sole authority for telling anyone else that it is happening. It is driven by the intent of the input sources, never by any one of them directly.
 _Avoid_: push-to-talk (which names the input), transmitting, going live
 
+**Priority transmission**:
+An emission that plays at full gain in every subscriber's ears whatever they have set that loop's volume to. It is conferred by a third momentary binding — a user *keys priority* — rather than by any standing property of a person, role or loop, and it lasts exactly as long as the key is held. It defeats the subscriber's own attenuation and nothing else: it lowers no other talker, does not defeat mute, and compels no subscription.
+_Avoid_: priority speaker (which implies a standing attribute on a person), override, break-in, all-call, urgent, ducking (which is the mechanism VoxLoop does not have)
+
 **Input source**:
 Something a user can key with — a keyboard binding, an on-screen control, a peripheral, a native hotkey. A source reports only two things about itself, an *intent* (whether it currently wants to emit) and its *liveness* (whether it is present and working); it never knows which emission mode it is serving. Sources are additive: a user may have several, and keying follows whether any live one wants to emit.
 _Avoid_: push-to-talk button, PTT key, input device (which is the hardware, not the binding), control
@@ -171,7 +175,7 @@ A subscription a monitoring directive added rather than the operator choosing it
 _Avoid_: forced subscription, mandatory loop, pinned loop
 
 **Mute**:
-A user silencing a loop in their own ears, affecting nobody else. It is a personalisation, not a permission and not an unsubscribe — the subscription stands, so loop health and talking indicators keep arriving. Muting a loop one staffs drops it to `away`, because a loop nobody can hear is not staffed.
+A user silencing a loop in their own ears, affecting nobody else. It is a personalisation, not a permission and not an unsubscribe — the subscription stands, so loop health and talking indicators keep arriving. Muting a loop one staffs contributes to it going `away`, but does not decide it: staffing state is computed across every occupant of every role that staffs the loop, so it stays `staffed` while any one of them is still hearing it. A priority transmission does not defeat mute.
 _Avoid_: silence, deafen, pause, unsubscribe
 
 **Cut**:
