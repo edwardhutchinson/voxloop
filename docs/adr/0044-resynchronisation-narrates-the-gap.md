@@ -15,6 +15,7 @@ The events are only things done to the operator that the current state cannot re
 - permissions changed underneath them, removing arms or subscriptions
 - a **monitoring directive** added loops ([ADR-0035](./0035-a-monitoring-directive-promotes-a-loop-it-does-not-police-it.md))
 - the role was force-relinquished
+- a colleague **hailed** them to a loop ([ADR-0047](./0047-a-hail-is-a-monitoring-directive-without-the-authority.md))
 
 **A full diff was rejected.** The document already carries current state, so a diff would restate it and bury the five things that matter under everything that merely moved. It would also cost what ADR-0019 and [ADR-0039](./0039-live-state-is-in-process-behind-one-state-authority.md) deliberately refuse to pay: the presence document is a **projection the state authority computes rather than a record it keeps**, so there is no history to diff against, and manufacturing one would mean storing documents in order to describe them.
 
@@ -34,3 +35,4 @@ Repeated gaps **coalesce rather than stack**. A flapping VPN produces nine outag
 - **Cut-by-authority appears twice**, in the audit log as a decision ([ADR-0028](./0028-the-audit-log-records-decisions-not-traffic.md)) and here as something the target must be told. Neither is redundant: one is the record, the other is the notification.
 - **This is the only channel carrying how long the outage was.** [ADR-0043](./0043-a-resume-restores-everything-except-the-key.md) restores identically regardless of duration, so if the banner is ever weakened both decisions move together.
 - **A dismissal is a deliberate act**, so it counts as evidence under ADR-0016 and refreshes last-active — unlike the reconnect that produced it.
+- **The banner slot is no longer resume-only.** [ADR-0047](./0047-a-hail-is-a-monitoring-directive-without-the-authority.md) puts a **hail** in it while the session is perfectly healthy, making it the console's general channel for *things you were told* rather than specifically for things that happened while you were dark. The properties that matter carry over unchanged and are what made it the right home: it is a sentence rather than a word, it persists until dismissed rather than fading, it coalesces rather than stacks, and it steals no focus. The bound still holds — a hail is a *thing done to this operator that current state cannot fully reveal*, since the subscription it adds is visible but the sentence saying who asked and why is not.

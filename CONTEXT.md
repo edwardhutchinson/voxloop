@@ -168,11 +168,15 @@ _Avoid_: channel selection, tuning, membership
 
 **Monitoring directive**:
 A live instruction issued by operational authority that puts named loops on the consoles of everyone occupying named roles. It only ever adds subscriptions, never removes them, and it applies once per session — when issued, and again to anyone who assumes a targeted role while it stands. It promotes a loop rather than policing it: once added, the subscription is an ordinary one the operator may drop, mute or reorder.
-_Avoid_: mandatory subscription, forced listen, watch order, monitoring request
+_Avoid_: mandatory subscription, forced listen, watch order, monitoring request, hail (which is the same promotion without the authority)
 
 **Directed subscription**:
-A subscription a monitoring directive added rather than the operator choosing it. It is marked as directed and carries the reason, and it is droppable like any other — the marking exists so nobody mistakes it for their own choice, not to stop them dismissing it.
+A subscription somebody else added rather than the operator choosing it — by a monitoring directive or by a hail. It is marked with which of the two put it there and carries the reason, and it is droppable like any other: the marking exists so nobody mistakes it for their own choice, not to stop them dismissing it.
 _Avoid_: forced subscription, mandatory loop, pinned loop
+
+**Hail**:
+One operator asking a role — or one named person occupying it — to come to a loop the hailer may emit on. It adds that loop to the target's console as a directed subscription and says who asked, and it is dismissed with one click. It reaches whoever holds the seat at that moment and nobody who takes it later, it grants no reach and defeats no mute, and it gets no reply: it asks, and it cannot compel. A monitoring directive is the same promotion carrying authority — standing, binding late arrivals, and audited.
+_Avoid_: ping, invite, page, summons, call (which is the user-to-user voice VoxLoop does not have), notification
 
 **Mute**:
 A user silencing a loop in their own ears, affecting nobody else. It is a personalisation, not a permission and not an unsubscribe — the subscription stands, so loop health and talking indicators keep arriving. Muting a loop one staffs contributes to it going `away`, but does not decide it: staffing state is computed across every occupant of every role that staffs the loop, so it stays `staffed` while any one of them is still hearing it. A priority transmission does not defeat mute.
@@ -249,3 +253,7 @@ _Avoid_: list, table, detail view
 **Transmit bar**:
 The strip present in both console views carrying the armed set in words, the audience counts and the key state. It answers *who am I about to talk to*, so it is never scrolled away and never worded differently between the views.
 _Avoid_: status bar, toolbar, PTT bar
+
+**Hail picker**:
+The control opened from a loop, listing the roles permitted to hear that loop and whoever occupies each, from which a hail is addressed. It opens showing only what can be hailed, and reveals the rest greyed with the reason on request, so that an absence never has to be guessed at. It is the only place the console names a person, and it names them as the holder of a seat — never as the source of a transmission.
+_Avoid_: roster, directory, shift board (none of which VoxLoop has), contact list, people panel
