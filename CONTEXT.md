@@ -63,7 +63,7 @@ The limit on how many users may occupy a role at once. Single-occupant and multi
 _Avoid_: cardinality, capacity, seats
 
 **Staffing role**:
-A role marked as counting toward a particular loop's staffing state. It is set per (role, loop), so a loop may have several staffing roles or none, and it can only be set where the role may emit on that loop — a role that cannot answer cannot staff.
+A role marked as counting toward a particular loop's staffing state. It is set per (role, loop), so a loop may have several staffing roles or none, and it can only be set where the role may emit on that loop — a role that cannot answer cannot staff. The flag **reports and never subscribes**: it puts nothing on an occupant's console, and the role default is the only thing that seeds one.
 _Avoid_: owner, host, primary role
 
 **Occupant**:
@@ -71,7 +71,7 @@ A user who has assumed a role and not yet relinquished it. Roles have occupants;
 _Avoid_: member, holder, incumbent
 
 **Staffing state**:
-Whether anyone is behind a loop: `staffed` (an occupant of one of its staffing roles is demonstrably hearing it), `away` (such occupants exist but none is hearing it) or `vacant` (neither). It asks who is actually hearing the loop, not who has merely assumed a staffing role, and it always carries the reason when `away`. A loop with no staffing roles configured has no staffing state at all and shows nothing, because `vacant` would read as an answer when there is no question — two people may be talking on it.
+Whether anyone is behind a loop: `staffed` (an occupant of one of its staffing roles is demonstrably hearing it), `away` (such occupants exist but none is hearing it) or `vacant` (neither). It asks who is actually hearing the loop, not who has merely assumed a staffing role, and it always carries the reason when `away`, counted across occupants where they differ. A loop with no staffing roles configured has no staffing state at all and shows nothing, because `vacant` would read as an answer when there is no question — two people may be talking on it.
 _Avoid_: occupancy (which belongs to roles), online/offline, presence, availability
 
 **Session**:
@@ -95,7 +95,7 @@ A notification sent to the occupant of a single-occupant role by an eligible use
 _Avoid_: handover, kick, steal
 
 **Away**:
-The staffing state of a loop whose staffing-role occupants exist but none is hearing it — because they are off console, have muted it, are unreachable, or are not receiving its beacon. It is a property of the loop computed across every occupant of every role that staffs it, so one occupant going quiet moves nothing while another is still hearing; there is no partial value between `staffed` and `away`. Materially different from `vacant`, where nobody occupies a staffing role at all.
+The staffing state of a loop whose staffing-role occupants exist but none is hearing it — because they are unreachable, off console, **not subscribed to it**, not receiving its beacon, or have muted it. Not subscribed is the reason that means nobody set the console up rather than somebody stepped away, and it is the one that can stand indefinitely. It is a property of the loop computed across every occupant of every role that staffs it, so one occupant going quiet moves nothing while another is still hearing; there is no partial value between `staffed` and `away`. Occupants may be away for different reasons at once, so the reason is a count over them rather than a single winner; within one occupant the reason reported is the one furthest upstream, in the order above. Materially different from `vacant`, where nobody occupies a staffing role at all.
 _Avoid_: idle, AFK, unavailable
 
 **Off console**:
