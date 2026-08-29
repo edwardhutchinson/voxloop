@@ -71,7 +71,7 @@ A user who has assumed a role and not yet relinquished it. Roles have occupants;
 _Avoid_: member, holder, incumbent
 
 **Staffing state**:
-Whether anyone is behind a loop: `staffed` (an occupant of one of its staffing roles is demonstrably hearing it), `away` (such occupants exist but none is hearing it) or `vacant` (neither). It asks who is actually hearing the loop, not who has merely assumed a staffing role, and it always carries the reason when `away`.
+Whether anyone is behind a loop: `staffed` (an occupant of one of its staffing roles is demonstrably hearing it), `away` (such occupants exist but none is hearing it) or `vacant` (neither). It asks who is actually hearing the loop, not who has merely assumed a staffing role, and it always carries the reason when `away`. A loop with no staffing roles configured has no staffing state at all and shows nothing, because `vacant` would read as an answer when there is no question — two people may be talking on it.
 _Avoid_: occupancy (which belongs to roles), online/offline, presence, availability
 
 **Session**:
