@@ -11,7 +11,7 @@ An account belonging to a person. A user is never a destination for voice and ne
 _Avoid_: entity, account, operator, client
 
 **Role**:
-A staffable position that users assume, such as `Flight Director` or `Support Engineer`. It is the carrier of permissions and console layout, and it is a slot users step into — not a group of users.
+A staffable position that users assume, such as `Flight Director` or `Support Engineer`. It carries permissions, and it carries a default console its occupants start from rather than the console they end up with, and it is a slot users step into — not a group of users.
 _Avoid_: position, station, group, team, entity
 
 **Loop**:
@@ -156,14 +156,14 @@ _Avoid_: push-to-talk button, PTT key, input device (which is the hardware, not 
 
 **Preset**:
 A named set of loops that momentarily replaces the loops a user has armed while keyed, reverting the moment they unkey. It is an ergonomic shortcut across loops the role may already emit on — never extra reach — and it narrows as readily as it widens.
-_Avoid_: broadcast, all-call, macro, profile (which is persistent, and covers subscriptions and layout)
+_Avoid_: broadcast, all-call, macro, profile (a term VoxLoop does not have; personalisation is the persistent thing, and it is never switched between)
 
 **Monitoring**:
 Receiving the audio of a loop. A user monitors a loop; they do not "join" it, because a loop has no membership of its own.
 _Avoid_: listening in, joining, tuning
 
 **Subscription**:
-The live choice to monitor a particular loop, held per session. Distinct from permission: permission says which loops a role *may* monitor, subscription says which of them it *currently is*.
+The live choice to monitor a particular loop, held per session. Distinct from permission: permission says which loops a role *may* monitor, subscription says which of them it *currently is*. The set is remembered as personalisation, so assuming a role restores the loops that role last had, but each subscription is live state that ends with the session.
 _Avoid_: channel selection, tuning, membership
 
 **Monitoring directive**:
@@ -179,7 +179,7 @@ One operator asking a role — or one named person occupying it — to come to a
 _Avoid_: ping, invite, page, summons, call (which is the user-to-user voice VoxLoop does not have), notification
 
 **Mute**:
-A user silencing a loop in their own ears, affecting nobody else. It is a personalisation, not a permission and not an unsubscribe — the subscription stands, so loop health and talking indicators keep arriving. Muting a loop one staffs contributes to it going `away`, but does not decide it: staffing state is computed across every occupant of every role that staffs the loop, so it stays `staffed` while any one of them is still hearing it. A priority transmission does not defeat mute.
+A user silencing a loop in their own ears, affecting nobody else. It is a personalisation, not a permission and not an unsubscribe — the subscription stands, so loop health and talking indicators keep arriving. Muting a loop one staffs contributes to it going `away`, but does not decide it: staffing state is computed across every occupant of every role that staffs the loop, so it stays `staffed` while any one of them is still hearing it. A priority transmission does not defeat mute. It lasts as long as the session and no longer: a mute is never remembered, because a forgotten one silences a loop the moment its owner assumes the role again.
 _Avoid_: silence, deafen, pause, unsubscribe
 
 **Cut**:
@@ -257,3 +257,21 @@ _Avoid_: status bar, toolbar, PTT bar
 **Hail picker**:
 The control opened from a loop, listing the roles permitted to hear that loop and whoever occupies each, from which a hail is addressed. It opens showing only what can be hailed, and reveals the rest greyed with the reason on request, so that an absence never has to be guessed at. It is the only place the console names a person, and it names them as the holder of a seat — never as the source of a transmission.
 _Avoid_: roster, directory, shift board (none of which VoxLoop has), contact list, people panel
+
+### Personalisation
+
+**Personalisation**:
+Everything a user has set about their own console that carries no authority: their subscriptions, per-loop volumes, loop order, default view, personal presets, push-to-talk bindings and audio devices. Each item is scoped to the smallest thing it is about, which is the user for a binding, the (user, role) pair for a subscription set, the (user, role, loop) triple for a volume, and the machine for a device. It is saved continuously rather than chosen between, it may only ever narrow within reach, and the permission grid overrules it silently and always.
+_Avoid_: profile (nothing in VoxLoop is named and switched between), preferences, settings, layout, config
+
+**Role default**:
+The console an administrator sets for a role: its subscription set, default view and loop order, but never its volumes. A user occupying that role for the first time starts from it. It is applied once and never re-imposed, so it is a starting point rather than a floor, and nothing in VoxLoop can oblige an operator to keep a subscription.
+_Avoid_: template, profile, enforced subscriptions, mandatory loops, preset (which is momentary and covers arms)
+
+**Reset to role default**:
+The single wholesale act on a user's personalisation, discarding what they have set for a role and starting again from that role's default as it stands now — never as it stood when they first assumed the role. It clears nothing live, so a mute or an arm set survives it, and it leaves bindings and audio devices alone because those are not the role's.
+_Avoid_: restore defaults, revert, factory reset, start state
+
+**Loop order**:
+The order the loops in reach are shown in, the same in the board and the ledger. It is a complete ordering rather than a set of pins over a base order, so an operator's arrangement never rearranges itself underneath them, and a loop entering reach is appended at the end and marked new until they move it or dismiss the mark.
+_Avoid_: sort, layout, pinning, watch order (which is the monitoring directive's)
