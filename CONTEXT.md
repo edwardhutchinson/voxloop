@@ -151,7 +151,7 @@ Actually emitting on the armed loops. Keying says whether voice *is* going. It i
 _Avoid_: push-to-talk (which names the input), transmitting, going live
 
 **Priority transmission**:
-An emission that plays at full gain in every subscriber's ears whatever they have set that loop's volume to. It is conferred by a third momentary binding — a user *keys priority* — rather than by any standing property of a person, role or loop, and it lasts exactly as long as the key is held. It defeats the subscriber's own attenuation and nothing else: it lowers no other talker, does not defeat mute, and compels no subscription.
+An emission that plays at full gain in every subscriber's ears whatever they have set that loop's volume to. It is conferred by a third momentary binding — a user *keys priority* — rather than by any standing property of a person, role or loop, and it lasts exactly as long as the key is held. It defeats the subscriber's own attenuation and nothing else: it lowers no other talker, does not defeat mute, and compels no subscription. It is marked on every loop it reaches, on the console of everyone monitoring that loop, whatever volume they have set and whether or not they have muted it, because the mark declares that somebody called this urgent rather than explaining why their audio got louder.
 _Avoid_: priority speaker (which implies a standing attribute on a person), override, break-in, all-call, urgent, ducking (which is the mechanism VoxLoop does not have)
 
 **Input source**:
@@ -255,7 +255,7 @@ The console view showing one compact table row per loop in reach. It is the read
 _Avoid_: list, table, detail view
 
 **Transmit bar**:
-The strip present in both console views carrying the armed set in words, the audience counts and the key state. It answers *who am I about to talk to*, so it is never scrolled away and never worded differently between the views.
+The strip present in both console views carrying the armed set in words, the audience counts and the key state. It answers *who am I about to talk to* and, because it stays live while the key is held, *who am I talking to*, so it is never scrolled away and never worded differently between the views. A change to the armed set the session did not ask for is marked; a preset or a deliberate arm just redraws.
 _Avoid_: status bar, toolbar, PTT bar
 
 **Hail picker**:

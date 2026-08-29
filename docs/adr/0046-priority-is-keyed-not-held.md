@@ -33,6 +33,8 @@ Holding both the ordinary key and the priority key is therefore **one transmissi
 
 A loop flag would have been standing state on a card. A key is not, so audio changes level with nothing on screen having changed first, and the map's rule is that displayed state is factual.
 
+⚠️ **Re-grounded by [ADR-0059](./0059-a-priority-transmission-is-marked-wherever-it-lands.md):** the mechanism below is unchanged, but the mark is a declaration rather than an explanation of gain, so it renders on loops the receiver has at full volume and on loops they have muted, and it has no minimum display time.
+
 **The talking indicator gets a priority variant, and that is the entire answer** — no banner, no toast, no message telling a subscriber their volume was overridden. This stays inside [ADR-0033](./0033-the-console-shows-that-someone-is-talking-never-who.md), because it says what *kind* of transmission is on the loop and still never whose, and inside [ADR-0032](./0032-the-console-is-two-views-of-one-loop-list.md), because it is a word on a card. It explains the gain change while the gain change is happening, which is the only moment it matters. On the emitting side, ADR-0034 already requires the key control to render live in both views, so an elevated latch shows as elevated with no new surface.
 
 ## Announcements
