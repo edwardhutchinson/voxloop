@@ -224,6 +224,10 @@ _Avoid_: notification, missed event, changelog, diff, replay
 The single thing that holds every live fact about the running system — sessions, occupancy, subscriptions, arms, key state, connection state and loop health — and the only writer of any of them. Presence documents are projections it computes rather than records it keeps, which is what lets their versions be monotonic and what they show be simultaneously true. It holds nothing durable: everything it knows ends when the server does.
 _Avoid_: session store, state store, cache, registry
 
+**Media plane**:
+The part of the system that carries audio and knows nothing about why. It is told which subscribers should hear which talker and makes it so; it never works out who, because reach is decided by the state authority and handed down. A loop reaches it only as a label on a destination, never as something it reasons about.
+_Avoid_: media layer, audio server, SFU (which is the technology, not the part), router, mixer (which VoxLoop does not have server-side)
+
 **Connection state**:
 A session's standing with the signalling channel: `confirmed`, `unconfirmed` (heartbeats missed, displayed state frozen and marked stale, emission still permitted) or `disconnected` (emission withdrawn at both ends, and the loops the session staffs drop to `away`). It describes the state channel, never the audio path — that is media path state, and the two fail independently in both directions.
 _Avoid_: online/offline, connectivity, network status
