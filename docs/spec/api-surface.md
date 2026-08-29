@@ -2,7 +2,7 @@
 
 Every operation VoxLoop exposes, with the requirement it carries. The rule behind the shape of this list is [ADR-0054](../adr/0054-every-operation-declares-its-authorisation.md); this file is the enumeration.
 
-**Requirements.** `Public` (no principal) · `SignedIn` (authenticated user, no role) · `Session` (a role assumed) · `Grid(rung, loop)` (`Session`, and the assumed role holds at least `rung` on `loop`) · `SystemAdministration` (the user-level flag) · `ServiceToken` (a service principal).
+**Requirements.** `Public` (no principal) · `SignedIn` (authenticated user, no role) · `Session` (a role assumed) · `Grid(rung, loop)` (the **acting principal's** role holds at least `rung` on `loop` — the assumed role for a user, the bound role for a service principal) · `SystemAdministration` (the user-level flag) · `ServiceToken` (a service principal).
 
 **Audited** means the operation writes to the audit log per [ADR-0028](../adr/0028-the-audit-log-records-decisions-not-traffic.md). Refused authority acts and refused administration writes are audited too; refused reads are not.
 
@@ -69,7 +69,7 @@ Nothing here defaults to open. A route is registered with its requirement as a m
 
 ## System administration
 
-All `SystemAdministration`, all HTTP, all **audited** with before and after plus the blast radius ([ADR-0015](../adr/0015-the-admin-console-reads-one-row-at-a-time.md)). Reachable from the lobby and from within a session, and never from a role.
+All `SystemAdministration`, all HTTP. Every **write** is audited, with before and after plus the blast radius ([ADR-0015](../adr/0015-the-admin-console-reads-one-row-at-a-time.md)); reads are not. *Announce from the console* is the one row that is neither a configuration write nor a read, and it is audited with the contents of its own note. Reachable from the lobby and from within a session, and never from a role.
 
 | Operation | Notes |
 |---|---|
@@ -85,6 +85,7 @@ All `SystemAdministration`, all HTTP, all **audited** with before and after plus
 | Set the staffing-role flag per (role, loop) | Only where the role may emit on that loop |
 | Create service principals, issue and revoke tokens, bind a role | Standing grant with no expiry ([ADR-0027](../adr/0027-a-service-principal-acts-through-a-role.md)) |
 | Edit the pronunciation dictionary | One list for the deployment ([ADR-0030](../adr/0030-speech-synthesis-is-a-swappable-sidecar.md)) |
+| Announce from the console | Executed **as the designated console principal**, never as the administrator. `Grid(emit, loop)` is checked against that principal's bound role for **every** loop named, so the caller and the actor are different principals ([ADR-0066](../adr/0066-the-console-announces-as-the-designated-principal.md)). Carries the priority flag. **Audited with the text**, uniquely among announcements ([ADR-0067](../adr/0067-composed-text-is-a-decision.md)) |
 | Edit a role default | Subscription set, view, loop order. No live blast radius ([ADR-0052](../adr/0052-a-role-default-is-a-starting-point-never-a-floor.md)) |
 | Create · read · edit · delete role presets | Shared across occupants of differing reach, so a preset narrows silently at use ([ADR-0013](../adr/0013-arming-is-independent-of-subscription.md)) |
 | Edit the deployment loop order | ([ADR-0053](../adr/0053-the-loop-order-is-complete-and-a-new-loop-lands-at-the-end.md)) |
@@ -98,6 +99,8 @@ All `SystemAdministration`, all HTTP, all **audited** with before and after plus
 | Announce | HTTP | `ServiceToken` + `Grid(emit, loop)` for **every** loop named | Bearer token in an `Authorization` header, never a query string. A loop the bound role cannot reach refuses the whole call. Carries a priority flag. The announcement is not audited; keying priority is ([ADR-0029](../adr/0029-an-announcement-is-an-ordinary-transmission.md)) |
 
 The token reaches nothing else. It is refused on the socket upgrade and on every cookie route, and a request presenting both a cookie and a token is refused rather than resolved by precedence.
+
+**Announce and Announce from the console are two rows and one implementation.** They differ only in how the acting principal is resolved — from the presented token, or from the deployment's designated console principal. Reach check, server-composed prefix, pronunciation dictionary, backlog refusal, maximum length, priority flag, synthesis and injection are one code path. Two rows is what [ADR-0054](../adr/0054-every-operation-declares-its-authorisation.md) requires, because an operation whose requirement depends on who called is the ambiguity that rule removes.
 
 ## Outside the model by design
 
@@ -114,6 +117,7 @@ The token reaches nothing else. It is refused on the socket upgrade and on every
 | A per-user permission exception of any kind | No exception layer exists ([ADR-0011](../adr/0011-a-permission-is-one-cell-on-the-grid.md), [ADR-0014](../adr/0014-authority-acts-on-emission-are-transient.md)) |
 | An access-request endpoint | Asking for reach is a conversation; the administrator's cell edit is the part VoxLoop does |
 | A forceful announcement endpoint | Designed and dropped ([ADR-0029](../adr/0029-an-announcement-is-an-ordinary-transmission.md)) |
+| A browser-held service token, short-lived or otherwise | The console page acts through the server instead ([ADR-0066](../adr/0066-the-console-announces-as-the-designated-principal.md)) |
 | A service-principal read endpoint | Loop names are configuration a script holds |
 | Self-registration and self-service password reset | No mail path ([ADR-0025](../adr/0025-credentials-are-administered-because-there-is-no-email.md)) |
 | A personalisation configuration endpoint | Written through as the state authority applies the live act ([ADR-0050](../adr/0050-personalisation-persists-what-is-safe-to-be-stale.md)) |

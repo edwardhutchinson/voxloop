@@ -21,6 +21,8 @@ Two candidates were considered and rejected. A `Self` tier, for a user acting on
 
 `Grid` is the only requirement that is a function of arguments rather than of the caller alone. That is deliberate — authority is read off the grid via the assumed role, exactly as [ADR-0029](./0029-an-announcement-is-an-ordinary-transmission.md) already does for announcements, and never invented per endpoint.
 
+**`Grid` means the acting principal's role** — the assumed role for a user, the bound role for a service principal. The announce row already relies on the second reading, and [ADR-0066](./0066-the-console-announces-as-the-designated-principal.md) has one operation where the caller and the actor are different principals: the caller is checked for `SystemAdministration`, and the grid check runs against the principal the server acts as. Two checks, two principals, still one requirement per row.
+
 ## The default is refusal, and it is enforced by the compiler
 
 Registering a route takes an authorisation requirement as a **mandatory argument**. There is no default value and no way to register a route without one; `Public` is a variant somebody has to type by name, in a diff a reviewer sees. A default-deny middleware sits behind it as a backstop, but the middleware is not the mechanism — an allowlist table is one more place to forget an entry, which is the failure this ADR exists to prevent, wearing a different hat.
@@ -67,7 +69,7 @@ Four things and no more: the static bundle, sign-in, enrolment-code redemption, 
 
 ## Credentials do not mix, and limits are keyed on source
 
-A request carries **exactly one credential kind**. Presenting both a cookie and a service token is refused rather than resolved by precedence — a confused deputy needs somewhere to be confused, and a precedence order is that place. The token rides an `Authorization` header, never a query string (ADR-0026), and the socket upgrade refuses tokens outright: a service principal has no session, no client and no media path ([ADR-0029](./0029-an-announcement-is-an-ordinary-transmission.md)).
+A request carries **exactly one credential kind**. Presenting both a cookie and a service token is refused rather than resolved by precedence — a confused deputy needs somewhere to be confused, and a precedence order is that place. [ADR-0066](./0066-the-console-announces-as-the-designated-principal.md) keeps this rule intact for the one surface that looked like it would break it: the console announcement page sends a cookie and nothing else, and the server holds no token for the principal it acts as. The token rides an `Authorization` header, never a query string (ADR-0026), and the socket upgrade refuses tokens outright: a service principal has no session, no client and no media path ([ADR-0029](./0029-an-announcement-is-an-ordinary-transmission.md)).
 
 **Rate limits are keyed on source, never on the submitted account name**, with a global ceiling behind them. ADR-0025 chose rate limiting over auto-lock precisely so that nobody could lock out the Flight Director. Keying the limiter on the account name reintroduces that attack in softer form: hammer the name, and the person starting the shift waits. The same limiter covers sign-in, enrolment redemption and bootstrap redemption.
 

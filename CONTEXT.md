@@ -45,7 +45,7 @@ The durable pair of issuer and subject naming a user in a customer's identity pr
 _Avoid_: SSO identity, federated id, email, subject
 
 **Audit log**:
-The append-only record of authentication events, configuration changes and operational authority acts — decisions about the system, never the traffic through it. Who talked, and when, is not in it.
+The append-only record of authentication events, configuration changes, operational authority acts and console announcements — decisions about the system, never the traffic through it. Who talked, and when, is not in it; an announcement an administrator composed by hand is, because composing it was the decision.
 _Avoid_: activity log, event log, history, journal
 
 ### Occupancy
@@ -197,6 +197,10 @@ _Avoid_: talker identity, speaker name, caller ID
 **Announcement**:
 A synthesised transmission emitted by a service principal on loops its bound role may emit to, heard by whoever is subscribed and not muted. It is an ordinary transmission in every respect — it overrides nothing, and it runs for the length of its audio rather than being held or latched.
 _Avoid_: broadcast (retired in favour of *preset*), notification (which is sent to a person, not a loop), alert, injection, message
+
+**Console principal**:
+The one service principal a deployment seeds at install, on whose behalf the admin console's announcement page speaks. Its bound role is human-ineligible and starts with no reach, so an administrator types and sends as it rather than as themselves, and the loops it can reach are the ones somebody granted it in the grid.
+_Avoid_: system account, the console user, admin principal, announcer
 
 **Pronunciation dictionary**:
 The deployment's single list of literal replacements applied to an announcement's text before it is spoken, so that the site's own acronyms are read aloud correctly. It is configuration, held once for the whole deployment, and it applies to the attributed role's name as readily as to the caller's words.

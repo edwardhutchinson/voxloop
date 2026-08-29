@@ -43,6 +43,8 @@ A loop flag would have been standing state on a card. A key is not, so audio cha
 
 **The priority is audited even though the announcement is not.** ADR-0029 deliberately keeps announcements out of the audit log as traffic rather than decisions; keying priority is a decision under the rule above. What lands in the log is that a priority transmission occurred, attributed to the bound role, which is what ADR-0028 wants and does not reopen ADR-0029.
 
+⚠️ **On the admin console's announcement path, one entry covers both** ([ADR-0067](./0067-composed-text-is-a-decision.md)). The announcement is audited there too, so there is no separate priority record to make — the flag is set on the same call rather than keyed as its own act, and the entry names the acting administrator alongside the bound role.
+
 ## Consequences
 
 - **A third global hotkey is a third chance to fail registration.** [ADR-0020](./0020-the-browser-is-the-client.md) established that Windows `RegisterHotKey` is exclusive and **fails rather than warns** when a combination is claimed. This binding is also the one an operator is least likely to have exercised before the moment they need it, which makes binding-time conflict detection more load-bearing than it already was.
