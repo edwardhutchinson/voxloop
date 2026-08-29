@@ -1,5 +1,7 @@
 # Presence is one versioned document, scoped to reach, hiding nothing inside it
 
+> ⚠️ **Its rendering of the audience is superseded by [ADR-0034](./0034-the-transmit-bar-is-always-visible-and-the-audience-is-a-count.md).** The *model* below is intact — the audience is computed per (role, user) into three buckets, and the three-way split is the point — but the console does **not** render it as a visible list of people. It renders **two counts** (`6 hearing`, `1 present, not hearing`) and the third bucket, people in reach who did not subscribe, is computed and deliberately not shown. The one place it surfaces by name is the hail picker ([ADR-0048](./0048-the-hail-picker-is-the-only-place-the-console-names-a-person.md)), for ADR-0034's own reason.
+
 Three decisions about how presence state is carried, sliced and shared.
 
 ## One channel, and the signalling WebSocket is authoritative

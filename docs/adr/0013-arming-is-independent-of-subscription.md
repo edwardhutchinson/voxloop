@@ -1,5 +1,7 @@
 # Arming is independent of subscription
 
+> **Its deferred work is discharged by [ADR-0049](./0049-the-role-is-the-profile.md).** The first consequence below promises "profiles" as open work; the deferral was settled by **deleting the feature** — the role is the profile, there is one implicit personalisation set per `(user, role)`, and "profile" is retired from the vocabulary. Everything this ADR says about presets stands.
+
 A user may emit to a loop they are not monitoring, and monitor a loop they are not armed on. **You subscribe to the loops you want to hear, and nothing else puts a loop in your ears.**
 
 The alternative — arming a loop forces you to subscribe to it — was considered and rejected because it destroys the meaning of a subscription. [ADR-0005](./0005-occupancy-means-listening-not-signed-in.md) reads staffing state directly off subscriptions: a loop is `staffed` when an occupant of a staffing role is subscribed to it. If arming pushed entries into that set, loops would report themselves staffed because somebody was *talking at* them, which is precisely the failure ADR-0005 exists to prevent. Keeping the two independent leaves a subscription meaning "I chose to listen to this" — the only meaning staffing state can be computed from.

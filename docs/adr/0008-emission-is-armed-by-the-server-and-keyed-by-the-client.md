@@ -1,5 +1,7 @@
 # Emission is armed by the server and keyed by the client
 
+> **Its open question is answered by [ADR-0014](./0014-authority-acts-on-emission-are-transient.md).** The last consequence below asks whether an administrator's silencing action targets the user or the role; the answer is **neither** — it is not a permission at all, but the transient act **Cut**, and [ADR-0011](./0011-a-permission-is-one-cell-on-the-grid.md) admits no per-user exception layer for it to write into. Note also that this ADR predates the permission ladder and says `send`; read it as `emit` ([ADR-0011](./0011-a-permission-is-one-cell-on-the-grid.md)).
+
 Emission decomposes into two acts with different enforcement.
 
 **Arming** — selecting a loop as a destination — is enforced by the server, in the media plane. The server will not create a fan-out entry from a talker's stream to a loop whose (role, loop) pair lacks `send`. A client cannot reach an unarmed loop because the route does not exist; there is nothing to bypass.

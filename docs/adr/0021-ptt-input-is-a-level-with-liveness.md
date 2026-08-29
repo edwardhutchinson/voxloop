@@ -1,5 +1,7 @@
 # Push-to-talk input is a level with liveness, never an event
 
+> **Its open point on device selection is settled by [ADR-0051](./0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md).** Microphone and output device are scoped to the **machine**, held client side in the browser and never sent to the server. The rule this ADR states — independent liveness, and a device disappearing while keyed forces an unkey — is unchanged.
+
 Every push-to-talk input source publishes two things across one interface: a **level** — *this source currently wants to emit* — and a **liveness flag** — *this source is present and working*. The client ORs the levels of all live sources and drives [keying](../../CONTEXT.md) from the result. Sources never publish events.
 
 This seam exists from day one, before the source that most needs it. [ADR-0020](./0020-the-browser-is-the-client.md) defers the native global hotkey to the very end of v1, so the difference between the wrapper being a wrapper and being a retrofit is entirely whether this interface was there first.

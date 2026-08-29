@@ -47,6 +47,10 @@ Nothing here defaults to open. A route is registered with its requirement as a m
 | Clear a Cut on oneself | WebSocket | `Session` | The target clears their own ([ADR-0014](../adr/0014-authority-acts-on-emission-are-transient.md)) |
 | Dismiss a directed subscription | WebSocket | `Session` | Droppable like any other |
 | Report loop health | WebSocket | `Session` | Beacon counts ([ADR-0017](../adr/0017-loop-health-is-measured-not-asserted.md)) |
+| Report media path state | WebSocket | `Session` | Client-driven; the server's `iceState` is the backstop ([ADR-0042](../adr/0042-the-media-path-has-its-own-ladder.md)) |
+| Reset personalisation to the role default | WebSocket | `Session` | Confirmed before it runs. Goes to the default *as it stands now*. Clears nothing live; leaves bindings and audio device alone ([ADR-0049](../adr/0049-the-role-is-the-profile.md)) |
+| Dismiss a banner — gap event or hail | WebSocket | `Session` | A deliberate act, so it refreshes last-active ([ADR-0044](../adr/0044-resynchronisation-narrates-the-gap.md)) |
+| Dismiss the new-loop mark | WebSocket | `Session` | Persisted with the loop order ([ADR-0053](../adr/0053-the-loop-order-is-complete-and-a-new-loop-lands-at-the-end.md)) |
 | Answer a takeover request | WebSocket | `Session` | Occupant of the targeted role only |
 | mediasoup signalling | WebSocket | `Session` | Transport bound to the session at creation ([ADR-0026](../adr/0026-one-credential-and-the-media-path-carries-none.md)) |
 
@@ -82,6 +86,7 @@ All `SystemAdministration`, all HTTP, all **audited** with before and after plus
 | Create service principals, issue and revoke tokens, bind a role | Standing grant with no expiry ([ADR-0027](../adr/0027-a-service-principal-acts-through-a-role.md)) |
 | Edit the pronunciation dictionary | One list for the deployment ([ADR-0030](../adr/0030-speech-synthesis-is-a-swappable-sidecar.md)) |
 | Edit a role default | Subscription set, view, loop order. No live blast radius ([ADR-0052](../adr/0052-a-role-default-is-a-starting-point-never-a-floor.md)) |
+| Create · read · edit · delete role presets | Shared across occupants of differing reach, so a preset narrows silently at use ([ADR-0013](../adr/0013-arming-is-independent-of-subscription.md)) |
 | Edit the deployment loop order | ([ADR-0053](../adr/0053-the-loop-order-is-complete-and-a-new-loop-lands-at-the-end.md)) |
 | Query the audit log | Filterable by actor and target. Reads are not themselves audited in v1 |
 | Read subprocess, disk and backup health | The mediasoup worker and the text-to-speech sidecar ([ADR-0040](../adr/0040-one-binary-one-unit-four-moving-parts.md)) |
