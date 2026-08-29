@@ -1,1 +1,71 @@
-# voxloop
+# VoxLoop
+
+A software voice loop system. Users assume roles, a role's reach is read off the (role,
+loop) permission grid, and that grid is the only place voice authority is configured.
+
+The design lives in [`docs/spec/v1.md`](docs/spec/v1.md); read
+[`docs/spec/modules.md`](docs/spec/modules.md) first, because it says what the system *is*
+rather than why. [`docs/adr/`](docs/adr/) holds the reasoning.
+
+## What runs
+
+One Rust binary — console, API, signalling, permission enforcement and TLS — beside the
+mediasoup worker, the text-to-speech sidecar and one SQLite file. No reverse proxy, no Node
+runtime, and one systemd unit ([ADR-0040](docs/adr/0040-one-binary-one-unit-four-moving-parts.md)).
+
+## Building
+
+A bare `cargo build` needs nothing but Rust. It does not embed the console, and does not
+need Node or `web/dist` to exist.
+
+A **release** build embeds the console, and has an ordering requirement:
+
+```sh
+cd web && npm install && npm run build   # writes web/dist, which is never committed
+cd .. && cargo build --release --features embed-web
+```
+
+`cargo build --release` without `--features embed-web` refuses to compile, so a release can
+only be built one way. Build it with the feature and no `web/dist` and it fails outright.
+Build it over a **stale** `web/dist` and it succeeds and ships the previous console: that is
+the one failure nothing here can catch, which is why the two commands belong together in CI
+([ADR-0037](docs/adr/0037-the-client-ships-as-static-assets-embedded-at-release.md)).
+
+## Running it
+
+VoxLoop terminates TLS itself, so it needs a certificate before it will start. For local
+work, any self-signed one will do:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" \
+  -keyout private-key.pem -out certificate.pem
+
+cp voxloop.example.toml voxloop.toml   # then point it at those two files
+cargo run
+```
+
+`cargo run` takes the deployment file as its first argument, or from `VOXLOOP_CONFIG`, or
+as `voxloop.toml` in the working directory. Every value in it can be overridden from the
+environment: `VOXLOOP_LISTEN__ADDRESS=127.0.0.1:9443 cargo run`.
+
+## Working on the console
+
+Development is two processes; release is one artefact. Run the binary as above, then:
+
+```sh
+cd web && npm run dev
+```
+
+Vite serves the console with hot reload and proxies `/api` to the binary on port 8443.
+
+## Tests
+
+```sh
+cargo test                      # the binary, without the console embedded
+cargo test --features embed-web # the same, plus the embedded bundle (needs npm run build)
+```
+
+Tests run against the real store: each one opens a temporary SQLite file, migrates it and
+throws it away. There is no in-memory repository and there will not be one
+([ADR-0064](docs/adr/0064-tests-run-against-the-real-store.md)).

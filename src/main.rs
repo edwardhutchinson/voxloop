@@ -1,0 +1,122 @@
+//! VoxLoop — the one binary a deployment runs.
+//!
+//! A deployment is four moving parts: this binary (console, API, signalling, permission
+//! enforcement, TLS), the mediasoup C++ worker, the text-to-speech sidecar, and one SQLite
+//! file ([ADR-0040]). This file is the composition root and nothing else: it reads the
+//! deployment file, starts logging, opens the store, serves, and stops when it is told to.
+//!
+//! The modules under it are the seams ([`docs/spec/modules.md`], [ADR-0060]). Each makes
+//! exactly its interface `pub(crate)` and keeps the rest private, which is what makes Rust's
+//! own privacy the enforcement rather than a review convention ([ADR-0061]). Widening
+//! `pub(crate)` is the cheapest edit in this codebase and it is how a seam quietly stops
+//! existing.
+//!
+//! [ADR-0040]: ../../docs/adr/0040-one-binary-one-unit-four-moving-parts.md
+//! [ADR-0060]: ../../docs/adr/0060-a-seam-names-domain-operations.md
+//! [ADR-0061]: ../../docs/adr/0061-module-privacy-is-the-seam-enforcement.md
+//! [`docs/spec/modules.md`]: ../../docs/spec/modules.md
+
+// ADR-0037 puts the embed "off by default and on for release". Cargo has no per-profile
+// feature, so the second half is this: a release build that would ship without the console
+// does not compile. Building a release is therefore one command, and it is the right one.
+#[cfg(all(not(debug_assertions), not(feature = "embed-web")))]
+compile_error!(
+    "a release build must carry the console: run `npm run build` in web/, then \
+     `cargo build --release --features embed-web`"
+);
+
+mod authorisation;
+mod configuration;
+mod telemetry;
+mod transport;
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use configuration::{Deployment, DeploymentError, Store, StoreError};
+use telemetry::{TelemetryError, module};
+use transport::TransportError;
+
+/// Where the deployment file is when nobody says otherwise.
+const DEPLOYMENT_FILE: &str = "voxloop.toml";
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(refusal) => {
+            // Startup can fail before there is anywhere to log to, so this goes to stderr
+            // whatever happens. systemd will have it either way.
+            eprintln!("voxloop: {refusal}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Everything that stops VoxLoop before it has started.
+#[derive(Debug, thiserror::Error)]
+enum StartupError {
+    #[error(transparent)]
+    Deployment(#[from] DeploymentError),
+
+    #[error(transparent)]
+    Telemetry(#[from] TelemetryError),
+
+    #[error(transparent)]
+    Store(#[from] StoreError),
+
+    #[error(transparent)]
+    Transport(#[from] TransportError),
+}
+
+async fn run() -> Result<(), StartupError> {
+    let deployment = Deployment::load(&deployment_file())?;
+    telemetry::start(&deployment.log.level)?;
+
+    let store = Store::open(&deployment.store.path).await?;
+    let serving = transport::start(&deployment).await?;
+    tracing::info!(target: module::TRANSPORT, address = %serving.address(), "serving");
+
+    wait_to_be_stopped().await;
+
+    // A restart is indistinguishable from total network loss to every client, and it ends
+    // every session, so the least this can do is put the store down cleanly.
+    serving.stop().await;
+    store.close().await;
+    tracing::info!(target: module::TRANSPORT, "stopped");
+
+    Ok(())
+}
+
+/// The deployment file named on the command line, in the environment, or by default.
+fn deployment_file() -> PathBuf {
+    std::env::args()
+        .nth(1)
+        .or_else(|| std::env::var("VOXLOOP_CONFIG").ok())
+        .map_or_else(|| PathBuf::from(DEPLOYMENT_FILE), PathBuf::from)
+}
+
+/// Wait for systemd to stop the unit, or for someone at a terminal to interrupt it.
+async fn wait_to_be_stopped() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(terminate) => terminate,
+            Err(error) => {
+                tracing::warn!(target: module::TRANSPORT, %error, "no SIGTERM handler");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+
+        tokio::select! {
+            _ = terminate.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
+}

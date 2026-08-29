@@ -1,0 +1,33 @@
+# VoxLoop's deployment file: everything needed to reach the store, and nothing an
+# administrator can change from the console (ADR-0040). It is read once, at startup, and
+# never re-read — so changing anything here, a certificate included, means a restart, and a
+# restart ends every session.
+#
+# Every value can be overridden from the environment with a VOXLOOP_ prefix and a double
+# underscore for the section: VOXLOOP_LISTEN__ADDRESS, VOXLOOP_STORE__PATH, and so on.
+#
+# Copy to voxloop.toml and edit.
+
+[listen]
+# One inbound TCP port carries HTTPS and the signalling WebSocket together.
+# Optional; this is the default.
+address = "0.0.0.0:8443"
+
+[tls]
+# TLS terminates in this binary — there is no reverse proxy anywhere in a VoxLoop
+# deployment. HTTPS is mandatory even on a LAN, because a Secure cookie is not sent
+# otherwise. A long-lived internal CA certificate suits a box whose renewal is a scheduled
+# maintenance act. Required.
+certificate = "/etc/voxloop/tls/certificate.pem"
+private_key = "/etc/voxloop/tls/private-key.pem"
+
+[store]
+# The one SQLite file. The box is the database: there is no replica and no network
+# endpoint, so backing this up is a real deployment obligation. Required.
+path = "/var/lib/voxloop/voxloop.sqlite"
+
+[log]
+# A level, or a per-module list. Spans are targeted at the module that opened them, so
+# "info,voxloop::media_plane=debug" turns up one part of the system without the rest.
+# Optional; the default is "info".
+level = "info"
