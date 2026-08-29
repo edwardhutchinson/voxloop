@@ -49,6 +49,25 @@ cargo run
 as `voxloop.toml` in the working directory. Every value in it can be overridden from the
 environment: `VOXLOOP_LISTEN__ADDRESS=127.0.0.1:9443 cargo run`.
 
+## First start
+
+There are no default credentials, ever. A deployment nobody administers yet mints a one-time
+**bootstrap code** to its own log on every start, invalidating the code the start before it
+minted, and redeeming it creates the first system administrator
+([ADR-0025](docs/adr/0025-credentials-are-administered-because-there-is-no-email.md)):
+
+```sh
+curl -k -X POST https://localhost:8443/api/bootstrap \
+  -H 'content-type: application/json' \
+  -d '{"code":"<from the log>","username":"you","password":"a long enough password"}'
+```
+
+Passwords are Argon2id with a twelve-character floor, no forced rotation and no complexity
+rules. Once an administrator exists that route is not registered at all — it is the one
+operation VoxLoop hides rather than refuses. From then on it is `/api/sign-in` and
+`/api/sign-out`, and **the root of trust is being on the box**: whoever can read the server's
+log at first start is the administrator.
+
 ## Working on the console
 
 Development is two processes; release is one artefact. Run the binary as above, then:

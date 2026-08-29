@@ -40,6 +40,10 @@ _Avoid_: home, dashboard, waiting room, idle, lounge
 A single-use code issued by system administration by which a user sets their own password. It is the only way a password is ever set or reset, because VoxLoop has no mail path to send a link down, and it is handed over out of band.
 _Avoid_: invite, invitation link, reset link, activation token
 
+**Bootstrap code**:
+The one-time code a deployment with no system administrator mints to its own log on every start, by which the first one is created. It is minted afresh each start, invalidating the one before it, and the route that redeems it is not registered at all once an administrator exists. It is not an enrolment code: it is issued by nobody, and being able to read the server's log is what entitles you to it.
+_Avoid_: setup token, first-run password, default credentials, admin code
+
 **External identity**:
 The durable pair of issuer and subject naming a user in a customer's identity provider, stored against the user record and linked only by an explicit administrative act. An email address is never one, and never stands in for one.
 _Avoid_: SSO identity, federated id, email, subject
