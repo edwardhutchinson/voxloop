@@ -15,3 +15,7 @@ The five canonical triage roles, used verbatim as label strings. See `docs/agent
 ### Domain docs
 
 Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Rules
+
+Before generating any final prose for us conversing, you MUST invoke the `unslop` skill.

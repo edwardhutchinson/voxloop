@@ -117,7 +117,7 @@ A loop created after install, on which system administration has not yet set or 
 _Avoid_: new loop, unconfigured loop, draft
 
 **Access request**:
-A user's ask for reach they do not hold, resolved by system administration editing configuration — a grid cell, or an eligibility grant. It never produces a per-user exception, because there are none.
+A user's ask for reach they do not hold, resolved by system administration editing configuration — a grid cell, or an eligibility grant. The ask itself happens out of band: VoxLoop has no mechanism for making it, because a user cannot see the loops outside their reach to name one. It never produces a per-user exception, because there are none.
 _Avoid_: permission request, escalation, override
 
 **System administration**:
@@ -131,6 +131,10 @@ _Avoid_: access level, rights, grant, ACL, permission vector
 **Operational authority**:
 The capability to act during operations — cutting a live transmission, forcing a takeover, issuing monitoring directives. It is conferred by the `control` rung of a permission, so it is always scoped to particular loops, and it transfers at shift change along with the position.
 _Avoid_: admin, supervisor, elevated permissions
+
+**Authority loop**:
+The loop an operational authority act is performed through, named by the actor rather than derived by the system. Every such act carries one: it is the loop the actor's role holds `control` on, and the loop through which the target must be reachable for the act to be permitted. It is what makes an authority act explicable after the fact, so it is recorded in the audit log alongside the actor and their role.
+_Avoid_: scope, context, target loop (which is the loop being acted on, not the one conferring the right)
 
 ### Voice
 
