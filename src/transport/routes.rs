@@ -20,7 +20,7 @@ use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
 use axum::handler::Handler;
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::routing::{MethodRouter, any, delete, get, patch, post};
+use axum::routing::{MethodRouter, any, delete, get, patch, post, put};
 use tracing::Instrument;
 
 use super::{answers, cookies, name_as_it_stands};
@@ -77,6 +77,18 @@ where
         T: 'static,
     {
         self.route(path, requirement, patch(handler))
+    }
+
+    /// Register a `PUT`, under `requirement`.
+    ///
+    /// The one thing VoxLoop replaces wholesale is the base loop order, which is a complete
+    /// ordering rather than a patch to one.
+    pub(super) fn put<H, T>(self, path: &str, requirement: Requirement, handler: H) -> Self
+    where
+        H: Handler<T, S>,
+        T: 'static,
+    {
+        self.route(path, requirement, put(handler))
     }
 
     /// Register a `DELETE`, under `requirement`.

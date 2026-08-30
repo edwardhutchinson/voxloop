@@ -103,6 +103,20 @@ async fn name_as_it_stands(
         .map_or_else(String::new, |user| user.username))
 }
 
+/// Tell *leave it alone* apart from *take it away* in an edit.
+///
+/// serde cannot: an absent field and an explicit `null` both arrive as `None`, and an edit
+/// that omits a field means leave it while one that sends `null` means unset it. The outer
+/// `Option` is presence and the inner is the value, so the two are different answers rather
+/// than the same one read twice.
+fn present_or_absent<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
+}
+
 /// How long a connection has to finish what it was doing once the server is asked to stop.
 const GRACE: Duration = Duration::from_secs(5);
 
@@ -207,6 +221,7 @@ impl Serving {
 /// be the same experience as reading `docs/spec/api-surface.md`.
 fn routes(api: &Api) -> RouteTable<Api> {
     use Requirement::{Public, SignedIn, SystemAdministration};
+    use administration::{loops, roles, users};
 
     let mut table = RouteTable::new(Arc::clone(&api.store))
         .get("/api/liveness", Public, liveness::liveness)
@@ -222,43 +237,42 @@ fn routes(api: &Api) -> RouteTable<Api> {
         // System administration. Every one of these is gated on the user's flag and never on
         // a role (v1 §9), so the console opens from the lobby and from within a session
         // alike. Every write is audited; the two reads are not.
-        .get("/api/users", SystemAdministration, administration::list)
-        .post("/api/users", SystemAdministration, administration::create)
-        .get(
-            "/api/users/{id}",
-            SystemAdministration,
-            administration::read,
-        )
-        .patch(
-            "/api/users/{id}",
-            SystemAdministration,
-            administration::edit,
-        )
-        .delete(
-            "/api/users/{id}",
-            SystemAdministration,
-            administration::delete,
-        )
-        .post(
-            "/api/users/{id}/lock",
-            SystemAdministration,
-            administration::lock,
-        )
+        .get("/api/users", SystemAdministration, users::list)
+        .post("/api/users", SystemAdministration, users::create_account)
+        .get("/api/users/{id}", SystemAdministration, users::read)
+        .patch("/api/users/{id}", SystemAdministration, users::edit)
+        .delete("/api/users/{id}", SystemAdministration, users::delete)
+        .post("/api/users/{id}/lock", SystemAdministration, users::lock)
         .post(
             "/api/users/{id}/unlock",
             SystemAdministration,
-            administration::unlock,
+            users::unlock,
         )
         .post(
             "/api/users/{id}/force-password-reset",
             SystemAdministration,
-            administration::force_password_reset,
+            users::force_password_reset,
         )
         .post(
             "/api/users/{id}/enrolment-code",
             SystemAdministration,
-            administration::issue_enrolment_code,
-        );
+            users::issue_enrolment_code,
+        )
+        // Roles and loops: the two configuration objects voice authority is expressed over.
+        // Which role may hear or say what on which loop is the grid, and it is not here.
+        .get("/api/roles", SystemAdministration, roles::list)
+        .post("/api/roles", SystemAdministration, roles::create_role)
+        .get("/api/roles/{id}", SystemAdministration, roles::read)
+        .patch("/api/roles/{id}", SystemAdministration, roles::edit)
+        .delete("/api/roles/{id}", SystemAdministration, roles::delete)
+        // The base order is registered before `{id}`, because it is the one path under
+        // `/api/loops/` that names something other than a loop.
+        .put("/api/loops/order", SystemAdministration, loops::set_order)
+        .get("/api/loops", SystemAdministration, loops::list)
+        .post("/api/loops", SystemAdministration, loops::create_loop)
+        .get("/api/loops/{id}", SystemAdministration, loops::read)
+        .patch("/api/loops/{id}", SystemAdministration, loops::edit)
+        .delete("/api/loops/{id}", SystemAdministration, loops::delete);
 
     // Registered only while no system administrator exists, and genuinely absent otherwise:
     // the one operation VoxLoop hides rather than refuses (v1 §3).
@@ -2241,6 +2255,456 @@ mod tests {
                 .status,
             StatusCode::NO_CONTENT,
             "the named user's password was touched"
+        );
+    }
+
+    /// Every name in a list the console answered with, in the order it answered them.
+    fn names_in(body: &str) -> Vec<String> {
+        body.split("\"name\":\"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().expect("the name").to_owned())
+            .collect()
+    }
+
+    impl ABox {
+        /// Make a loop through the console, and answer with its id.
+        async fn a_loop_called(&self, held: &str, name: &str) -> String {
+            let made = self
+                .post_holding(held, "/api/loops", &format!(r#"{{"name":"{name}"}}"#))
+                .await;
+            assert_eq!(made.status, StatusCode::CREATED, "{:?}", made.body);
+
+            id_in(&made.body)
+        }
+    }
+
+    /// Install seeds `Observer` and nothing else — no loops, and so no reach for it to have
+    /// been seeded against (v1 §9, ADR-0015).
+    #[tokio::test]
+    async fn install_seeds_the_observer_role_and_leaves_the_deployment_with_no_loops() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+
+        let roles = box_of.get_holding(&held, "/api/roles").await;
+        let loops = box_of.get_holding(&held, "/api/loops").await;
+
+        assert_eq!(names_in(&roles.body), ["Observer"]);
+        assert!(
+            roles.body.contains(r#""max_occupants":null"#),
+            "the seeded Observer role carries a limit on how many may observe: {:?}",
+            roles.body
+        );
+        assert_eq!(loops.body, "[]", "install seeded a loop");
+    }
+
+    #[tokio::test]
+    async fn creates_reads_edits_and_deletes_a_role() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+
+        let created = box_of
+            .post_holding(
+                &held,
+                "/api/roles",
+                r#"{"name":"Flight Director","max_occupants":1}"#,
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let id = id_in(&created.body);
+
+        let read = box_of.get_holding(&held, &format!("/api/roles/{id}")).await;
+        assert_eq!(read.status, StatusCode::OK);
+        assert!(read.body.contains("Flight Director"), "{:?}", read.body);
+
+        // A rename and a change of limit are one act, and the limit is taken away rather
+        // than left alone: `null` and an absent field are deliberately different answers.
+        let edited = box_of
+            .holding(
+                &held,
+                "PATCH",
+                &format!("/api/roles/{id}"),
+                r#"{"name":"Flight","max_occupants":null}"#,
+            )
+            .await;
+        assert_eq!(edited.status, StatusCode::OK, "{:?}", edited.body);
+        assert!(
+            edited.body.contains(r#""name":"Flight""#),
+            "{:?}",
+            edited.body
+        );
+        assert!(
+            edited.body.contains(r#""max_occupants":null"#),
+            "{:?}",
+            edited.body
+        );
+
+        let deleted = box_of
+            .holding(&held, "DELETE", &format!("/api/roles/{id}"), "")
+            .await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            box_of
+                .get_holding(&held, &format!("/api/roles/{id}"))
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// An edit that leaves the limit alone is not one that takes it away.
+    #[tokio::test]
+    async fn renaming_a_role_without_naming_the_limit_leaves_the_limit_alone() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let id = id_in(
+            &box_of
+                .post_holding(
+                    &held,
+                    "/api/roles",
+                    r#"{"name":"Support Engineer","max_occupants":6}"#,
+                )
+                .await
+                .body,
+        );
+
+        let edited = box_of
+            .holding(
+                &held,
+                "PATCH",
+                &format!("/api/roles/{id}"),
+                r#"{"name":"Support"}"#,
+            )
+            .await;
+
+        assert!(
+            edited.body.contains(r#""max_occupants":6"#),
+            "{:?}",
+            edited.body
+        );
+    }
+
+    /// A role is a staffable position, so one nobody may occupy is not a role (v1 §1).
+    #[tokio::test]
+    async fn a_role_nobody_may_occupy_is_refused_and_the_refusal_is_audited() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+
+        let answer = box_of
+            .post_holding(
+                &held,
+                "/api/roles",
+                r#"{"name":"Nobody","max_occupants":0}"#,
+            )
+            .await;
+
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+        assert!(answer.body.contains("occupant"), "{:?}", answer.body);
+        let entries = box_of.entries().await;
+        assert_eq!(entries[0].event, AuditEvent::RoleCreated);
+        let write = entries[0].write.as_ref().expect("a configuration write");
+        assert!(write.refusal.is_some(), "the refusal was not recorded");
+        assert_eq!(write.after, None, "a refused write recorded an after");
+    }
+
+    /// A loop created after install is `unreviewed` until an administrator has ruled on its
+    /// column (v1 §9). Every loop is created after install, because install creates none.
+    #[tokio::test]
+    async fn creates_reads_edits_and_deletes_a_loop_which_arrives_unreviewed() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+
+        let created = box_of
+            .post_holding(&held, "/api/loops", r#"{"name":"FLIGHT"}"#)
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        assert!(
+            created.body.contains(r#""unreviewed":true"#),
+            "a loop created after install was not unreviewed: {:?}",
+            created.body
+        );
+        let id = id_in(&created.body);
+
+        let read = box_of.get_holding(&held, &format!("/api/loops/{id}")).await;
+        assert_eq!(read.status, StatusCode::OK);
+        assert!(read.body.contains("FLIGHT"), "{:?}", read.body);
+
+        let edited = box_of
+            .holding(
+                &held,
+                "PATCH",
+                &format!("/api/loops/{id}"),
+                r#"{"name":"FLIGHT DIRECTOR"}"#,
+            )
+            .await;
+        assert_eq!(edited.status, StatusCode::OK, "{:?}", edited.body);
+        assert!(edited.body.contains("FLIGHT DIRECTOR"), "{:?}", edited.body);
+
+        let deleted = box_of
+            .holding(&held, "DELETE", &format!("/api/loops/{id}"), "")
+            .await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            box_of
+                .get_holding(&held, &format!("/api/loops/{id}"))
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// The base order is **administered, not derived** ([ADR-0053]): not alphabetical, and
+    /// not creation order. A loop created afterwards lands at the end of it.
+    ///
+    /// [ADR-0053]: ../../../docs/adr/0053-the-loop-order-is-complete-and-a-new-loop-lands-at-the-end.md
+    #[tokio::test]
+    async fn the_base_loop_order_is_administered_and_a_new_loop_lands_at_the_end() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let gnc = box_of.a_loop_called(&held, "GNC").await;
+        let flight = box_of.a_loop_called(&held, "FLIGHT").await;
+        let thermal = box_of.a_loop_called(&held, "THERMAL").await;
+
+        let set = box_of
+            .holding(
+                &held,
+                "PUT",
+                "/api/loops/order",
+                &format!(r#"{{"order":["{thermal}","{gnc}","{flight}"]}}"#),
+            )
+            .await;
+        assert_eq!(set.status, StatusCode::OK, "{:?}", set.body);
+
+        box_of.a_loop_called(&held, "AIR").await;
+
+        let read = box_of.get_holding(&held, "/api/loops").await;
+        assert_eq!(
+            names_in(&read.body),
+            ["THERMAL", "GNC", "FLIGHT", "AIR"],
+            "the loops came back in an order nobody administered"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_order_that_does_not_name_every_loop_is_refused_and_audited() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let gnc = box_of.a_loop_called(&held, "GNC").await;
+        box_of.a_loop_called(&held, "FLIGHT").await;
+
+        let answer = box_of
+            .holding(
+                &held,
+                "PUT",
+                "/api/loops/order",
+                &format!(r#"{{"order":["{gnc}"]}}"#),
+            )
+            .await;
+
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+        let entries = box_of.entries().await;
+        assert_eq!(entries[0].event, AuditEvent::LoopOrderEdited);
+        let write = entries[0].write.as_ref().expect("a configuration write");
+        assert!(write.refusal.is_some(), "the refusal was not recorded");
+        assert_eq!(write.after, None, "a refused order recorded an after");
+        assert_eq!(
+            names_in(&box_of.get_holding(&held, "/api/loops").await.body),
+            ["GNC", "FLIGHT"],
+            "a refused order was applied anyway"
+        );
+    }
+
+    /// Every write is audited with before and after, roles and loops included (v1 §12). The
+    /// order is the one write about no single record, so it names none and says what the
+    /// order was either side instead.
+    #[tokio::test]
+    async fn every_role_and_loop_write_is_audited_with_before_and_after() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = id_in(
+            &box_of
+                .post_holding(&held, "/api/roles", r#"{"name":"Flight Director"}"#)
+                .await
+                .body,
+        );
+        box_of
+            .holding(
+                &held,
+                "PATCH",
+                &format!("/api/roles/{role}"),
+                r#"{"max_occupants":2}"#,
+            )
+            .await;
+        let first = box_of.a_loop_called(&held, "GNC").await;
+        let second = box_of.a_loop_called(&held, "FLIGHT").await;
+        box_of
+            .holding(
+                &held,
+                "PUT",
+                "/api/loops/order",
+                &format!(r#"{{"order":["{second}","{first}"]}}"#),
+            )
+            .await;
+
+        let entries = box_of.entries().await;
+        let written: Vec<AuditEvent> = entries
+            .iter()
+            .filter(|entry| entry.write.is_some())
+            .map(|entry| entry.event)
+            .collect();
+        assert_eq!(
+            written,
+            [
+                AuditEvent::LoopOrderEdited,
+                AuditEvent::LoopCreated,
+                AuditEvent::LoopCreated,
+                AuditEvent::RoleEdited,
+                AuditEvent::RoleCreated,
+            ]
+        );
+        for entry in entries.iter().filter(|entry| entry.write.is_some()) {
+            let write = entry.write.as_ref().expect("a configuration write");
+            assert!(!write.target_name.is_empty(), "an entry named no target");
+            assert!(write.after.is_some(), "{:?} recorded no after", entry.event);
+            assert_eq!(
+                write.blast_radius,
+                crate::configuration::BlastRadius::nothing_live(),
+                "no session exists, so nothing live was touched"
+            );
+        }
+        let ordered = entries[0].write.as_ref().expect("a configuration write");
+        assert_eq!(ordered.target, None, "the order named a single loop");
+        assert_eq!(
+            ordered.before.as_ref().map(|order| order.as_str()),
+            Some("loop_order=GNC, FLIGHT")
+        );
+        assert_eq!(
+            ordered.after.as_ref().map(|order| order.as_str()),
+            Some("loop_order=FLIGHT, GNC")
+        );
+        let edited = entries[3].write.as_ref().expect("a configuration write");
+        assert_ne!(edited.before, edited.after, "the edit recorded no change");
+    }
+
+    /// Nothing joins on a name (v1 §1). A stray join on a username or a role name works
+    /// perfectly until the first rename, so both are renamed here and everything that holds
+    /// an id is read back through it.
+    #[tokio::test]
+    async fn a_username_or_role_rename_breaks_no_reference() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let user = id_in(
+            &box_of
+                .post_holding(&held, "/api/users", &an_account("flight", false))
+                .await
+                .body,
+        );
+        let role = id_in(
+            &box_of
+                .post_holding(&held, "/api/roles", r#"{"name":"Flight Director"}"#)
+                .await
+                .body,
+        );
+        let held_loop = box_of.a_loop_called(&held, "FLIGHT").await;
+
+        box_of
+            .holding(
+                &held,
+                "PATCH",
+                &format!("/api/users/{user}"),
+                r#"{"username":"flight-director"}"#,
+            )
+            .await;
+        box_of
+            .holding(
+                &held,
+                "PATCH",
+                &format!("/api/roles/{role}"),
+                r#"{"name":"Flight"}"#,
+            )
+            .await;
+        box_of
+            .holding(
+                &held,
+                "PATCH",
+                &format!("/api/loops/{held_loop}"),
+                r#"{"name":"FLIGHT DIRECTOR"}"#,
+            )
+            .await;
+
+        // Every id still names what it named, and the console reads the new names through it.
+        assert!(
+            box_of
+                .get_holding(&held, &format!("/api/users/{user}"))
+                .await
+                .body
+                .contains("flight-director")
+        );
+        assert!(
+            box_of
+                .get_holding(&held, &format!("/api/roles/{role}"))
+                .await
+                .body
+                .contains(r#""name":"Flight""#)
+        );
+        assert!(
+            box_of
+                .get_holding(&held, &format!("/api/loops/{held_loop}"))
+                .await
+                .body
+                .contains("FLIGHT DIRECTOR")
+        );
+        // The order is held by id as well, so it survived all three renames.
+        assert_eq!(
+            names_in(&box_of.get_holding(&held, "/api/loops").await.body),
+            ["FLIGHT DIRECTOR"]
+        );
+
+        // The audit entries about them still hold the ids, so the log did not follow a name.
+        let entries = box_of.entries().await;
+        let targets: Vec<&str> = entries
+            .iter()
+            .filter_map(|entry| entry.write.as_ref())
+            .filter_map(|write| write.target.as_ref().map(|id| id.as_str()))
+            .collect();
+        for id in [&user, &role, &held_loop] {
+            assert_eq!(
+                targets.iter().filter(|target| *target == id).count(),
+                2,
+                "an entry about {id} lost the id it was written with: {targets:?}"
+            );
+        }
+    }
+
+    /// Roles and loops are `SystemAdministration` like every other configuration write, and
+    /// a refused write is audited whatever it was about (v1 §3).
+    #[tokio::test]
+    async fn nobody_but_a_system_administrator_may_administer_roles_or_loops() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", false).await;
+        let theirs = box_of.signed_in_as("flight").await;
+
+        for (path, body) in [
+            ("/api/roles", r#"{"name":"Flight Director"}"#),
+            ("/api/loops", r#"{"name":"FLIGHT"}"#),
+        ] {
+            let answer = box_of.post_holding(&theirs, path, body).await;
+
+            assert_eq!(answer.status, StatusCode::FORBIDDEN, "{:?}", answer.body);
+        }
+        assert_eq!(
+            box_of.get_holding(&theirs, "/api/roles").await.status,
+            StatusCode::FORBIDDEN
+        );
+
+        let refused = box_of
+            .entries()
+            .await
+            .into_iter()
+            .filter(|entry| entry.event == AuditEvent::AdministrationRefused)
+            .count();
+        assert_eq!(
+            refused, 2,
+            "a refused write was not audited, or a refused read was"
         );
     }
 }

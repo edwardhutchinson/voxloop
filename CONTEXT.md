@@ -71,8 +71,8 @@ Giving up an assumed role, ending the session and returning the user to the lobb
 _Avoid_: sign out (which ends the whole authenticated state), release, drop, switch
 
 **Max occupants**:
-The limit on how many users may occupy a role at once. Single-occupant and multi-occupant roles are the same concept under different limits, not different kinds of thing.
-_Avoid_: cardinality, capacity, seats
+The limit on how many users may occupy a role at once. Single-occupant and multi-occupant roles are the same concept under different limits, not different kinds of thing. A role may have **no limit**, which is that same concept with the limit left unset rather than a third kind of role ([ADR-0068](docs/adr/0068-a-role-with-no-limit-is-the-limit-left-unset.md)) — it is what the seeded `Observer` role carries, because every user is eligible for it and any number picked instead would be a guess. A limit of zero is refused: a role nobody may occupy is not a staffable position.
+_Avoid_: cardinality, capacity, seats, unlimited role
 
 **Staffing role**:
 A role marked as counting toward a particular loop's staffing state. It is set per (role, loop), so a loop may have several staffing roles or none, and it can only be set where the role may emit on that loop — a role that cannot answer cannot staff. The flag **reports and never subscribes**: it puts nothing on an occupant's console, and the role default is the only thing that seeds one.
@@ -299,3 +299,7 @@ _Avoid_: restore defaults, revert, factory reset, start state
 **Loop order**:
 The order the loops in reach are shown in, the same in the board and the ledger. It is a complete ordering rather than a set of pins over a base order, so an operator's arrangement never rearranges itself underneath them, and a loop entering reach is appended at the end and marked new until they move it or dismiss the mark.
 _Avoid_: sort, layout, pinning, watch order (which is the monitoring directive's)
+
+**Base loop order**:
+The deployment-wide ordering of every loop, set by system administration, that a role default and then each operator's own loop order layer over. It is **administered rather than derived** — not alphabetical and not creation order — it is set whole rather than a loop at a time, and a newly created loop lands at its end.
+_Avoid_: default order, global order, sort order, creation order

@@ -4,7 +4,7 @@
 	// It does not end the session, and the panel says so: an operator on the air is entitled
 	// to know that this will not take their audio away before they click it. Every other act
 	// on a password in VoxLoop ends every sign-in, so the exception is worth stating.
-	import { NotDone, changePassword } from './server.js';
+	import { changePassword, whatWentWrong } from './server.js';
 
 	let current = $state('');
 	let next = $state('');
@@ -31,7 +31,7 @@
 			again = '';
 			done = true;
 		} catch (said) {
-			refusal = said instanceof NotDone ? said.message : 'VoxLoop could not answer that.';
+			refusal = whatWentWrong(said);
 		} finally {
 			attempting = false;
 		}

@@ -26,6 +26,9 @@
 mod audit;
 mod deployment;
 mod enrolment;
+mod loops;
+mod records;
+mod roles;
 mod sign_ins;
 mod store;
 mod users;
@@ -33,12 +36,15 @@ mod users;
 #[cfg(test)]
 pub(crate) use audit::RecordedEntry;
 pub(crate) use audit::{
-    AuditEntry, AuditEvent, AuditLog, BlastRadius, ConfigurationWrite, Snapshot,
+    AuditEntry, AuditEvent, AuditLog, BlastRadius, ConfigurationWrite, Record, Snapshot,
 };
 pub(crate) use deployment::{Deployment, DeploymentError};
 pub(crate) use enrolment::{Enrolment, EnrolmentCode, Outstanding};
+pub(crate) use loops::{Loop, LoopId, Loops};
+pub(crate) use records::{AdministrationRefused, Change};
+pub(crate) use roles::{NewRole, Role, RoleId, Roles};
 pub(crate) use sign_ins::{SignInToken, SignIns};
 #[cfg(test)]
 pub(crate) use store::a_temporary_store;
 pub(crate) use store::{Store, StoreError, Transaction};
-pub(crate) use users::{AdministrationRefused, Change, NewUser, PasswordHash, User, UserId, Users};
+pub(crate) use users::{NewUser, PasswordHash, User, UserId, Users};

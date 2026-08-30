@@ -122,6 +122,73 @@
 		padding: 0.35rem 0.5rem;
 	}
 
+	/* The furniture every admin console page shares. It is here rather than repeated in each
+	   of them because they are three readings of one console, and a table that looked
+	   different per page would say the pages were different kinds of thing. */
+	:global(h2) {
+		margin: 0;
+		font-size: 1.1rem;
+	}
+
+	:global(header p),
+	:global(.quiet) {
+		margin: 0.25rem 0 0;
+		color: var(--quiet);
+		font-size: 0.85rem;
+	}
+
+	:global(.refusal) {
+		color: var(--refusal);
+	}
+
+	:global(.new) {
+		display: flex;
+		gap: 0.75rem;
+		align-items: center;
+		margin: 1.5rem 0;
+		flex-wrap: wrap;
+	}
+
+	:global(table) {
+		width: 100%;
+		border-collapse: collapse;
+	}
+
+	:global(th),
+	:global(td) {
+		text-align: left;
+		padding: 0.5rem 0.75rem 0.5rem 0;
+		border-bottom: 1px solid var(--rule);
+		vertical-align: top;
+	}
+
+	:global(th) {
+		font-size: 0.75rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--quiet);
+	}
+
+	:global(.acts) {
+		text-align: right;
+		white-space: nowrap;
+	}
+
+	/* A name is edited by clicking it, so it is a button that reads as text. */
+	:global(.name) {
+		background: none;
+		border: 0;
+		padding: 0;
+		color: inherit;
+		font: inherit;
+		text-decoration: underline dotted;
+		cursor: pointer;
+	}
+
+	:global(.destructive) {
+		color: var(--refusal);
+	}
+
 	main {
 		max-width: 60rem;
 		margin: 0 auto;

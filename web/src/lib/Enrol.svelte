@@ -4,7 +4,7 @@
 	// There is no username field and there is not going to be one. The code identifies the
 	// user, which is what makes this safe to leave open to anybody: there is nothing here to
 	// aim at somebody else's account and nothing to enumerate.
-	import { NotDone, redeemEnrolment } from './server.js';
+	import { redeemEnrolment, whatWentWrong } from './server.js';
 
 	let { onEnrolled, onBack } = $props();
 
@@ -31,7 +31,7 @@
 			again = '';
 			onEnrolled();
 		} catch (said) {
-			refusal = said instanceof NotDone ? said.message : 'VoxLoop could not answer that.';
+			refusal = whatWentWrong(said);
 		} finally {
 			attempting = false;
 		}
