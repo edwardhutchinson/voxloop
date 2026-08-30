@@ -221,7 +221,7 @@ impl Serving {
 /// be the same experience as reading `docs/spec/api-surface.md`.
 fn routes(api: &Api) -> RouteTable<Api> {
     use Requirement::{Public, SignedIn, SystemAdministration};
-    use administration::{loops, roles, users};
+    use administration::{grid, loops, roles, users};
 
     let mut table = RouteTable::new(Arc::clone(&api.store))
         .get("/api/liveness", Public, liveness::liveness)
@@ -272,7 +272,24 @@ fn routes(api: &Api) -> RouteTable<Api> {
         .post("/api/loops", SystemAdministration, loops::create_loop)
         .get("/api/loops/{id}", SystemAdministration, loops::read)
         .patch("/api/loops/{id}", SystemAdministration, loops::edit)
-        .delete("/api/loops/{id}", SystemAdministration, loops::delete);
+        .delete("/api/loops/{id}", SystemAdministration, loops::delete)
+        // The grid: one value per (role, loop), and the only place voice authority is
+        // configured. The console reads it a row or a column at a time ([ADR-0015]), so the
+        // two reads administrators work from hang off the record whose page they are, and
+        // the whole-grid read is its own route because reviewing is not administering.
+        .get("/api/roles/{id}/grid", SystemAdministration, grid::row)
+        .get("/api/loops/{id}/grid", SystemAdministration, grid::column)
+        .get("/api/grid", SystemAdministration, grid::matrix)
+        // A cell is addressed by its pair and holds exactly one value, so it is replaced
+        // rather than patched. There is no route that clears one: setting `none` is how a
+        // permission is taken away.
+        .put("/api/grid/{role}/{loop}", SystemAdministration, grid::set)
+        // Ruling on a loop's column, which writes cells rather than the loop.
+        .post(
+            "/api/loops/{id}/dismiss-unreviewed",
+            SystemAdministration,
+            grid::dismiss_unreviewed,
+        );
 
     // Registered only while no system administrator exists, and genuinely absent otherwise:
     // the one operation VoxLoop hides rather than refuses (v1 §3).
@@ -295,7 +312,7 @@ mod tests {
     use axum::http::{Request, StatusCode, header};
     use axum::response::Response;
 
-    use crate::configuration::{AuditEvent, AuditLog, NewUser, Users, a_temporary_store};
+    use crate::configuration::{AuditEvent, AuditLog, NewUser, Snapshot, Users, a_temporary_store};
 
     /// A deployment serving on a port the operating system picks, read from a real file, with
     /// a certificate made for the occasion. Nothing here is committed and nothing outlives
@@ -2705,6 +2722,394 @@ mod tests {
         assert_eq!(
             refused, 2,
             "a refused write was not audited, or a refused read was"
+        );
+    }
+
+    /// The id of the record a body names, where the body lists several of them.
+    fn id_of(name: &str, body: &str) -> String {
+        let before = body
+            .split(&format!(r#""name":"{name}""#))
+            .next()
+            .expect("the record");
+        let at = before.rfind("\"id\":\"").expect("an id in the answer") + 6;
+
+        before[at..].split('"').next().expect("the id").to_owned()
+    }
+
+    /// Every permission in a body the console answered with, in the order it answered them.
+    fn permissions_in(body: &str) -> Vec<String> {
+        body.split("\"permission\":\"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().expect("the permission").to_owned())
+            .collect()
+    }
+
+    impl ABox {
+        /// Make a role through the console, and answer with its id.
+        async fn a_role_called(&self, held: &str, name: &str) -> String {
+            let made = self
+                .post_holding(held, "/api/roles", &format!(r#"{{"name":"{name}"}}"#))
+                .await;
+            assert_eq!(made.status, StatusCode::CREATED, "{:?}", made.body);
+
+            id_in(&made.body)
+        }
+
+        /// Make a loop and rule on its column.
+        ///
+        /// A loop nobody has ruled on is enforced as `none` on every rung whatever its cells
+        /// say, so a test about a cell that skipped this would pass for the wrong reason.
+        async fn a_ruled_on_loop_called(&self, held: &str, name: &str) -> String {
+            let id = self.a_loop_called(held, name).await;
+            let ruled = self
+                .post_holding(held, &format!("/api/loops/{id}/dismiss-unreviewed"), "")
+                .await;
+            assert_eq!(ruled.status, StatusCode::OK, "{:?}", ruled.body);
+
+            id
+        }
+
+        /// Set one cell, the way a role page or a loop page does.
+        async fn sets(&self, held: &str, role: &str, on: &str, permission: &str) -> Answer {
+            self.holding(
+                held,
+                "PUT",
+                &format!("/api/grid/{role}/{on}"),
+                &format!(r#"{{"permission":"{permission}"}}"#),
+            )
+            .await
+        }
+    }
+
+    /// A role page **is** the row and a loop page **is** the column ([ADR-0015]) — the same
+    /// cells read two ways, each as a list at full size rather than as a wall of squares.
+    ///
+    /// [ADR-0015]: ../../../docs/adr/0015-the-admin-console-reads-one-row-at-a-time.md
+    #[tokio::test]
+    async fn a_role_page_is_the_row_and_a_loop_page_is_the_column() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        box_of.a_ruled_on_loop_called(&held, "GNC").await;
+        let flight = box_of.a_ruled_on_loop_called(&held, "FLIGHT").await;
+        let set = box_of.sets(&held, &role, &flight, "control").await;
+        assert_eq!(set.status, StatusCode::OK, "{:?}", set.body);
+
+        let row = box_of
+            .get_holding(&held, &format!("/api/roles/{role}/grid"))
+            .await;
+        assert_eq!(
+            names_in(&row.body),
+            ["Flight Director", "GNC", "FLIGHT"],
+            "a role's row was not every loop in the base order: {:?}",
+            row.body
+        );
+        assert_eq!(permissions_in(&row.body), ["none", "control"]);
+
+        let column = box_of
+            .get_holding(&held, &format!("/api/loops/{flight}/grid"))
+            .await;
+        assert_eq!(
+            names_in(&column.body),
+            ["FLIGHT", "Flight Director", "Observer"],
+            "a loop's column was not every role by name: {:?}",
+            column.body
+        );
+        assert_eq!(permissions_in(&column.body), ["control", "none"]);
+    }
+
+    /// Taking a permission away is setting `none`, and it is the same write as granting one.
+    #[tokio::test]
+    async fn a_cell_holds_one_value_and_taking_it_away_is_setting_none() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        let flight = box_of.a_ruled_on_loop_called(&held, "FLIGHT").await;
+
+        box_of.sets(&held, &role, &flight, "emit").await;
+        let taken_away = box_of.sets(&held, &role, &flight, "none").await;
+
+        assert_eq!(taken_away.status, StatusCode::OK, "{:?}", taken_away.body);
+        assert_eq!(permissions_in(&taken_away.body), ["none"]);
+    }
+
+    /// Cell edits are audited with before and after (v1 §12), like every other configuration
+    /// write. The entry names the loop and reads by the pair.
+    #[tokio::test]
+    async fn setting_a_cell_is_audited_with_before_and_after() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        let flight = box_of.a_ruled_on_loop_called(&held, "FLIGHT").await;
+
+        box_of.sets(&held, &role, &flight, "emit").await;
+        box_of.sets(&held, &role, &flight, "control").await;
+
+        let entries = box_of.entries().await;
+        assert_eq!(entries[0].event, AuditEvent::GridCellEdited);
+        let write = entries[0].write.as_ref().expect("a configuration write");
+        assert_eq!(
+            write.target.as_ref().map(|target| target.as_str()),
+            Some(flight.as_str()),
+            "the entry did not name the loop the authority is over"
+        );
+        assert_eq!(write.target_name, "Flight Director on FLIGHT");
+        assert_eq!(
+            write.before.as_ref().map(Snapshot::as_str),
+            Some("role=Flight Director loop=FLIGHT permission=emit enforced=yes")
+        );
+        assert_eq!(
+            write.after.as_ref().map(Snapshot::as_str),
+            Some("role=Flight Director loop=FLIGHT permission=control enforced=yes")
+        );
+        assert_eq!(
+            write.blast_radius,
+            crate::configuration::BlastRadius::nothing_live(),
+            "no session exists, so nothing live was touched"
+        );
+    }
+
+    /// `unreviewed` is cleared **per loop, not per cell**, and dismissing it records a
+    /// deliberate `none` for every role nobody ruled on (v1 §9).
+    #[tokio::test]
+    async fn dismissing_unreviewed_is_per_loop_and_records_deliberate_nones() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        box_of.a_role_called(&held, "Flight Director").await;
+        let flight = box_of.a_loop_called(&held, "FLIGHT").await;
+        let gnc = box_of.a_loop_called(&held, "GNC").await;
+
+        let dismissed = box_of
+            .post_holding(
+                &held,
+                &format!("/api/loops/{flight}/dismiss-unreviewed"),
+                "",
+            )
+            .await;
+
+        assert_eq!(dismissed.status, StatusCode::OK, "{:?}", dismissed.body);
+        assert!(
+            dismissed.body.contains(r#""unreviewed":false"#),
+            "the mark was not cleared: {:?}",
+            dismissed.body
+        );
+        assert!(
+            box_of
+                .get_holding(&held, &format!("/api/loops/{gnc}"))
+                .await
+                .body
+                .contains(r#""unreviewed":true"#),
+            "dismissing one loop's mark cleared another's"
+        );
+
+        let column = box_of
+            .get_holding(&held, &format!("/api/loops/{flight}/grid"))
+            .await;
+        assert_eq!(
+            permissions_in(&column.body),
+            ["none", "none"],
+            "the roles nobody ruled on were not recorded"
+        );
+
+        let entries = box_of.entries().await;
+        assert_eq!(entries[0].event, AuditEvent::LoopReviewed);
+        let write = entries[0].write.as_ref().expect("a configuration write");
+        assert_eq!(
+            write.before.as_ref().map(Snapshot::as_str),
+            Some("loop=FLIGHT reviewed=no")
+        );
+        assert_eq!(
+            write.after.as_ref().map(Snapshot::as_str),
+            Some("loop=FLIGHT reviewed=yes")
+        );
+    }
+
+    /// The other half of v1 §9's *set or explicitly dismissed each role's cell*: an
+    /// administrator who worked down a loop's column and ruled on every role has ruled on
+    /// the loop, and does not have to find a second act to make what they set take effect.
+    #[tokio::test]
+    async fn ruling_on_every_role_of_a_column_rules_on_the_loop() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        let flight = box_of.a_loop_called(&held, "FLIGHT").await;
+        let column = box_of
+            .get_holding(&held, &format!("/api/loops/{flight}/grid"))
+            .await;
+        let observer = id_of("Observer", &column.body);
+
+        box_of.sets(&held, &role, &flight, "control").await;
+        assert!(
+            box_of
+                .get_holding(&held, &format!("/api/loops/{flight}"))
+                .await
+                .body
+                .contains(r#""unreviewed":true"#),
+            "one cell ruled on a column another role was still unruled on"
+        );
+
+        box_of.sets(&held, &observer, &flight, "monitor").await;
+
+        assert!(
+            box_of
+                .get_holding(&held, &format!("/api/loops/{flight}"))
+                .await
+                .body
+                .contains(r#""unreviewed":false"#),
+            "a column with every role ruled on was still unreviewed"
+        );
+    }
+
+    /// The matrix survives as a **secondary reference view** ([ADR-0015]): a whole read, and
+    /// nothing writes through it.
+    ///
+    /// [ADR-0015]: ../../../docs/adr/0015-the-admin-console-reads-one-row-at-a-time.md
+    #[tokio::test]
+    async fn the_matrix_is_a_reference_view_that_nothing_writes_through() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        let flight = box_of.a_ruled_on_loop_called(&held, "FLIGHT").await;
+        box_of.a_ruled_on_loop_called(&held, "GNC").await;
+        box_of.sets(&held, &role, &flight, "monitor").await;
+
+        let matrix = box_of.get_holding(&held, "/api/grid").await;
+
+        assert_eq!(matrix.status, StatusCode::OK, "{:?}", matrix.body);
+        assert_eq!(
+            names_in(&matrix.body),
+            ["Flight Director", "Observer", "FLIGHT", "GNC"],
+            "the matrix did not carry both axes: {:?}",
+            matrix.body
+        );
+        assert_eq!(
+            permissions_in(&matrix.body),
+            ["monitor", "none", "none", "none"],
+            "the matrix is not every role against every loop: {:?}",
+            matrix.body
+        );
+
+        for method in ["POST", "PUT", "PATCH", "DELETE"] {
+            let answer = box_of.holding(&held, method, "/api/grid", "{}").await;
+
+            assert_eq!(
+                answer.status,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "the reference view answered a {method}"
+            );
+        }
+    }
+
+    /// A permission is one of an ordered four and there is no fifth word for one, so a body
+    /// naming something else is a request that cannot be carried out rather than a refusal —
+    /// and, like an edit that asks for no change, there is no write for an entry to be about.
+    #[tokio::test]
+    async fn a_permission_that_is_not_one_of_the_four_is_refused_rather_than_audited() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        let flight = box_of.a_ruled_on_loop_called(&held, "FLIGHT").await;
+
+        let answer = box_of.sets(&held, &role, &flight, "administrator").await;
+
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{:?}", answer.body);
+        assert!(
+            !box_of
+                .audited()
+                .await
+                .iter()
+                .any(|(event, ..)| *event == AuditEvent::GridCellEdited),
+            "a request that made no write was audited as one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cell_naming_a_role_or_a_loop_nobody_holds_says_so() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        let flight = box_of.a_ruled_on_loop_called(&held, "FLIGHT").await;
+
+        for (role, on) in [
+            (role.as_str(), "no-such-loop"),
+            ("no-such-role", flight.as_str()),
+        ] {
+            let answer = box_of.sets(&held, role, on, "emit").await;
+
+            assert_eq!(answer.status, StatusCode::NOT_FOUND, "{:?}", answer.body);
+        }
+        assert_eq!(
+            box_of
+                .get_holding(&held, "/api/roles/no-such-role/grid")
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            box_of
+                .get_holding(&held, "/api/loops/no-such-loop/grid")
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// The grid is `SystemAdministration` like every other configuration surface, and a
+    /// refused write is audited while a refused read is not (v1 §3).
+    #[tokio::test]
+    async fn nobody_but_a_system_administrator_may_read_or_write_the_grid() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        let flight = box_of.a_ruled_on_loop_called(&held, "FLIGHT").await;
+        box_of.a_user_who_can_sign_in("flight", false).await;
+        let theirs = box_of.signed_in_as("flight").await;
+
+        assert_eq!(
+            box_of.sets(&theirs, &role, &flight, "control").await.status,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            box_of
+                .post_holding(
+                    &theirs,
+                    &format!("/api/loops/{flight}/dismiss-unreviewed"),
+                    ""
+                )
+                .await
+                .status,
+            StatusCode::FORBIDDEN
+        );
+        for path in [
+            "/api/grid".to_owned(),
+            format!("/api/roles/{role}/grid"),
+            format!("/api/loops/{flight}/grid"),
+        ] {
+            assert_eq!(
+                box_of.get_holding(&theirs, &path).await.status,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        let refused = box_of
+            .entries()
+            .await
+            .into_iter()
+            .filter(|entry| entry.event == AuditEvent::AdministrationRefused)
+            .count();
+        assert_eq!(
+            refused, 2,
+            "a refused write was not audited, or a refused read was"
+        );
+        assert_eq!(
+            permissions_in(
+                &box_of
+                    .get_holding(&held, &format!("/api/roles/{role}/grid"))
+                    .await
+                    .body
+            ),
+            ["none"],
+            "a refused write landed anyway"
         );
     }
 }

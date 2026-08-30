@@ -24,7 +24,7 @@ use axum::routing::{MethodRouter, any, delete, get, patch, post, put};
 use tracing::Instrument;
 
 use super::{answers, cookies, name_as_it_stands};
-use crate::authorisation::{self, Outcome, Requirement};
+use crate::authorisation::{self, Outcome, Presented, Requirement};
 use crate::configuration::{
     AuditEntry, AuditEvent, AuditLog, SignInToken, SignIns, Store, StoreError,
 };
@@ -221,7 +221,7 @@ where
 
                 let mut answer = match authorisation::evaluate(
                     &requirement,
-                    presented.clone(),
+                    Presented::cookie(presented.clone()),
                     &store,
                 )
                 .await
@@ -348,6 +348,11 @@ fn unmet(requirement: &Requirement) -> &'static str {
         Requirement::Session => "That operation is for a user who has assumed a role.",
         Requirement::SystemAdministration => "That operation is for a system administrator.",
         Requirement::ServiceToken => "That operation is for a service principal.",
+        // Never registered on a route: it names a loop the caller supplies, so it is built
+        // per message on the signalling channel (`docs/spec/api-surface.md`). The arm says
+        // what the caller's role did not hold rather than which rung, because the answer is
+        // the same whether the cell is `none`, absent, or on a loop nobody has ruled on.
+        Requirement::Grid { .. } => "That operation needs more than this role holds on that loop.",
     }
 }
 

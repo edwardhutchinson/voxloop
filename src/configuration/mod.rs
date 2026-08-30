@@ -26,6 +26,7 @@
 mod audit;
 mod deployment;
 mod enrolment;
+mod grid;
 mod loops;
 mod records;
 mod roles;
@@ -40,6 +41,7 @@ pub(crate) use audit::{
 };
 pub(crate) use deployment::{Deployment, DeploymentError};
 pub(crate) use enrolment::{Enrolment, EnrolmentCode, Outstanding};
+pub(crate) use grid::{Cell, Grid, Permission};
 pub(crate) use loops::{Loop, LoopId, Loops};
 pub(crate) use records::{AdministrationRefused, Change};
 pub(crate) use roles::{NewRole, Role, RoleId, Roles};

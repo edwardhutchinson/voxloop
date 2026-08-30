@@ -79,8 +79,9 @@ All `SystemAdministration`, all HTTP. Every **write** is audited, with before an
 | Force a password reset | Ends the user's sign-in and session immediately |
 | Create · read · edit · delete roles | Includes `max_occupants` |
 | Create · read · edit · delete loops | New loops arrive `unreviewed` |
-| Set a grid cell | The only place voice authority is configured ([ADR-0011](../adr/0011-a-permission-is-one-cell-on-the-grid.md)) |
-| Dismiss an unreviewed cell | Records a deliberate `none` |
+| Read a role's row · read a loop's column · read the whole grid | The two pages administrators work from, and the matrix as a reference view ([ADR-0015](../adr/0015-the-admin-console-reads-one-row-at-a-time.md)) |
+| Set a grid cell | The only place voice authority is configured ([ADR-0011](../adr/0011-a-permission-is-one-cell-on-the-grid.md)). Taking a permission away is setting `none`; there is no separate operation for it |
+| Dismiss a loop's `unreviewed` mark | Per loop, never per cell. Records a deliberate `none` against every role nobody has ruled on |
 | Grant / revoke eligibility | Revocation ends occupancy immediately |
 | Set the staffing-role flag per (role, loop) | Only where the role may emit on that loop |
 | Create service principals, issue and revoke tokens, bind a role | Standing grant with no expiry ([ADR-0027](../adr/0027-a-service-principal-acts-through-a-role.md)) |

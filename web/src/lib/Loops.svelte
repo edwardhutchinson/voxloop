@@ -8,6 +8,7 @@
 	// A new loop lands at the end, because appending is the only honest placement for
 	// something VoxLoop has been told nothing about.
 	import Confirm from './Confirm.svelte';
+	import LoopPage from './LoopPage.svelte';
 	import {
 		createLoop,
 		deleteLoop,
@@ -18,6 +19,9 @@
 	} from './server.js';
 
 	let allLoops = $state([]);
+	// The loop whose column is being read, where one is. Ruling on a loop is done there,
+	// because what it writes is that loop's cells.
+	let showing = $state(null);
 	// The order as the server last answered it, so an arrangement in progress can be told
 	// apart from the one that is actually saved. Nothing here renders optimistically: the
 	// list says plainly that a rearrangement has not been committed yet.
@@ -92,6 +96,14 @@
 		await read();
 	}
 
+	// Read again on the way back: ruling on a loop's column clears its unreviewed mark, and
+	// this list is where that mark is shown. Nothing on a role's page changes the role list,
+	// which is why that one comes back without a read.
+	function back() {
+		showing = null;
+		read();
+	}
+
 	async function commit() {
 		const { act } = confirming;
 		confirming = null;
@@ -100,114 +112,126 @@
 	}
 </script>
 
-<section>
-	<header>
-		<h2>Loops</h2>
-		<p>
-			A loop is an audio conference, and the only thing voice can be addressed to. This
-			order is the deployment's base order: it is administered here rather than derived,
-			and every console starts from it. A new loop lands at the end.
-		</p>
-	</header>
-
-	{#if refusal}
-		<p class="refusal" role="alert">{refusal}</p>
-	{/if}
-
-	<form class="new" onsubmit={create}>
-		<input bind:value={creating.name} placeholder="Loop" required />
-		<button type="submit">Create</button>
-	</form>
-
-	{#if reading}
-		<p class="quiet">Reading…</p>
-	{:else if allLoops.length === 0}
-		<p class="quiet">No loops yet. Create the first one above.</p>
-	{:else}
-		<table>
-			<thead>
-				<tr>
-					<th>Order</th>
-					<th>Loop</th>
-					<th>Review</th>
-					<th class="acts">Acts</th>
-				</tr>
-			</thead>
-			<tbody>
-				{#each allLoops as held, at (held.id)}
-					<tr>
-						<td class="place">
-							<button
-								aria-label="Move {held.name} up"
-								disabled={at === 0}
-								onclick={() => move(at, -1)}>↑</button
-							>
-							<button
-								aria-label="Move {held.name} down"
-								disabled={at === allLoops.length - 1}
-								onclick={() => move(at, 1)}>↓</button
-							>
-						</td>
-						<td>
-							{#if editing?.id === held.id}
-								<form onsubmit={rename}>
-									<!-- svelte-ignore a11y_autofocus -->
-									<input bind:value={editing.name} autofocus required />
-									<button type="submit">Rename</button>
-									<button type="button" onclick={() => (editing = null)}>Cancel</button>
-								</form>
-							{:else}
-								<button
-									class="name"
-									onclick={() => (editing = { id: held.id, name: held.name })}
-								>
-									{held.name}
-								</button>
-							{/if}
-						</td>
-						<!-- Every loop is unreviewed until an administrator has set or dismissed
-						     each role's cell, which is the grid's act: nothing on this page
-						     clears the mark, and nothing here pretends to. -->
-						<td class:quiet={!held.unreviewed}>
-							{#if held.unreviewed}
-								unreviewed
-								<span class="note">nobody has ruled on this loop's permissions yet</span>
-							{:else}
-								ruled on
-							{/if}
-						</td>
-						<td class="acts">
-							<button
-								class="destructive"
-								onclick={() =>
-									(confirming = {
-										act: () => deleteLoop(held.id),
-										consequence: `${held.name} is deleted. Nothing can be said on it or heard from it again, and the loops around it keep their order.`
-									})}>Delete</button
-							>
-						</td>
-					</tr>
-				{/each}
-			</tbody>
-		</table>
-
-		{#if arranged}
-			<p class="unsaved" role="status">
-				This order has not been saved. Nothing has changed for anybody until it is.
-				<button onclick={save}>Save order</button>
-				<button onclick={read}>Discard</button>
+{#if showing}
+	<LoopPage held={showing} onback={back} />
+{:else}
+	<section>
+		<header>
+			<h2>Loops</h2>
+			<p>
+				A loop is an audio conference, and the only thing voice can be addressed to. This
+				order is the deployment's base order: it is administered here rather than derived,
+				and every console starts from it. A new loop lands at the end.
 			</p>
-		{/if}
-	{/if}
+		</header>
 
-	{#if confirming}
-		<Confirm
-			consequence={confirming.consequence}
-			oncommit={commit}
-			oncancel={() => (confirming = null)}
-		/>
-	{/if}
-</section>
+		{#if refusal}
+			<p class="refusal" role="alert">{refusal}</p>
+		{/if}
+
+		<form class="new" onsubmit={create}>
+			<input bind:value={creating.name} placeholder="Loop" required />
+			<button type="submit">Create</button>
+		</form>
+
+		{#if reading}
+			<p class="quiet">Reading…</p>
+		{:else if allLoops.length === 0}
+			<p class="quiet">No loops yet. Create the first one above.</p>
+		{:else}
+			<table>
+				<thead>
+					<tr>
+						<th>Order</th>
+						<th>Loop</th>
+						<th>Review</th>
+						<th class="acts">Acts</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each allLoops as held, at (held.id)}
+						<tr>
+							<td class="place">
+								<button
+									aria-label="Move {held.name} up"
+									disabled={at === 0}
+									onclick={() => move(at, -1)}>↑</button
+								>
+								<button
+									aria-label="Move {held.name} down"
+									disabled={at === allLoops.length - 1}
+									onclick={() => move(at, 1)}>↓</button
+								>
+							</td>
+							<td>
+								{#if editing?.id === held.id}
+									<form onsubmit={rename}>
+										<!-- svelte-ignore a11y_autofocus -->
+										<input bind:value={editing.name} autofocus required />
+										<button type="submit">Rename</button>
+										<button type="button" onclick={() => (editing = null)}>Cancel</button>
+									</form>
+								{:else}
+									<button
+										class="name"
+										onclick={() => (editing = { id: held.id, name: held.name })}
+									>
+										{held.name}
+									</button>
+								{/if}
+							</td>
+							<!-- The mark is cleared per loop rather than per cell, and clearing it
+							     records a deliberate `none` against every role left alone — so it
+							     is done on the loop's own page, where the column is. -->
+							<td class:quiet={!held.unreviewed}>
+								{#if held.unreviewed}
+									unreviewed
+									<span class="note">nobody has ruled on this loop's permissions yet</span>
+								{:else}
+									ruled on
+								{/if}
+							</td>
+							<td class="acts">
+								<button
+									onclick={() =>
+										(showing = {
+											id: held.id,
+											name: held.name,
+											unreviewed: held.unreviewed
+										})}>Permissions</button
+								>
+								<button
+									class="destructive"
+									onclick={() =>
+										(confirming = {
+											act: () => deleteLoop(held.id),
+											consequence: `${held.name} is deleted. Nothing can be said on it or heard from it again, and the loops around it keep their order.`
+										})}>Delete</button
+								>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+
+			{#if arranged}
+				<p class="unsaved" role="status">
+					This order has not been saved. Nothing has changed for anybody until it is.
+					<button onclick={save}>Save order</button>
+					<button onclick={read}>Discard</button>
+				</p>
+			{/if}
+		{/if}
+
+		{#if confirming}
+			<Confirm
+				consequence={confirming.consequence}
+				oncommit={commit}
+				oncancel={() => (confirming = null)}
+			/>
+		{/if}
+	</section>
+{/if}
 
 <style>
 	.place {
