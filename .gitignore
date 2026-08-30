@@ -1,0 +1,16 @@
+.claude/worktrees/
+.claude/RESUME.md
+.claude/settings.local.json
+
+/target/
+
+# ADR-0037: the client bundle is built at release and never committed. Vite content-hashes
+# its output, so committed output grows without bound and goes quietly stale.
+web/dist/
+web/node_modules/
+web/.svelte-kit/
+
+# The deployment file and its certificate are per-box. `voxloop.example.toml` is the one
+# that is committed.
+/voxloop.toml
+*.pem

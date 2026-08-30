@@ -1,0 +1,23 @@
+# v1 injects speech; it does not decide when to speak
+
+The brief's motivating example is an administrator setting up a scheduled notification — *"this event is happening in X seconds"* — and it goes on to ask for the API to be generic enough that someone could have VoxLoop speak when a file appears. [#11](https://github.com/edwardhutchinson/voxloop/issues/11) was scoped to design that interface and not to build the machinery behind it. This ADR draws the line explicitly, because "the API is generic" is the sort of phrasing that hides a missing feature rather than declaring one.
+
+**v1 has no scheduler, no watchers and no condition evaluation.** There is no schedule CRUD, no timezone handling, no missed-fire semantics and no admin screen for any of it. The only thing VoxLoop offers is *speak this now*. Anything that decides **when** lives outside VoxLoop — a cron job that posts to the announcement endpoint is the whole intended answer.
+
+**This should be stated to the pilot customer as a gap, not concealed as a design.** The brief asked for scheduled announcements; v1's answer is a cron job and a token. That is a reasonable v1 answer for a system whose hard part is audio, and an unreasonable thing for a customer to discover on their own.
+
+## The one human-facing surface
+
+There is a single exception to *"only programs inject speech"*: **the admin console has a page where an administrator types text, picks loops, and sends.** It exists because typing a sentence is occasionally the right tool and standing up a script is not.
+
+Letting a *user* generally trigger an announcement was rejected — humans have a microphone, and a user speaking in a voice that is not theirs muddies the attribution ADR-0027 works to keep clean. The console page avoids that by not being a new mechanism at all.
+
+**The page acts as a designated service principal**, with its own bound role, and is simply another client of ADR-0029's endpoint. ⚠️ **"Another client of the endpoint" did not survive [ADR-0054](./0054-every-operation-declares-its-authorisation.md)**, and [ADR-0066](./0066-the-console-announces-as-the-designated-principal.md) replaces the clause. Announce requires `ServiceToken`, the page runs on a cookie, and cookie-plus-token is refused, so there is instead a **second `SystemAdministration` operation that the server executes as the designated principal** — same implementation, same reach check against the bound role, no token in a browser. Everything else in this paragraph stands. This matters more than it looks. System administration is a **user-level flag** that exists before any role does ([ADR-0003](./0003-operational-authority-follows-the-role.md)), while emission authority is per (role, loop) — so an administrator, as such, has no reach and no attribution and cannot be the emitter of anything. The alternatives were to require the administrator to have assumed a role and emit as it, which makes the feature available to anyone holding `emit` rather than to administrators; or to let system administration announce anywhere, which is precisely the second authority layer ADR-0011 forbids.
+
+**The accepted consequence: an administrator cannot announce onto a loop the console's bound role lacks `emit` on.** They must edit the grid first — deliberate, visible, audited, and slower than the moment might want. If a site needs its console to reach everything, an administrator grants that role `emit` on everything, in the grid, where it can be seen. This is the same posture ADR-0013 took with presets: a role that must reach everything is *given* everything, never handed a bypass.
+
+## Consequences
+
+- **"Admin only" on that page is a UI access rule, not an authority.** The reach is the grid's, exactly as it is for every other emitter in the system.
+- **The console page is the first thing in the product where system administration triggers an operational act.** It is safe only because it triggers it *as somebody else* — the seam is the service principal, and any future feature tempted to have an administrator act directly should be read against this. ✅ **[ADR-0066](./0066-the-console-announces-as-the-designated-principal.md) makes that argument explicitly** rather than leaving it inherited, and [ADR-0067](./0067-composed-text-is-a-decision.md) puts the acting administrator in the audit log, which is what stops the seam from hiding who spoke.
+- **Scheduling, file watchers and condition evaluation remain out of scope for v1** and are not fog to be graduated later in this effort. They return, if ever, as work in their own right on top of an endpoint that is already generic.
