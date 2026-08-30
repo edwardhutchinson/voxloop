@@ -28,8 +28,20 @@ pub(crate) enum StoreError {
 }
 
 /// Anything the store itself could not do, said without naming what is behind it.
-fn unavailable(error: impl std::error::Error + Send + Sync + 'static) -> StoreError {
+pub(super) fn unavailable(error: impl std::error::Error + Send + Sync + 'static) -> StoreError {
     StoreError::Unavailable(Box::new(error))
+}
+
+/// Now, in milliseconds since the Unix epoch — the one shape of time this store holds.
+///
+/// An integer sorts and compares without a date library on either side of the wire, and
+/// rendering one for a human to read is the console's job.
+pub(super) fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// The migrations this binary carries, run against the store at startup. Embedded, so a
@@ -73,9 +85,6 @@ impl Store {
     /// promise that.
     ///
     /// [ADR-0038]: ../../../docs/adr/0038-sqlite-behind-domain-shaped-repositories.md
-    // Nothing persists domain data until #30, so this has no caller in the binary yet. The
-    // shape is fixed here so that ticket does not have to invent it.
-    #[allow(dead_code)]
     pub(crate) async fn begin(&self) -> Result<Transaction, StoreError> {
         self.pool
             .begin()
@@ -96,11 +105,19 @@ impl Store {
 /// is the whole of what makes the repository seam a seam ([ADR-0060]).
 ///
 /// [ADR-0060]: ../../../docs/adr/0060-a-seam-names-domain-operations.md
-#[allow(dead_code)]
 pub(crate) struct Transaction(sqlx::Transaction<'static, sqlx::Sqlite>);
 
-#[allow(dead_code)]
 impl Transaction {
+    /// The connection the repositories in this module run their statements on.
+    ///
+    /// `pub(super)` is the whole of the seam: every repository in `configuration` reaches it
+    /// and nothing outside can, so no `sqlx` type ever crosses out ([ADR-0038]).
+    ///
+    /// [ADR-0038]: ../../../docs/adr/0038-sqlite-behind-domain-shaped-repositories.md
+    pub(super) fn connection(&mut self) -> &mut sqlx::SqliteConnection {
+        &mut self.0
+    }
+
     /// Commit everything written through this handle.
     pub(crate) async fn commit(self) -> Result<(), StoreError> {
         self.0.commit().await.map_err(unavailable)
@@ -140,6 +157,23 @@ async fn refuse_a_newer_schema(pool: &SqlitePool) -> Result<(), StoreError> {
         Some(found) if found > known => Err(StoreError::SchemaNewerThanBinary { found, known }),
         _ => Ok(()),
     }
+}
+
+/// A store in a directory that exists for the length of one test.
+///
+/// Every test in the binary that needs persistence opens one of these: a temporary file,
+/// migrated and thrown away ([ADR-0064]). There is no in-memory repository and there will
+/// not be one.
+///
+/// [ADR-0064]: ../../../docs/adr/0064-tests-run-against-the-real-store.md
+#[cfg(test)]
+pub(crate) async fn a_temporary_store() -> (tempfile::TempDir, Store) {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let store = Store::open(&directory.path().join("voxloop.sqlite"))
+        .await
+        .expect("the store to open");
+
+    (directory, store)
 }
 
 #[cfg(test)]

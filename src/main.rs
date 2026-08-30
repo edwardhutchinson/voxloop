@@ -27,13 +27,18 @@ compile_error!(
 
 mod authorisation;
 mod configuration;
+mod identity;
+mod secrets;
 mod telemetry;
 mod transport;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use std::sync::Arc;
+
 use configuration::{Deployment, DeploymentError, Store, StoreError};
+use identity::{Bootstrap, Identity};
 use telemetry::{TelemetryError, module};
 use transport::TransportError;
 
@@ -73,8 +78,19 @@ async fn run() -> Result<(), StartupError> {
     let deployment = Deployment::load(&deployment_file())?;
     telemetry::start(&deployment.log.level)?;
 
-    let store = Store::open(&deployment.store.path).await?;
-    let serving = transport::start(&deployment).await?;
+    let store = Arc::new(Store::open(&deployment.store.path).await?);
+
+    // No default credentials, ever: a deployment nobody administers yet mints a one-time
+    // code to this log, and one that somebody does mints nothing and registers no route.
+    let bootstrap = Bootstrap::mint_unless_administered(&store).await?;
+
+    let serving = transport::start(
+        &deployment,
+        Arc::clone(&store),
+        Identity::local_passwords(),
+        bootstrap,
+    )
+    .await?;
     tracing::info!(target: module::TRANSPORT, address = %serving.address(), "serving");
 
     wait_to_be_stopped().await;

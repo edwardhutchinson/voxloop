@@ -8,5 +8,5 @@ stamp. Versions only ever go up: the binary refuses to start against a store som
 binary has already migrated past, so a rollback stops rather than writing into a schema it
 misunderstands.
 
-There are none yet. The walking skeleton persists nothing of its own; the first schema
-arrives with the user record.
+The first migration carries the user record, the sign-ins held against it, and the audit
+log.

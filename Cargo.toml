@@ -15,12 +15,17 @@ default = []
 embed-web = ["dep:rust-embed"]
 
 [dependencies]
+argon2 = "0.6.0"
+async-trait = "0.1.92"
 axum = "0.8.9"
+axum-extra = { version = "0.12.6", features = ["cookie"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 figment = { version = "0.10.19", features = ["toml", "env"] }
+getrandom = "0.4.0"
 rustls = { version = "0.23.43", default-features = false, features = ["aws-lc-rs"] }
 rust-embed = { version = "8.12.0", features = ["mime-guess"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
+sha2 = "0.11.0"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal"] }
@@ -33,3 +38,12 @@ rcgen = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots"] }
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
+
+# Argon2id is deliberately expensive, and an unoptimised build makes it expensive enough to
+# dominate the test suite. Optimising the two crates that do the work leaves every test
+# exercising the real parameters without waiting seconds for each one.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

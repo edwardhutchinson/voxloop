@@ -22,8 +22,16 @@
 //! [ADR-0038]: ../../../docs/adr/0038-sqlite-behind-domain-shaped-repositories.md
 //! [ADR-0064]: ../../../docs/adr/0064-tests-run-against-the-real-store.md
 
+mod audit;
 mod deployment;
+mod sign_ins;
 mod store;
+mod users;
 
+pub(crate) use audit::{AuditEntry, AuditEvent, AuditLog};
 pub(crate) use deployment::{Deployment, DeploymentError};
-pub(crate) use store::{Store, StoreError};
+pub(crate) use sign_ins::{SignInToken, SignIns};
+#[cfg(test)]
+pub(crate) use store::a_temporary_store;
+pub(crate) use store::{Store, StoreError, Transaction};
+pub(crate) use users::{NameRefused, NewUser, PasswordHash, UserId, Users};
