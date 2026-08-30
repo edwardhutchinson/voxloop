@@ -1,7 +1,7 @@
 <script>
 	import { NotDone, signIn } from './server.js';
 
-	let { onSignedIn } = $props();
+	let { onSignedIn, said = null } = $props();
 
 	let username = $state('');
 	let password = $state('');
@@ -41,6 +41,8 @@
 
 	{#if refusal}
 		<p class="refusal" role="alert">{refusal}</p>
+	{:else if said}
+		<p class="quiet" role="status">{said}</p>
 	{/if}
 </form>
 
@@ -68,5 +70,11 @@
 	.refusal {
 		margin: 0;
 		color: var(--refusal);
+	}
+
+	.quiet {
+		margin: 0;
+		color: var(--quiet);
+		font-size: 0.85rem;
 	}
 </style>

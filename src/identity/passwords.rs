@@ -54,6 +54,26 @@ impl LocalPasswords {
         Ok(PasswordHash::already_hashed(hashed.to_string()))
     }
 
+    /// Whether this is the password that user holds.
+    ///
+    /// This is local password administration rather than the front door: it starts from a
+    /// user id the caller has already been given, so it proves nothing about who anybody is
+    /// and resolves nobody. Re-presenting the current password to change it is what it is
+    /// for, and a user with no password yet holds none to re-present.
+    pub(super) async fn confirms(
+        self,
+        transaction: &mut Transaction,
+        user: &UserId,
+        password: &str,
+    ) -> Result<bool, StoreError> {
+        let Some(stored) = transaction.password_held_by(user).await? else {
+            self.spend_the_time_a_check_would_have(password);
+            return Ok(false);
+        };
+
+        Ok(self.matches(password, &stored))
+    }
+
     /// Check a password against a stored hash.
     fn matches(self, password: &str, stored: &PasswordHash) -> bool {
         let Ok(parsed) = phc::PasswordHash::new(stored.as_str()) else {
@@ -246,5 +266,51 @@ mod tests {
             .expect("the check to answer");
 
         assert_eq!(resolved, Some(user));
+    }
+
+    #[tokio::test]
+    async fn confirms_the_password_a_user_holds_and_nothing_else() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let user = a_user_with(&mut transaction, "flight", "a long enough password").await;
+
+        assert!(
+            LocalPasswords
+                .confirms(&mut transaction, &user, "a long enough password")
+                .await
+                .expect("the check to answer")
+        );
+        assert!(
+            !LocalPasswords
+                .confirms(&mut transaction, &user, "the wrong password")
+                .await
+                .expect("the check to answer")
+        );
+    }
+
+    /// A user awaiting enrolment holds nothing to re-present, so there is nothing that
+    /// confirms — least of all an empty string.
+    #[tokio::test]
+    async fn confirms_nothing_for_a_user_who_holds_no_password_yet() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let user = transaction
+            .create_user(NewUser {
+                username: "enrolling".to_owned(),
+                password_hash: None,
+                is_system_administrator: false,
+            })
+            .await
+            .expect("a user with no password yet");
+
+        for attempt in ["", "a long enough password"] {
+            assert!(
+                !LocalPasswords
+                    .confirms(&mut transaction, &user, attempt)
+                    .await
+                    .expect("the check to answer"),
+                "{attempt:?} confirmed against an account with no password"
+            );
+        }
     }
 }

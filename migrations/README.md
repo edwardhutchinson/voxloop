@@ -9,4 +9,5 @@ binary has already migrated past, so a rollback stops rather than writing into a
 misunderstands.
 
 The first migration carries the user record, the sign-ins held against it, and the audit
-log.
+log. The second adds the account lock and the columns an audited configuration write needs.
+The third adds the enrolment codes by which a password is set.

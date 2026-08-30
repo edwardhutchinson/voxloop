@@ -50,6 +50,17 @@ export const signOut = () => ask('/api/sign-out', { method: 'POST' });
 /** Who the browser is signed in as, and whether the admin console exists for them. */
 export const principal = () => ask('/api/principal');
 
+/**
+ * Redeem an enrolment code. Public: somebody with no password has no way to be anything
+ * else, and the code is what identifies them — there is no username to send.
+ */
+export const redeemEnrolment = (code, password) =>
+	ask('/api/enrolment', { method: 'POST', ...sending({ code, password }) });
+
+/** Change your own password by re-presenting the current one. The session survives. */
+export const changePassword = (current, next) =>
+	ask('/api/password', { method: 'POST', ...sending({ current, new: next }) });
+
 export const users = () => ask('/api/users');
 
 export const createUser = (username, systemAdministration) =>
@@ -70,3 +81,12 @@ const act = (id, what) =>
 export const lockAccount = (id) => act(id, 'lock');
 export const unlockAccount = (id) => act(id, 'unlock');
 export const forcePasswordReset = (id) => act(id, 'force-password-reset');
+
+/**
+ * Issue an enrolment code against a user.
+ *
+ * The answer carries the code, and it is the only time anything hands one back: a credential
+ * readable twice is one that was never single-use in the sense that matters. The console
+ * shows it once, for the administrator to hand over out of band.
+ */
+export const issueEnrolmentCode = (id) => act(id, 'enrolment-code');

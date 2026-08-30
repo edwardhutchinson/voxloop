@@ -169,6 +169,13 @@ pub(crate) trait Users {
     /// Read a user by the id that identifies them.
     async fn user(&mut self, id: &UserId) -> Result<Option<User>, StoreError>;
 
+    /// Read a user by the name a human types, however it was capitalised.
+    ///
+    /// The id is what everything holds, so this exists for the two callers that start from
+    /// something a person typed: the on-box CLI, which is handed a username at a shell, and
+    /// nothing else.
+    async fn user_named(&mut self, username: &str) -> Result<Option<User>, StoreError>;
+
     /// Every user on the deployment, by name.
     ///
     /// The console reads one row at a time ([ADR-0015]) and this is the list it picks from;
@@ -217,6 +224,29 @@ pub(crate) trait Users {
     /// longer exists.
     async fn clear_password(&mut self, id: &UserId) -> Result<Option<Change>, StoreError>;
 
+    /// Set the password, whether the user had one or not.
+    ///
+    /// This is the store half of both acts that set one: redeeming an enrolment code, and a
+    /// signed-in user changing their own. It is deliberately one operation, because the two
+    /// differ only in what entitled the caller to it and not at all in what lands.
+    ///
+    /// It **leaves every sign-in alone**, deliberately, because the two acts that set a
+    /// password disagree about that and the store is not where the disagreement is settled:
+    /// an operator on the air changing their own password keeps their session (v1 §2), and a
+    /// redemption ends the sign-ins standing against the credential it replaced.
+    async fn set_password(
+        &mut self,
+        id: &UserId,
+        hashed: PasswordHash,
+    ) -> Result<Option<Change>, StoreError>;
+
+    /// The password this user holds, for whoever is entitled to check it.
+    ///
+    /// Nobody is the answer for a user who has none yet, which is what makes re-presenting
+    /// the current password impossible rather than skippable for an account awaiting
+    /// enrolment.
+    async fn password_held_by(&mut self, id: &UserId) -> Result<Option<PasswordHash>, StoreError>;
+
     /// Delete a user, and everything that is only about them.
     ///
     /// Their sign-ins go with them — there is no state in which a deleted user is signed in
@@ -264,6 +294,19 @@ impl Users for Transaction {
              external_issuer, external_subject FROM users WHERE id = ?",
         )
         .bind(&id.0)
+        .fetch_optional(self.connection())
+        .await
+        .map_err(unavailable)?;
+
+        Ok(found.as_ref().map(a_user))
+    }
+
+    async fn user_named(&mut self, username: &str) -> Result<Option<User>, StoreError> {
+        let found = sqlx::query(
+            "SELECT id, username, is_system_administrator, is_locked, password_hash, \
+             external_issuer, external_subject FROM users WHERE username = ?",
+        )
+        .bind(username)
         .fetch_optional(self.connection())
         .await
         .map_err(unavailable)?;
@@ -366,6 +409,36 @@ impl Users for Transaction {
         self.end_every_sign_in(id).await?;
 
         Ok(Some(self.changed(before, id).await?))
+    }
+
+    async fn set_password(
+        &mut self,
+        id: &UserId,
+        hashed: PasswordHash,
+    ) -> Result<Option<Change>, StoreError> {
+        let Some(before) = self.user(id).await? else {
+            return Ok(None);
+        };
+
+        sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+            .bind(hashed.as_str())
+            .bind(&id.0)
+            .execute(self.connection())
+            .await
+            .map_err(unavailable)?;
+
+        Ok(Some(self.changed(before, id).await?))
+    }
+
+    async fn password_held_by(&mut self, id: &UserId) -> Result<Option<PasswordHash>, StoreError> {
+        let found: Option<Option<String>> =
+            sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
+                .bind(&id.0)
+                .fetch_optional(self.connection())
+                .await
+                .map_err(unavailable)?;
+
+        Ok(found.flatten().map(PasswordHash))
     }
 
     async fn delete_user(&mut self, id: &UserId) -> Result<Option<Change>, AdministrationRefused> {
@@ -992,6 +1065,99 @@ mod tests {
                 .await
                 .expect("an answer")
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn setting_a_password_leaves_every_sign_in_standing() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let id = transaction
+            .create_user(a_new_user("flight"))
+            .await
+            .expect("a user");
+        let token = transaction.open_sign_in(&id).await.expect("a sign-in");
+
+        let change = transaction
+            .set_password(
+                &id,
+                PasswordHash::already_hashed("$argon2id$a-new-one".to_owned()),
+            )
+            .await
+            .expect("the write to answer")
+            .expect("a change");
+
+        assert!(change.after.expect("a record after it").has_password);
+        assert_eq!(
+            transaction
+                .password_held_by(&id)
+                .await
+                .expect("the read to answer")
+                .expect("a password"),
+            PasswordHash::already_hashed("$argon2id$a-new-one".to_owned())
+        );
+        assert_eq!(
+            transaction
+                .holder_of(&token)
+                .await
+                .expect("the read to answer"),
+            Some(id),
+            "setting a password ended a sign-in"
+        );
+    }
+
+    /// Which is what makes re-presenting the current password impossible rather than
+    /// skippable for an account awaiting enrolment.
+    #[tokio::test]
+    async fn a_user_awaiting_enrolment_holds_no_password_to_re_present() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let id = transaction
+            .create_user(NewUser {
+                password_hash: None,
+                ..a_new_user("flight")
+            })
+            .await
+            .expect("a user");
+
+        assert_eq!(
+            transaction
+                .password_held_by(&id)
+                .await
+                .expect("the read to answer"),
+            None
+        );
+        assert_eq!(
+            transaction
+                .password_held_by(&UserId::presented("no-such-id".to_owned()))
+                .await
+                .expect("the read to answer"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_user_is_read_back_by_the_name_a_human_types_however_it_was_capitalised() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let id = transaction
+            .create_user(a_new_user("flight"))
+            .await
+            .expect("a user");
+
+        let found = transaction
+            .user_named("FLIGHT")
+            .await
+            .expect("the read to answer")
+            .expect("a user");
+
+        assert_eq!(found.id, id);
+        assert_eq!(
+            transaction
+                .user_named("nobody")
+                .await
+                .expect("the read to answer"),
+            None
         );
     }
 }

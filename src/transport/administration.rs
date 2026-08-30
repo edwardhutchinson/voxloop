@@ -32,7 +32,8 @@ use super::{Api, answers, name_as_it_stands};
 use crate::authorisation::Caller;
 use crate::configuration::{
     AdministrationRefused, AuditEntry, AuditEvent, AuditLog, BlastRadius, Change,
-    ConfigurationWrite, NewUser, Snapshot, StoreError, Transaction, User, UserId, Users,
+    ConfigurationWrite, Enrolment, NewUser, Outstanding, Snapshot, StoreError, Transaction, User,
+    UserId, Users,
 };
 use crate::telemetry::module;
 
@@ -44,21 +45,49 @@ struct Account {
     system_administration: bool,
     locked: bool,
     /// Whether they can sign in at all. A user created here has no password until an
-    /// enrolment code sets one (#32), and the console says so rather than leaving an
-    /// administrator to wonder why nobody has turned up.
+    /// enrolment code sets one, and the console says so rather than leaving an administrator
+    /// to wonder why nobody has turned up.
     enrolled: bool,
+    /// When the code this user is holding stops being good, where one is outstanding.
+    ///
+    /// It is never the code. A code readable twice is one that was never single-use in the
+    /// sense that matters, so the console is told a code is out there and no more — which is
+    /// what stops an administrator issuing a second and leaving the first in somebody's
+    /// hand.
+    enrolment_expires_at: Option<i64>,
 }
 
-impl From<&User> for Account {
-    fn from(user: &User) -> Self {
+impl Account {
+    fn of(user: &User, outstanding: Option<Outstanding>) -> Self {
         Self {
             id: user.id.as_str().to_owned(),
             username: user.username.clone(),
             system_administration: user.is_system_administrator,
             locked: user.is_locked,
             enrolled: user.has_password,
+            enrolment_expires_at: outstanding.map(|code| code.expires_at),
         }
     }
+}
+
+impl From<&User> for Account {
+    /// A user as they stand after a write to their record, which touches no enrolment code.
+    ///
+    /// Every write that goes through [`administer`] leaves whatever code was outstanding
+    /// exactly as it was, so re-reading it would be a second query answering what the caller
+    /// already knew. Issuing a code is the one act that changes it, and it answers with the
+    /// code itself rather than with an account.
+    fn from(user: &User) -> Self {
+        Self::of(user, None)
+    }
+}
+
+/// The code an administrator has just issued, shown once and never again.
+#[derive(Serialize)]
+struct IssuedCode {
+    code: String,
+    /// Milliseconds since the Unix epoch. Rendering one for a human is the console's job.
+    expires_at: i64,
 }
 
 /// What the console sends to create a user.
@@ -88,10 +117,19 @@ pub(super) async fn list(State(api): State<Api>) -> Response {
 
 async fn read_all(api: &Api) -> Result<Response, StoreError> {
     let mut transaction = api.store.begin().await?;
-    let found = transaction.users().await;
+    let read = async {
+        let users = transaction.users().await?;
+        let outstanding = transaction.outstanding_enrolments().await?;
+        Ok::<_, StoreError>((users, outstanding))
+    }
+    .await;
     transaction.roll_back().await?;
 
-    let accounts: Vec<Account> = found?.iter().map(Account::from).collect();
+    let (users, outstanding) = read?;
+    let accounts: Vec<Account> = users
+        .iter()
+        .map(|user| Account::of(user, outstanding.get(&user.id).copied()))
+        .collect();
 
     Ok(Json(accounts).into_response())
 }
@@ -103,12 +141,22 @@ pub(super) async fn read(State(api): State<Api>, Path(id): Path<String>) -> Resp
 
 async fn read_one(api: &Api, id: &UserId) -> Result<Response, StoreError> {
     let mut transaction = api.store.begin().await?;
-    let found = transaction.user(id).await;
+    let read = async {
+        let user = transaction.user(id).await?;
+        let outstanding = transaction.outstanding_enrolments().await?;
+        Ok::<_, StoreError>((user, outstanding))
+    }
+    .await;
     transaction.roll_back().await?;
 
-    Ok(match found? {
+    let (found, mut outstanding) = read?;
+
+    Ok(match found {
         None => answers::no_such("user"),
-        Some(user) => Json(Account::from(&user)).into_response(),
+        Some(user) => {
+            let code = outstanding.remove(&user.id);
+            Json(Account::of(&user, code)).into_response()
+        }
     })
 }
 
@@ -342,6 +390,85 @@ pub(super) async fn force_password_reset(
         )
         .await,
     )
+}
+
+/// Issue an enrolment code against a user. `SystemAdministration`, audited.
+///
+/// **An enrolment code is a credential** ([ADR-0025]), so issuing one is an administration
+/// write in its own right and not a step inside some other act: it is expiring, single-use,
+/// and it is what sets a password on an account that has none — or replaces the one on an
+/// account that has. Issuing a second invalidates the first, so an administrator who has
+/// mislaid a code reissues rather than leaving two in circulation.
+///
+/// The code comes back **once**, in this answer, for the administrator to hand over out of
+/// band. Nothing reads one back afterwards, here or in the audit log: a credential readable
+/// twice is one that was never single-use in the sense that matters.
+///
+/// It does not take the existing password away. *Force a password reset* is the separate act
+/// that does, and it is a separate row in `docs/spec/api-surface.md` because an administrator
+/// enrolling somebody new and an administrator cutting off a compromised account are doing
+/// two different things.
+///
+/// [ADR-0025]: ../../../docs/adr/0025-credentials-are-administered-because-there-is-no-email.md
+pub(super) async fn issue_enrolment_code(
+    State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(acting) = acting(&caller) else {
+        return unreachable_caller();
+    };
+
+    answers::or_unavailable(issuing(&api, acting, &UserId::presented(id)).await)
+}
+
+async fn issuing(api: &Api, acting: &UserId, target: &UserId) -> Result<Response, StoreError> {
+    let mut transaction = api.store.begin().await?;
+    let administrator = Administrator::of(&mut transaction, acting).await?;
+
+    let Some(user) = transaction.user(target).await? else {
+        transaction.roll_back().await?;
+        return Ok(answers::no_such("user"));
+    };
+
+    let issued = transaction.issue_enrolment_code(target).await?;
+
+    transaction
+        .record(
+            administrator.wrote(
+                AuditEvent::EnrolmentCodeIssued,
+                ConfigurationWrite {
+                    target: Some(user.id.clone()),
+                    target_name: user.username.clone(),
+                    // The before and after are the codes rather than the record, because the
+                    // record is untouched: what this write changed is which credential enrols
+                    // this user, and an entry showing the account unchanged would say nothing.
+                    before: issued
+                        .replaced
+                        .map(|code| Snapshot::of_enrolment(code.expires_at)),
+                    after: Some(Snapshot::of_enrolment(issued.outstanding.expires_at)),
+                    blast_radius: nothing_live(),
+                    refusal: None,
+                },
+            ),
+        )
+        .await?;
+    transaction.commit().await?;
+
+    tracing::info!(
+        target: module::CONFIGURATION,
+        user = %user.id.as_str(),
+        "an enrolment code was issued"
+    );
+
+    Ok((
+        StatusCode::CREATED,
+        Json(IssuedCode {
+            code: issued.code.as_str().to_owned(),
+            expires_at: issued.outstanding.expires_at,
+        }),
+    )
+        .into_response())
 }
 
 /// Make one write to a user record, audit it, and commit the two together.

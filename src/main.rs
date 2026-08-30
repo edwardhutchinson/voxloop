@@ -28,17 +28,19 @@ compile_error!(
 mod authorisation;
 mod configuration;
 mod identity;
+mod on_box;
 mod secrets;
 mod telemetry;
 mod transport;
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::ExitCode;
 
 use std::sync::Arc;
 
 use configuration::{Deployment, DeploymentError, Store, StoreError};
 use identity::{Bootstrap, Identity};
+use on_box::{Invocation, OnBoxError};
 use telemetry::{TelemetryError, module};
 use transport::TransportError;
 
@@ -72,10 +74,58 @@ enum StartupError {
 
     #[error(transparent)]
     Transport(#[from] TransportError),
+
+    #[error(transparent)]
+    OnBox(#[from] OnBoxError),
 }
 
+/// Serve, or do one of the two things the on-box CLI does and stop.
+///
+/// The CLI is deliberately the same binary. A separate one would be a second artefact to
+/// ship, keep in step with the schema, and find on a box at the moment somebody is locked
+/// out of the deployment — which is the only moment it is ever run ([ADR-0025]).
+///
+/// [ADR-0025]: ../../docs/adr/0025-credentials-are-administered-because-there-is-no-email.md
 async fn run() -> Result<(), StartupError> {
-    let deployment = Deployment::load(&deployment_file())?;
+    match on_box::invoked(std::env::args().skip(1))? {
+        Invocation::Serve { deployment } => serve(&deployment).await,
+        Invocation::MakeAnAdministrator {
+            deployment,
+            username,
+        } => {
+            on_box::make_an_administrator(&on_the_box(&deployment).await?, &username)
+                .await?
+                .say();
+            Ok(())
+        }
+        Invocation::ResetAPassword {
+            deployment,
+            username,
+        } => {
+            on_box::reset_a_password(&on_the_box(&deployment).await?, &username)
+                .await?
+                .say();
+            Ok(())
+        }
+        Invocation::Explain => {
+            on_box::explain();
+            Ok(())
+        }
+    }
+}
+
+/// Open the store a CLI command acts on, and nothing else.
+///
+/// No telemetry subscriber is started: the operator ran a command and is owed its answer on
+/// stdout, not the deployment's configured log level poured over the top of it.
+async fn on_the_box(deployment: &Path) -> Result<Store, StartupError> {
+    let deployment = Deployment::load(deployment)?;
+
+    Ok(Store::open(&deployment.store.path).await?)
+}
+
+async fn serve(deployment: &Path) -> Result<(), StartupError> {
+    let deployment = Deployment::load(deployment)?;
     telemetry::start(&deployment.log.level)?;
 
     let store = Arc::new(Store::open(&deployment.store.path).await?);
@@ -102,14 +152,6 @@ async fn run() -> Result<(), StartupError> {
     tracing::info!(target: module::TRANSPORT, "stopped");
 
     Ok(())
-}
-
-/// The deployment file named on the command line, in the environment, or by default.
-fn deployment_file() -> PathBuf {
-    std::env::args()
-        .nth(1)
-        .or_else(|| std::env::var("VOXLOOP_CONFIG").ok())
-        .map_or_else(|| PathBuf::from(DEPLOYMENT_FILE), PathBuf::from)
 }
 
 /// Wait for systemd to stop the unit, or for someone at a terminal to interrupt it.
