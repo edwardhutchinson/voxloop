@@ -1198,7 +1198,7 @@ mod tests {
             .post_holding(&held, &format!("/api/users/{id}/lock"), "")
             .await;
 
-        assert_eq!(locked.status, StatusCode::NO_CONTENT);
+        assert_eq!(locked.status, StatusCode::OK);
         assert_eq!(
             box_of
                 .post_holding(&theirs, "/api/sign-out", "")
@@ -1233,7 +1233,7 @@ mod tests {
             .post_holding(&held, &format!("/api/users/{id}/unlock"), "")
             .await;
 
-        assert_eq!(unlocked.status, StatusCode::NO_CONTENT);
+        assert_eq!(unlocked.status, StatusCode::OK);
         assert_eq!(
             box_of
                 .post(
@@ -1257,7 +1257,7 @@ mod tests {
             .post_holding(&held, &format!("/api/users/{id}/force-password-reset"), "")
             .await;
 
-        assert_eq!(forced.status, StatusCode::NO_CONTENT);
+        assert_eq!(forced.status, StatusCode::OK);
         assert_eq!(
             box_of
                 .post_holding(&theirs, "/api/sign-out", "")
@@ -1425,6 +1425,64 @@ mod tests {
         box_of.get_holding(&held, "/api/users").await;
 
         assert_eq!(box_of.entries().await.len(), before);
+    }
+
+    /// A refused *write* is, even where the refusal came before the handler (v1 §3). An
+    /// unauthorised attempt to make an administrator is the case worth keeping, and the
+    /// entry names who tried, from where, and at what.
+    #[tokio::test]
+    async fn an_administration_write_refused_for_want_of_the_flag_is_audited() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", false).await;
+        let held = box_of.signed_in_as("flight").await;
+
+        let refused = box_of
+            .post_holding(&held, "/api/users", &an_account("a-second-root", true))
+            .await;
+
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        let entries = box_of.entries().await;
+        assert_eq!(entries[0].event, AuditEvent::AdministrationRefused);
+        assert_eq!(entries[0].actor_name, "flight");
+        assert_eq!(entries[0].operation.as_deref(), Some("POST /api/users"));
+        assert!(
+            entries[0].write.is_none(),
+            "nothing was written, so nothing about a record should be"
+        );
+    }
+
+    /// Nobody signed in at all is still recorded, by where they came from.
+    #[tokio::test]
+    async fn an_administration_write_attempted_by_nobody_is_audited_against_its_source() {
+        let box_of = ABox::already_administered().await;
+
+        box_of
+            .post_from("198.51.100.9", "/api/users", &an_account("hopeful", true))
+            .await;
+
+        let entries = box_of.entries().await;
+        assert_eq!(entries[0].event, AuditEvent::AdministrationRefused);
+        assert_eq!(entries[0].actor, None);
+        assert_eq!(entries[0].source, Some(IpAddr::from([198, 51, 100, 9])));
+    }
+
+    /// A forced password reset changes nothing else about the record, so the snapshot has to
+    /// carry whether a password is set or the entry records two identical lines and v1 §12's
+    /// "before and after" says nothing.
+    #[tokio::test]
+    async fn a_forced_password_reset_is_audited_as_a_change_rather_than_as_two_identical_lines() {
+        let box_of = ABox::already_administered().await;
+        let id = box_of.a_user_who_can_sign_in("flight", false).await;
+        let held = box_of.signed_in_as("root").await;
+
+        box_of
+            .post_holding(&held, &format!("/api/users/{id}/force-password-reset"), "")
+            .await;
+
+        let entries = box_of.entries().await;
+        let write = entries[0].write.as_ref().expect("a configuration write");
+        assert_eq!(entries[0].event, AuditEvent::PasswordResetForced);
+        assert_ne!(write.before, write.after, "the reset recorded no change");
     }
 
     /// The log outlives the records it references ([ADR-0028]): the entries about a deleted

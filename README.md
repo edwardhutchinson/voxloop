@@ -78,9 +78,15 @@ request rather than carried in the cookie, so taking it away closes the console 
 
 Users are created here and set their own password from an enrolment code, because VoxLoop
 has no mail path — so a user created today cannot sign in until enrolment lands. Locking an
-account and forcing a password reset both end every sign-in the user holds, immediately. The
-last system administrator cannot be locked, deleted or stripped of the flag; recovering from
-nobody at all means shell access to the box.
+account and forcing a password reset both end every sign-in the user holds, immediately.
+
+**The last system administrator cannot be locked, deleted or stripped of the flag.** *Last*
+counts flag holders and nothing else, deliberately: narrowing it to the ones who could sign
+in today would let a box be emptied of administrators one permitted act at a time. Forcing a
+password reset is not one of the three — the record and the flag both survive it — so
+forcing one on a sole administrator leaves a deployment nobody can sign into to administer.
+The bootstrap code is not re-minted, because somebody still holds the flag. Recovering from
+that is shell access to the box, which is what the on-box CLI is for.
 
 Every write is audited with the record before and after and the **blast radius** — what the
 change does to anything live. No session exists yet, so that radius is empty; the shape is

@@ -80,6 +80,7 @@ async fn attempt(
                 actor_name: submitted_name,
                 source: Some(source.ip()),
                 write: None,
+                operation: None,
             })
             .await?;
         transaction.commit().await?;
@@ -96,6 +97,7 @@ async fn attempt(
             actor_name: name,
             source: Some(source.ip()),
             write: None,
+            operation: None,
         })
         .await?;
     transaction.commit().await?;
@@ -141,6 +143,7 @@ async fn end(api: &Api, user: &UserId, sign_in: &SignInToken) -> Result<(), Stor
             // from adds nothing the actor does not already say.
             source: None,
             write: None,
+            operation: None,
         })
         .await?;
     transaction.commit().await?;

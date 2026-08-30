@@ -31,8 +31,8 @@ use serde::{Deserialize, Serialize};
 use super::{Api, answers, name_as_it_stands};
 use crate::authorisation::Caller;
 use crate::configuration::{
-    AdministrationRefused, AuditEntry, AuditEvent, AuditLog, BlastRadius, ConfigurationWrite,
-    NewUser, Snapshot, StoreError, Transaction, User, UserId, Users,
+    AdministrationRefused, AuditEntry, AuditEvent, AuditLog, BlastRadius, Change,
+    ConfigurationWrite, NewUser, Snapshot, StoreError, Transaction, User, UserId, Users,
 };
 use crate::telemetry::module;
 
@@ -43,15 +43,20 @@ struct Account {
     username: String,
     system_administration: bool,
     locked: bool,
+    /// Whether they can sign in at all. A user created here has no password until an
+    /// enrolment code sets one (#32), and the console says so rather than leaving an
+    /// administrator to wonder why nobody has turned up.
+    enrolled: bool,
 }
 
-impl From<User> for Account {
-    fn from(user: User) -> Self {
+impl From<&User> for Account {
+    fn from(user: &User) -> Self {
         Self {
             id: user.id.as_str().to_owned(),
-            username: user.username,
+            username: user.username.clone(),
             system_administration: user.is_system_administrator,
             locked: user.is_locked,
+            enrolled: user.has_password,
         }
     }
 }
@@ -59,9 +64,7 @@ impl From<User> for Account {
 /// What the console sends to create a user.
 ///
 /// No password: every record is created by system administration and the user sets their own
-/// through an enrolment code, because VoxLoop has no mail path ([ADR-0025]). Until #32 issues
-/// one, a created user is a record nobody can yet sign in as, which is an ordinary state
-/// rather than a fault.
+/// through an enrolment code, because VoxLoop has no mail path ([ADR-0025]).
 ///
 /// [ADR-0025]: ../../../docs/adr/0025-credentials-are-administered-because-there-is-no-email.md
 #[derive(Deserialize)]
@@ -88,7 +91,7 @@ async fn read_all(api: &Api) -> Result<Response, StoreError> {
     let found = transaction.users().await;
     transaction.roll_back().await?;
 
-    let accounts: Vec<Account> = found?.into_iter().map(Account::from).collect();
+    let accounts: Vec<Account> = found?.iter().map(Account::from).collect();
 
     Ok(Json(accounts).into_response())
 }
@@ -105,7 +108,7 @@ async fn read_one(api: &Api, id: &UserId) -> Result<Response, StoreError> {
 
     Ok(match found? {
         None => answers::no_such("user"),
-        Some(user) => Json(Account::from(user)).into_response(),
+        Some(user) => Json(Account::from(&user)).into_response(),
     })
 }
 
@@ -115,12 +118,18 @@ pub(super) async fn create(
     Extension(caller): Extension<Caller>,
     Json(new): Json<NewAccount>,
 ) -> Response {
-    answers::or_unavailable(creating(&api, &caller, new).await)
+    let Some(acting) = acting(&caller) else {
+        return unreachable_caller();
+    };
+
+    answers::or_unavailable(creating(&api, acting, new).await)
 }
 
-async fn creating(api: &Api, caller: &Caller, new: NewAccount) -> Result<Response, StoreError> {
+/// Creating is the one write with no record before it, so it is the one that does not go
+/// through [`administer`].
+async fn creating(api: &Api, acting: &UserId, new: NewAccount) -> Result<Response, StoreError> {
     let mut transaction = api.store.begin().await?;
-    let administrator = Administrator::of(&mut transaction, caller).await?;
+    let administrator = Administrator::of(&mut transaction, acting).await?;
 
     let created = transaction
         .create_user(NewUser {
@@ -140,9 +149,10 @@ async fn creating(api: &Api, caller: &Caller, new: NewAccount) -> Result<Respons
                 &administrator,
                 AuditEvent::UserCreated,
                 ConfigurationWrite {
+                    // Nothing to name, nothing before it and nothing after it: the record
+                    // never came into existence.
                     target: None,
                     target_name: new.username,
-                    // Nothing before it and nothing after it: the record never existed.
                     before: None,
                     after: None,
                     blast_radius: nothing_live(),
@@ -154,14 +164,18 @@ async fn creating(api: &Api, caller: &Caller, new: NewAccount) -> Result<Respons
         }
     };
 
-    let created = read_back(&mut transaction, &id).await?;
+    let Some(created) = transaction.user(&id).await? else {
+        // Unreachable: the record was written through this very transaction.
+        transaction.roll_back().await?;
+        return Ok(answers::no_such("user"));
+    };
+
     transaction
         .record(administrator.wrote(
             AuditEvent::UserCreated,
             ConfigurationWrite {
                 target: Some(id),
                 target_name: created.username.clone(),
-                // Nothing before it: the record did not exist a moment ago.
                 before: None,
                 after: Some(Snapshot::of(&created)),
                 blast_radius: nothing_live(),
@@ -173,7 +187,7 @@ async fn creating(api: &Api, caller: &Caller, new: NewAccount) -> Result<Respons
 
     tracing::info!(target: module::CONFIGURATION, user = %created.id.as_str(), "user created");
 
-    Ok((StatusCode::CREATED, Json(Account::from(created))).into_response())
+    Ok((StatusCode::CREATED, Json(Account::from(&created))).into_response())
 }
 
 /// Edit a user: the name they type, the flag they hold, or both.
@@ -185,62 +199,44 @@ pub(super) async fn edit(
     Path(id): Path<String>,
     Json(edit): Json<Edit>,
 ) -> Response {
+    let Some(acting) = acting(&caller) else {
+        return unreachable_caller();
+    };
     if edit.username.is_none() && edit.system_administration.is_none() {
         return answers::cannot("That edit asks for no change.");
     }
 
-    answers::or_unavailable(editing(&api, &caller, &UserId::presented(id), edit).await)
-}
+    let target = UserId::presented(id);
 
-async fn editing(
-    api: &Api,
-    caller: &Caller,
-    id: &UserId,
-    edit: Edit,
-) -> Result<Response, StoreError> {
-    let mut transaction = api.store.begin().await?;
-    let administrator = Administrator::of(&mut transaction, caller).await?;
+    // Two writes, one transaction and one entry: an edit that renames and takes the flag away
+    // is one act, so it lands whole or not at all and the log records where the record
+    // started and where it ended.
+    answers::or_unavailable(
+        administer(
+            api.clone(),
+            acting,
+            AuditEvent::UserEdited,
+            &target,
+            async |transaction| {
+                let mut made = None;
 
-    let Some(before) = transaction.user(id).await? else {
-        transaction.roll_back().await?;
-        return Ok(answers::no_such("user"));
-    };
+                if let Some(username) = &edit.username {
+                    made = transaction.rename_user(&target, username).await?;
+                }
 
-    let mut applied = Ok(());
-    if let Some(username) = &edit.username {
-        applied = transaction.rename_user(id, username).await;
-    }
-    if let (Ok(()), Some(held)) = (&applied, edit.system_administration) {
-        applied = transaction.set_system_administration(id, held).await;
-    }
+                if let Some(held) = edit.system_administration {
+                    let then = transaction.set_system_administration(&target, held).await?;
+                    made = match (made, then) {
+                        (Some(first), Some(then)) => Some(first.then(then)),
+                        (first, then) => then.or(first),
+                    };
+                }
 
-    match applied {
-        Ok(()) => {}
-        Err(AdministrationRefused::Store(error)) => return Err(error),
-        Err(refusal) => {
-            // Both halves are abandoned, so an edit that renames and demotes in one call
-            // either lands whole or does not land at all.
-            transaction.roll_back().await?;
-            return refuse(
-                api,
-                &administrator,
-                AuditEvent::UserEdited,
-                a_refused_write(&before, &refusal),
-                answer_to(&refusal),
-            )
-            .await;
-        }
-    }
-
-    let after = read_back(&mut transaction, id).await?;
-    transaction
-        .record(administrator.wrote(AuditEvent::UserEdited, changed(&before, &after)))
-        .await?;
-    transaction.commit().await?;
-
-    tracing::info!(target: module::CONFIGURATION, user = %id.as_str(), "user edited");
-
-    Ok(Json(Account::from(after)).into_response())
+                Ok(made)
+            },
+        )
+        .await,
+    )
 }
 
 /// Delete a user. `SystemAdministration`, audited — refused or not.
@@ -254,53 +250,21 @@ pub(super) async fn delete(
     Extension(caller): Extension<Caller>,
     Path(id): Path<String>,
 ) -> Response {
-    answers::or_unavailable(deleting(&api, &caller, &UserId::presented(id)).await)
-}
-
-async fn deleting(api: &Api, caller: &Caller, id: &UserId) -> Result<Response, StoreError> {
-    let mut transaction = api.store.begin().await?;
-    let administrator = Administrator::of(&mut transaction, caller).await?;
-
-    let Some(before) = transaction.user(id).await? else {
-        transaction.roll_back().await?;
-        return Ok(answers::no_such("user"));
+    let Some(acting) = acting(&caller) else {
+        return unreachable_caller();
     };
+    let target = UserId::presented(id);
 
-    match transaction.delete_user(id).await {
-        Ok(()) => {}
-        Err(AdministrationRefused::Store(error)) => return Err(error),
-        Err(refusal) => {
-            transaction.roll_back().await?;
-            return refuse(
-                api,
-                &administrator,
-                AuditEvent::UserDeleted,
-                a_refused_write(&before, &refusal),
-                answer_to(&refusal),
-            )
-            .await;
-        }
-    }
-
-    transaction
-        .record(administrator.wrote(
+    answers::or_unavailable(
+        administer(
+            api.clone(),
+            acting,
             AuditEvent::UserDeleted,
-            ConfigurationWrite {
-                target: Some(before.id.clone()),
-                target_name: before.username.clone(),
-                before: Some(Snapshot::of(&before)),
-                // Nothing after it, which is the whole of what a deletion says.
-                after: None,
-                blast_radius: nothing_live(),
-                refusal: None,
-            },
-        ))
-        .await?;
-    transaction.commit().await?;
-
-    tracing::info!(target: module::CONFIGURATION, user = %id.as_str(), "user deleted");
-
-    Ok(StatusCode::NO_CONTENT.into_response())
+            &target,
+            async |transaction| transaction.delete_user(&target).await,
+        )
+        .await,
+    )
 }
 
 /// Lock an account. `SystemAdministration`, audited — refused or not.
@@ -315,7 +279,7 @@ pub(super) async fn lock(
     Extension(caller): Extension<Caller>,
     Path(id): Path<String>,
 ) -> Response {
-    answers::or_unavailable(setting_the_lock(&api, &caller, &UserId::presented(id), true).await)
+    setting_the_lock(api, &caller, id, true).await
 }
 
 /// Unlock an account. `SystemAdministration`, audited.
@@ -324,54 +288,26 @@ pub(super) async fn unlock(
     Extension(caller): Extension<Caller>,
     Path(id): Path<String>,
 ) -> Response {
-    answers::or_unavailable(setting_the_lock(&api, &caller, &UserId::presented(id), false).await)
+    setting_the_lock(api, &caller, id, false).await
 }
 
-async fn setting_the_lock(
-    api: &Api,
-    caller: &Caller,
-    id: &UserId,
-    locked: bool,
-) -> Result<Response, StoreError> {
+async fn setting_the_lock(api: Api, caller: &Caller, id: String, locked: bool) -> Response {
+    let Some(acting) = acting(caller) else {
+        return unreachable_caller();
+    };
+    let target = UserId::presented(id);
     let event = if locked {
         AuditEvent::AccountLocked
     } else {
         AuditEvent::AccountUnlocked
     };
 
-    let mut transaction = api.store.begin().await?;
-    let administrator = Administrator::of(&mut transaction, caller).await?;
-
-    let Some(before) = transaction.user(id).await? else {
-        transaction.roll_back().await?;
-        return Ok(answers::no_such("user"));
-    };
-
-    match transaction.set_account_lock(id, locked).await {
-        Ok(()) => {}
-        Err(AdministrationRefused::Store(error)) => return Err(error),
-        Err(refusal) => {
-            transaction.roll_back().await?;
-            return refuse(
-                api,
-                &administrator,
-                event,
-                a_refused_write(&before, &refusal),
-                answer_to(&refusal),
-            )
-            .await;
-        }
-    }
-
-    let after = read_back(&mut transaction, id).await?;
-    transaction
-        .record(administrator.wrote(event, changed(&before, &after)))
-        .await?;
-    transaction.commit().await?;
-
-    tracing::info!(target: module::CONFIGURATION, user = %id.as_str(), locked, "account lock set");
-
-    Ok(StatusCode::NO_CONTENT.into_response())
+    answers::or_unavailable(
+        administer(api, acting, event, &target, async |transaction| {
+            transaction.set_account_lock(&target, locked).await
+        })
+        .await,
+    )
 }
 
 /// Force a password reset. `SystemAdministration`, audited.
@@ -381,35 +317,97 @@ async fn setting_the_lock(
 /// enrolment code sets a new password (#32). There is no self-service reset and no link to
 /// send, because there is no mail path ([ADR-0025]).
 ///
+/// It is not one of the three acts the last system administrator is protected from (v1 §2):
+/// the account keeps its flag and its record, and the on-box CLI is what resets a password
+/// nobody left can reset (#32).
+///
 /// [ADR-0025]: ../../../docs/adr/0025-credentials-are-administered-because-there-is-no-email.md
 pub(super) async fn force_password_reset(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
     Path(id): Path<String>,
 ) -> Response {
-    answers::or_unavailable(forcing_a_reset(&api, &caller, &UserId::presented(id)).await)
+    let Some(acting) = acting(&caller) else {
+        return unreachable_caller();
+    };
+    let target = UserId::presented(id);
+
+    answers::or_unavailable(
+        administer(
+            api.clone(),
+            acting,
+            AuditEvent::PasswordResetForced,
+            &target,
+            async |transaction| Ok(transaction.clear_password(&target).await?),
+        )
+        .await,
+    )
 }
 
-async fn forcing_a_reset(api: &Api, caller: &Caller, id: &UserId) -> Result<Response, StoreError> {
+/// Make one write to a user record, audit it, and commit the two together.
+///
+/// This is the shape of every configuration write VoxLoop will ever make, which is why it is
+/// one function rather than the same eight lines per operation: one transaction, the write
+/// through it, the entry through it carrying before, after and the blast radius, one commit.
+/// A write that refuses says so and is audited anyway; a write that named nobody is a
+/// not-found rather than a refusal, and there is no record for an entry to be about.
+async fn administer(
+    api: Api,
+    acting: &UserId,
+    event: AuditEvent,
+    target: &UserId,
+    write: impl AsyncFnOnce(&mut Transaction) -> Result<Option<Change>, AdministrationRefused>,
+) -> Result<Response, StoreError> {
     let mut transaction = api.store.begin().await?;
-    let administrator = Administrator::of(&mut transaction, caller).await?;
+    let administrator = Administrator::of(&mut transaction, acting).await?;
 
-    let Some(before) = transaction.user(id).await? else {
-        transaction.roll_back().await?;
-        return Ok(answers::no_such("user"));
+    let change = match write(&mut transaction).await {
+        Ok(Some(change)) => change,
+        Ok(None) => {
+            transaction.roll_back().await?;
+            return Ok(answers::no_such("user"));
+        }
+        Err(AdministrationRefused::Store(error)) => return Err(error),
+        Err(refusal) => {
+            transaction.roll_back().await?;
+            return refuse_about(&api, &administrator, event, target, &refusal).await;
+        }
     };
 
-    transaction.clear_password(id).await?;
-
-    let after = read_back(&mut transaction, id).await?;
     transaction
-        .record(administrator.wrote(AuditEvent::PasswordResetForced, changed(&before, &after)))
+        .record(administrator.wrote(event, recorded(&change)))
         .await?;
     transaction.commit().await?;
 
-    tracing::info!(target: module::CONFIGURATION, user = %id.as_str(), "password reset forced");
+    tracing::info!(
+        target: module::CONFIGURATION,
+        user = %target.as_str(),
+        ?event,
+        "user administered"
+    );
 
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(match &change.after {
+        Some(after) => Json(Account::from(after)).into_response(),
+        // A deletion has nothing to answer with, which is the whole of what it says.
+        None => StatusCode::NO_CONTENT.into_response(),
+    })
+}
+
+/// The user whose behalf this request acts on.
+///
+/// Unreachable as anything else: every route in this module is registered under
+/// `SystemAdministration`, which resolves a user before the handler runs. It is an `Option`
+/// rather than an assumption so that the impossible case cannot be answered with a
+/// mis-attributed audit entry, which is the one failure this module must not have.
+fn acting(caller: &Caller) -> Option<&UserId> {
+    match caller {
+        Caller::User { id, .. } => Some(id),
+        Caller::Nobody => None,
+    }
+}
+
+fn unreachable_caller() -> Response {
+    answers::refusal("That operation is for a system administrator.")
 }
 
 /// Whoever is administering, as the log will record them.
@@ -420,17 +418,7 @@ struct Administrator {
 }
 
 impl Administrator {
-    /// The caller the requirement resolved, with the name the store holds for them.
-    async fn of(transaction: &mut Transaction, caller: &Caller) -> Result<Self, StoreError> {
-        // Unreachable as `Nobody`: `SystemAdministration` resolved a user before the handler
-        // ran, and there is no route here carrying anything else.
-        let Caller::User { id, .. } = caller else {
-            return Ok(Self {
-                id: UserId::presented(String::new()),
-                name: String::new(),
-            });
-        };
-
+    async fn of(transaction: &mut Transaction, id: &UserId) -> Result<Self, StoreError> {
         Ok(Self {
             id: id.clone(),
             name: name_as_it_stands(transaction, id).await?,
@@ -446,6 +434,7 @@ impl Administrator {
             // where it came from adds nothing the actor does not already say.
             source: None,
             write: Some(write),
+            operation: None,
         }
     }
 }
@@ -462,62 +451,100 @@ fn nothing_live() -> BlastRadius {
     BlastRadius::nothing_live()
 }
 
-/// The record before and after a write that landed.
-fn changed(before: &User, after: &User) -> ConfigurationWrite {
+/// A change to a user record, as the log holds it.
+fn recorded(change: &Change) -> ConfigurationWrite {
     ConfigurationWrite {
-        target: Some(after.id.clone()),
-        target_name: after.username.clone(),
-        before: Some(Snapshot::of(before)),
-        after: Some(Snapshot::of(after)),
+        target: Some(change.before.id.clone()),
+        target_name: change
+            .after
+            .as_ref()
+            .unwrap_or(&change.before)
+            .username
+            .clone(),
+        before: Some(Snapshot::of(&change.before)),
+        after: change.after.as_ref().map(Snapshot::of),
         blast_radius: nothing_live(),
         refusal: None,
     }
 }
 
-/// The record as it stood, and why it was left that way.
-fn a_refused_write(before: &User, refusal: &AdministrationRefused) -> ConfigurationWrite {
-    ConfigurationWrite {
-        target: Some(before.id.clone()),
-        target_name: before.username.clone(),
-        before: Some(Snapshot::of(before)),
-        // Nothing after it: the write did not happen.
-        after: None,
-        blast_radius: nothing_live(),
-        refusal: Some(reason(refusal)),
-    }
-}
-
-/// Why a write did not happen, in one sentence.
+/// Why a write did not happen, in one sentence, and how it is answered.
 ///
 /// Configuration answers refused and never *why* in a form somebody can act on, and turning
-/// that into something a human reads is Transport's job — the same division routes.rs makes
+/// that into something a human reads is Transport's job — the same division `routes.rs` makes
 /// for a requirement nobody met. The log holds this sentence rather than the error's own
 /// wording, so what the console shows later is what the administrator was told at the time.
-fn reason(refusal: &AdministrationRefused) -> String {
-    match refusal {
-        AdministrationRefused::LastSystemAdministrator => {
-            "This is the last system administrator this deployment can be administered by, and \
-             the last one cannot be removed."
-                .to_owned()
-        }
-        AdministrationRefused::NameTaken { username } => {
-            format!("The username {username:?} is already taken.")
-        }
-        // Unreachable: a store fault is answered as a fault rather than as a refusal.
-        AdministrationRefused::Store(_) => "That write could not be made.".to_owned(),
-    }
-}
-
-/// What a refusal says to whoever asked for it.
 ///
 /// A refusal says *you may not* with the reason rather than hiding the operation (v1 §3). A
 /// name already taken is a different thing and answered as one: the caller may make users,
 /// and this particular attempt at it will not do.
-fn answer_to(refusal: &AdministrationRefused) -> Response {
+fn refusal_of(refusal: &AdministrationRefused) -> (String, StatusCode) {
     match refusal {
-        AdministrationRefused::LastSystemAdministrator => answers::refusal(&reason(refusal)),
-        _ => answers::cannot(&reason(refusal)),
+        AdministrationRefused::LastSystemAdministrator => (
+            "This is the last system administrator this deployment can be administered by, and \
+             the last one cannot be removed."
+                .to_owned(),
+            StatusCode::FORBIDDEN,
+        ),
+        AdministrationRefused::NameTaken { username } => (
+            format!("The username {username:?} is already taken."),
+            StatusCode::BAD_REQUEST,
+        ),
+        // Unreachable: a store fault is answered as a fault rather than as a refusal.
+        AdministrationRefused::Store(_) => (
+            "That write could not be made.".to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
     }
+}
+
+fn reason(refusal: &AdministrationRefused) -> String {
+    refusal_of(refusal).0
+}
+
+fn answer_to(refusal: &AdministrationRefused) -> Response {
+    let (reason, status) = refusal_of(refusal);
+
+    match status {
+        StatusCode::FORBIDDEN => answers::refusal(&reason),
+        _ => answers::cannot(&reason),
+    }
+}
+
+/// Record a write refused over the record it was about, and answer with why.
+///
+/// The record is read here rather than before every write, because a refusal is the rare
+/// path and the entry needs a transaction of its own anyway: the attempt abandoned whatever
+/// it had open.
+async fn refuse_about(
+    api: &Api,
+    administrator: &Administrator,
+    event: AuditEvent,
+    target: &UserId,
+    refusal: &AdministrationRefused,
+) -> Result<Response, StoreError> {
+    let mut transaction = api.store.begin().await?;
+    let before = transaction.user(target).await?;
+    transaction.roll_back().await?;
+
+    refuse(
+        api,
+        administrator,
+        event,
+        ConfigurationWrite {
+            target: before.as_ref().map(|user| user.id.clone()),
+            target_name: before
+                .as_ref()
+                .map_or_else(String::new, |user| user.username.clone()),
+            before: before.as_ref().map(Snapshot::of),
+            // Nothing after it: the write did not happen.
+            after: None,
+            blast_radius: nothing_live(),
+            refusal: Some(reason(refusal)),
+        },
+        answer_to(refusal),
+    )
+    .await
 }
 
 /// Record a refused write, and answer with why.
@@ -545,20 +572,4 @@ async fn refuse(
     transaction.commit().await?;
 
     Ok(answer)
-}
-
-/// The record a write just made or changed.
-///
-/// It is read back through the same transaction rather than assembled from what was asked
-/// for, so the audit entry's *after* is what the store holds rather than what the handler
-/// believes it wrote.
-async fn read_back(transaction: &mut Transaction, id: &UserId) -> Result<User, StoreError> {
-    transaction.user(id).await?.map_or_else(
-        || {
-            Err(crate::configuration::StoreError::Unavailable(
-                "a user written in this transaction could not be read back".into(),
-            ))
-        },
-        Ok,
-    )
 }

@@ -23,9 +23,11 @@ use axum::response::Response;
 use axum::routing::{MethodRouter, any, delete, get, patch, post};
 use tracing::Instrument;
 
-use super::{answers, cookies};
+use super::{answers, cookies, name_as_it_stands};
 use crate::authorisation::{self, Outcome, Requirement};
-use crate::configuration::Store;
+use crate::configuration::{
+    AuditEntry, AuditEvent, AuditLog, SignInToken, SignIns, Store, StoreError,
+};
 use crate::telemetry::module;
 
 /// Every route the server answers on, each with the requirement it was registered under.
@@ -205,30 +207,120 @@ where
                     request.headers(),
                 ));
 
-                let mut answer =
-                    match authorisation::evaluate(&requirement, presented, &store).await {
-                        Ok(Outcome::Permitted(caller)) => {
-                            // The handler acts on whoever the store said this was, this
-                            // request. Nothing downstream re-reads the cookie.
-                            request.extensions_mut().insert(caller);
-                            next.run(request).instrument(span).await
-                        }
-                        Ok(Outcome::Refused) => {
+                let mut answer = match authorisation::evaluate(
+                    &requirement,
+                    presented.clone(),
+                    &store,
+                )
+                .await
+                {
+                    Ok(Outcome::Permitted(caller)) => {
+                        // The handler acts on whoever the store said this was, this
+                        // request. Nothing downstream re-reads the cookie.
+                        request.extensions_mut().insert(caller);
+                        next.run(request).instrument(span).await
+                    }
+                    Ok(Outcome::Refused) => {
+                        {
+                            // The guard is dropped before the audit write: a span guard held
+                            // across an await belongs to whatever else the runtime schedules.
                             let _entered = span.enter();
                             tracing::debug!(target: module::AUTHORISATION, ?requirement, "refused");
-                            answers::refusal(unmet(&requirement))
                         }
-                        Err(error) => {
-                            let _entered = span.enter();
-                            answers::unavailable(&error)
+
+                        if let Some(attempted) = Attempt::of(&requirement, &request)
+                            && let Err(error) =
+                                record_a_refused_write(&store, attempted, presented).await
+                        {
+                            return answers::unavailable(&error);
                         }
-                    };
+
+                        answers::refusal(unmet(&requirement))
+                    }
+                    Err(error) => {
+                        let _entered = span.enter();
+                        answers::unavailable(&error)
+                    }
+                };
 
                 answer.extensions_mut().insert(Ruled);
                 answer
             }
         },
     ))
+}
+
+/// An administration write somebody was turned away from, as much of it as an entry needs.
+///
+/// Refused administration writes are audited; refused reads are not (v1 §3). Every operation
+/// under `SystemAdministration` is an administration operation and a `GET` among them is the
+/// read (`docs/spec/api-surface.md`), so the pair says which refusals are worth keeping
+/// without a second mandatory argument at registration — and building one of these is where
+/// that is decided.
+///
+/// It is taken out of the request before anything is awaited: a borrowed request body is not
+/// `Sync`, and holding one across an await would make this middleware unschedulable.
+struct Attempt {
+    operation: String,
+    source: Option<std::net::IpAddr>,
+}
+
+impl Attempt {
+    /// The attempt, where the refusal of it is one worth recording.
+    fn of(requirement: &Requirement, request: &Request) -> Option<Self> {
+        if *requirement != Requirement::SystemAdministration
+            || request.method() == axum::http::Method::GET
+        {
+            return None;
+        }
+
+        Some(Self {
+            operation: format!("{} {}", request.method(), request.uri().path()),
+            source: request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|axum::extract::ConnectInfo(source)| source.ip()),
+        })
+    }
+}
+
+/// Record an administration write somebody was turned away from before it reached a handler.
+///
+/// The attempt is attributed where it can be. Authorisation answers permitted or refused and
+/// never *who*, so the sign-in is resolved here rather than by widening that answer — an
+/// operator whose flag was taken away this morning is exactly who the entry is about, and a
+/// caller presenting nothing at all is recorded by where they came from.
+async fn record_a_refused_write(
+    store: &Store,
+    attempted: Attempt,
+    presented: Option<SignInToken>,
+) -> Result<(), StoreError> {
+    let mut transaction = store.begin().await?;
+
+    let actor = match presented {
+        Some(token) => transaction.holder_of(&token).await?,
+        None => None,
+    };
+    let actor_name = match &actor {
+        Some(id) => name_as_it_stands(&mut transaction, id).await?,
+        None => String::new(),
+    };
+
+    transaction
+        .record(AuditEntry {
+            event: AuditEvent::AdministrationRefused,
+            actor,
+            actor_name,
+            source: attempted.source,
+            // Nothing was written, so there is no record for a before, an after or a radius
+            // to be about. Which operation was attempted is the whole of the entry.
+            write: None,
+            operation: Some(attempted.operation),
+        })
+        .await?;
+    transaction.commit().await?;
+
+    Ok(())
 }
 
 /// What a caller is missing, said plainly enough to act on.

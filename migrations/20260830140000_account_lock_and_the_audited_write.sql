@@ -25,6 +25,11 @@ ALTER TABLE audit_entries ADD COLUMN blast_radius TEXT;
 -- Present where the write was refused and therefore did not happen. Refused administration
 -- writes are audited; refused reads are not (v1 §3).
 ALTER TABLE audit_entries ADD COLUMN refusal TEXT;
+-- The operation somebody was turned away from, where the entry is about an attempt rather
+-- than about a record. A write refused before it reached a handler touched nothing, so it
+-- has no before, no after and no radius — but which operation it was is the whole of what
+-- makes the entry worth keeping.
+ALTER TABLE audit_entries ADD COLUMN operation TEXT;
 
 -- The log is filterable by actor and by target (v1 §12).
 CREATE INDEX audit_entries_by_target ON audit_entries (target_id);

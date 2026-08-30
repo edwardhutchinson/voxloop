@@ -5,10 +5,17 @@
 // hand that sentence back rather than replacing it with a status code the operator cannot
 // act on.
 
-/** An answer VoxLoop would not give, carrying the sentence it gave instead. */
-export class Refused extends Error {
-	constructor(reason, status) {
-		super(reason);
+/**
+ * VoxLoop did not do it, and this is what it said instead.
+ *
+ * It covers both halves of a distinction the server keeps carefully — a refusal (*you may
+ * not*, with the reason) and a fault (*VoxLoop could not answer that just now*) — because
+ * the console shows the server's own sentence either way rather than inventing one. `status`
+ * is what tells them apart where something needs to.
+ */
+export class NotDone extends Error {
+	constructor(said, status) {
+		super(said);
 		this.status = status;
 	}
 }
@@ -18,7 +25,7 @@ async function ask(path, options = {}) {
 	try {
 		answer = await fetch(path, { credentials: 'same-origin', ...options });
 	} catch {
-		throw new Refused('VoxLoop could not be reached.', 0);
+		throw new NotDone('VoxLoop could not be reached.', 0);
 	}
 
 	if (answer.ok) {
@@ -27,7 +34,7 @@ async function ask(path, options = {}) {
 
 	const said = (await answer.text()).trim();
 
-	throw new Refused(said || 'VoxLoop could not answer that.', answer.status);
+	throw new NotDone(said || 'VoxLoop could not answer that.', answer.status);
 }
 
 const sending = (body) => ({

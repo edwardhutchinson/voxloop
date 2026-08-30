@@ -138,6 +138,7 @@ async fn create(
             actor_name: presented.username,
             source: Some(source.ip()),
             write: None,
+            operation: None,
         })
         .await?;
     transaction.commit().await?;
@@ -173,6 +174,7 @@ async fn refuse(api: &Api, submitted: &str, source: &SocketAddr) -> Result<Respo
             actor_name: submitted.to_owned(),
             source: Some(source.ip()),
             write: None,
+            operation: None,
         })
         .await?;
     transaction.commit().await?;

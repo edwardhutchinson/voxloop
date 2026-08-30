@@ -1,5 +1,5 @@
 <script>
-	import { Refused, signIn } from './server.js';
+	import { NotDone, signIn } from './server.js';
 
 	let { onSignedIn } = $props();
 
@@ -17,7 +17,7 @@
 			password = '';
 			await onSignedIn();
 		} catch (said) {
-			refusal = said instanceof Refused ? said.message : 'VoxLoop could not answer that.';
+			refusal = said instanceof NotDone ? said.message : 'VoxLoop could not answer that.';
 		} finally {
 			attempting = false;
 		}

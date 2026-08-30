@@ -1,6 +1,6 @@
 <script>
 	import {
-		Refused,
+		NotDone,
 		createUser,
 		deleteUser,
 		editUser,
@@ -14,10 +14,14 @@
 	let refusal = $state(null);
 	let reading = $state(true);
 
-	// Every act that touches a record is confirmed against what it will do, in words, before
-	// it is committed (ADR-0015). The consequences a live deployment adds — who is cut
-	// mid-word, whose subscriptions drop — arrive with the blast radius the server computes
-	// once there are sessions for one of these to end.
+	// Every act with a consequence beyond the record itself is confirmed against what it will
+	// do, in words, before it is committed (ADR-0015): locking, forcing a reset, deleting,
+	// and taking the system-administration flag away. Creating a user and renaming one are
+	// not confirmed, because neither ends anybody's sign-in or closes anybody's console.
+	//
+	// The consequences a live deployment adds — who is cut mid-word, whose subscriptions drop
+	// — arrive as the blast radius the server computes once there are sessions for one of
+	// these acts to end, and this panel is where they will be shown.
 	let confirming = $state(null);
 	let creating = $state({ username: '', systemAdministration: false });
 	let editing = $state(null);
@@ -39,7 +43,7 @@
 		try {
 			await what();
 		} catch (said) {
-			refusal = said instanceof Refused ? said.message : 'VoxLoop could not answer that.';
+			refusal = said instanceof NotDone ? said.message : 'VoxLoop could not answer that.';
 		}
 	}
 
@@ -48,9 +52,9 @@
 	}
 
 	async function commit() {
-		const { account, act } = confirming;
+		const { act } = confirming;
 		confirming = null;
-		await attempt(() => act(account.id));
+		await attempt(act);
 		await read();
 	}
 
@@ -71,9 +75,21 @@
 		await read();
 	}
 
-	async function setFlag(account, held) {
-		await attempt(() => editUser(account.id, { system_administration: held }));
-		await read();
+	function setFlag(account, held) {
+		const set = () => editUser(account.id, { system_administration: held });
+
+		// Giving the flag takes nothing away, so it lands. Taking it away closes the console
+		// on whoever held it, which is a consequence beyond the record.
+		if (held) {
+			attempt(set).then(read);
+			return;
+		}
+
+		ask(
+			account,
+			set,
+			`${account.username} loses the admin console. Nobody but a system administrator can give it back, and the last one cannot be taken away at all.`
+		);
 	}
 </script>
 
@@ -108,6 +124,7 @@
 					<th>Username</th>
 					<th>System administration</th>
 					<th>Account</th>
+					<th>Password</th>
 					<th class="acts">Acts</th>
 				</tr>
 			</thead>
@@ -132,23 +149,25 @@
 							{/if}
 						</td>
 						<td>
-							<label>
-								<input
-									type="checkbox"
-									checked={account.system_administration}
-									onchange={(event) => setFlag(account, event.currentTarget.checked)}
-								/>
-								{account.system_administration ? 'held' : 'not held'}
-							</label>
+							<!-- A button rather than a checkbox: taking the flag away is confirmed
+							     first, and a checkbox left flipped while the record has not changed
+							     would be the console asserting a state the server never agreed to. -->
+							{account.system_administration ? 'held' : 'not held'}
+							<button onclick={() => setFlag(account, !account.system_administration)}>
+								{account.system_administration ? 'Take away' : 'Give'}
+							</button>
 						</td>
 						<td class:locked={account.locked}>{account.locked ? 'locked' : 'unlocked'}</td>
+						<td class:quiet={!account.enrolled}>
+							{account.enrolled ? 'set' : 'awaiting enrolment'}
+						</td>
 						<td class="acts">
 							{#if account.locked}
 								<button
 									onclick={() =>
 										ask(
 											account,
-											unlockAccount,
+											() => unlockAccount(account.id),
 											`${account.username} will be able to sign in again.`
 										)}>Unlock</button
 								>
@@ -157,7 +176,7 @@
 									onclick={() =>
 										ask(
 											account,
-											lockAccount,
+											() => lockAccount(account.id),
 											`${account.username}'s sign-in and session end immediately, and they cannot sign in until the account is unlocked.`
 										)}>Lock</button
 								>
@@ -166,7 +185,7 @@
 								onclick={() =>
 									ask(
 										account,
-										forcePasswordReset,
+										() => forcePasswordReset(account.id),
 										`${account.username}'s password is taken away and their sign-in and session end immediately. They cannot sign in until an enrolment code sets a new one.`
 									)}>Force password reset</button
 							>
@@ -175,7 +194,7 @@
 								onclick={() =>
 									ask(
 										account,
-										deleteUser,
+										() => deleteUser(account.id),
 										`${account.username} is deleted and signed out everywhere. Their audit entries stay, attributed.`
 									)}>Delete</button
 							>
@@ -189,7 +208,6 @@
 	{#if confirming}
 		<div class="confirming" role="alertdialog">
 			<p>{confirming.consequence}</p>
-			<p class="quiet">Nothing live is affected: no session exists on this deployment yet.</p>
 			<button onclick={commit}>Commit</button>
 			<button onclick={() => (confirming = null)}>Cancel</button>
 		</div>

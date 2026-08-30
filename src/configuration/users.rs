@@ -82,7 +82,38 @@ pub(crate) struct User {
     ///
     /// [ADR-0025]: ../../../docs/adr/0025-credentials-are-administered-because-there-is-no-email.md
     pub(crate) is_locked: bool,
+    /// Whether a password has been set, never anything about what it is.
+    ///
+    /// A user created by system administration has none until an enrolment code sets one, so
+    /// this is an ordinary state rather than a fault — and it is what makes a forced password
+    /// reset visible in the audit log as a change rather than as two identical lines.
+    pub(crate) has_password: bool,
     pub(crate) external_identity: Option<ExternalIdentity>,
+}
+
+/// A user record before and after a write to it.
+///
+/// Every configuration change is audited with **before and after** (v1 §12), so a write
+/// answers with both rather than leaving the caller to read around it — which would be two
+/// more reads and a window in which the answer is assembled from three different moments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Change {
+    pub(crate) before: User,
+    /// Absent on a deletion, which is the whole of what a deletion says.
+    pub(crate) after: Option<User>,
+}
+
+impl Change {
+    /// Two writes read as the one change they were asked for.
+    ///
+    /// An edit that renames and takes the flag away is one act by one administrator, and the
+    /// log records where the record started and where it ended rather than the step between.
+    pub(crate) fn then(self, next: Self) -> Self {
+        Self {
+            before: self.before,
+            after: next.after,
+        }
+    }
 }
 
 /// A user about to exist.
@@ -109,6 +140,11 @@ pub(crate) enum AdministrationRefused {
     /// The last system administrator cannot be removed (v1 §2). Clearing the flag on,
     /// locking or deleting the final one is refused, because each of the three leaves a
     /// deployment nobody can administer and only shell access to the box can recover it.
+    ///
+    /// *Final* counts flag holders and nothing else. Narrowing it to the ones who could
+    /// sign in today reads as an improvement and is a hole: an administrator who stops
+    /// counting is one the next call may delete, and a box can be emptied of them one act
+    /// at a time.
     #[error("that is the last system administrator this deployment can be administered by")]
     LastSystemAdministrator,
 
@@ -143,11 +179,13 @@ pub(crate) trait Users {
     async fn users(&mut self) -> Result<Vec<User>, StoreError>;
 
     /// Change the name a user types, leaving everything that references them alone.
+    ///
+    /// Answers with the change, or with nothing where the id names nobody.
     async fn rename_user(
         &mut self,
         id: &UserId,
         username: &str,
-    ) -> Result<(), AdministrationRefused>;
+    ) -> Result<Option<Change>, AdministrationRefused>;
 
     /// Give or take away the system-administration flag.
     ///
@@ -159,7 +197,7 @@ pub(crate) trait Users {
         &mut self,
         id: &UserId,
         held: bool,
-    ) -> Result<(), AdministrationRefused>;
+    ) -> Result<Option<Change>, AdministrationRefused>;
 
     /// Lock or unlock an account.
     ///
@@ -170,14 +208,14 @@ pub(crate) trait Users {
         &mut self,
         id: &UserId,
         locked: bool,
-    ) -> Result<(), AdministrationRefused>;
+    ) -> Result<Option<Change>, AdministrationRefused>;
 
     /// Take away the password, so the user has none until an enrolment code sets one.
     ///
     /// This is the store half of a forced password reset. Like a lock, it **ends every
     /// sign-in the user holds** rather than leaving one open against a credential that no
     /// longer exists.
-    async fn clear_password(&mut self, id: &UserId) -> Result<(), StoreError>;
+    async fn clear_password(&mut self, id: &UserId) -> Result<Option<Change>, StoreError>;
 
     /// Delete a user, and everything that is only about them.
     ///
@@ -185,7 +223,7 @@ pub(crate) trait Users {
     /// — and their audit entries stay, readable and attributed ([ADR-0028]).
     ///
     /// [ADR-0028]: ../../../docs/adr/0028-the-audit-log-records-decisions-not-traffic.md
-    async fn delete_user(&mut self, id: &UserId) -> Result<(), AdministrationRefused>;
+    async fn delete_user(&mut self, id: &UserId) -> Result<Option<Change>, AdministrationRefused>;
 
     /// The stored password a name resolves to, for whoever is entitled to check it.
     async fn stored_password(
@@ -222,8 +260,8 @@ impl Users for Transaction {
 
     async fn user(&mut self, id: &UserId) -> Result<Option<User>, StoreError> {
         let found = sqlx::query(
-            "SELECT id, username, is_system_administrator, is_locked, external_issuer, \
-             external_subject FROM users WHERE id = ?",
+            "SELECT id, username, is_system_administrator, is_locked, password_hash, \
+             external_issuer, external_subject FROM users WHERE id = ?",
         )
         .bind(&id.0)
         .fetch_optional(self.connection())
@@ -235,8 +273,8 @@ impl Users for Transaction {
 
     async fn users(&mut self) -> Result<Vec<User>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, username, is_system_administrator, is_locked, external_issuer, \
-             external_subject FROM users ORDER BY username",
+            "SELECT id, username, is_system_administrator, is_locked, password_hash, \
+             external_issuer, external_subject FROM users ORDER BY username",
         )
         .fetch_all(self.connection())
         .await
@@ -249,7 +287,11 @@ impl Users for Transaction {
         &mut self,
         id: &UserId,
         username: &str,
-    ) -> Result<(), AdministrationRefused> {
+    ) -> Result<Option<Change>, AdministrationRefused> {
+        let Some(before) = self.user(id).await? else {
+            return Ok(None);
+        };
+
         sqlx::query("UPDATE users SET username = ? WHERE id = ?")
             .bind(username)
             .bind(&id.0)
@@ -257,14 +299,18 @@ impl Users for Transaction {
             .await
             .map_err(|error| taken_or_unavailable(error, username))?;
 
-        Ok(())
+        Ok(Some(self.changed(before, id).await?))
     }
 
     async fn set_system_administration(
         &mut self,
         id: &UserId,
         held: bool,
-    ) -> Result<(), AdministrationRefused> {
+    ) -> Result<Option<Change>, AdministrationRefused> {
+        let Some(before) = self.user(id).await? else {
+            return Ok(None);
+        };
+
         if !held && is_the_last_administrator(self, id).await? {
             return Err(AdministrationRefused::LastSystemAdministrator);
         }
@@ -276,14 +322,18 @@ impl Users for Transaction {
             .await
             .map_err(unavailable)?;
 
-        Ok(())
+        Ok(Some(self.changed(before, id).await?))
     }
 
     async fn set_account_lock(
         &mut self,
         id: &UserId,
         locked: bool,
-    ) -> Result<(), AdministrationRefused> {
+    ) -> Result<Option<Change>, AdministrationRefused> {
+        let Some(before) = self.user(id).await? else {
+            return Ok(None);
+        };
+
         if locked && is_the_last_administrator(self, id).await? {
             return Err(AdministrationRefused::LastSystemAdministrator);
         }
@@ -299,20 +349,30 @@ impl Users for Transaction {
             self.end_every_sign_in(id).await?;
         }
 
-        Ok(())
+        Ok(Some(self.changed(before, id).await?))
     }
 
-    async fn clear_password(&mut self, id: &UserId) -> Result<(), StoreError> {
+    async fn clear_password(&mut self, id: &UserId) -> Result<Option<Change>, StoreError> {
+        let Some(before) = self.user(id).await? else {
+            return Ok(None);
+        };
+
         sqlx::query("UPDATE users SET password_hash = NULL WHERE id = ?")
             .bind(&id.0)
             .execute(self.connection())
             .await
             .map_err(unavailable)?;
 
-        self.end_every_sign_in(id).await
+        self.end_every_sign_in(id).await?;
+
+        Ok(Some(self.changed(before, id).await?))
     }
 
-    async fn delete_user(&mut self, id: &UserId) -> Result<(), AdministrationRefused> {
+    async fn delete_user(&mut self, id: &UserId) -> Result<Option<Change>, AdministrationRefused> {
+        let Some(before) = self.user(id).await? else {
+            return Ok(None);
+        };
+
         if is_the_last_administrator(self, id).await? {
             return Err(AdministrationRefused::LastSystemAdministrator);
         }
@@ -323,7 +383,11 @@ impl Users for Transaction {
             .await
             .map_err(unavailable)?;
 
-        Ok(())
+        Ok(Some(Change {
+            before,
+            // Nothing after it, which is the whole of what a deletion says.
+            after: None,
+        }))
     }
 
     async fn stored_password(
@@ -358,6 +422,19 @@ impl Users for Transaction {
     }
 }
 
+impl Transaction {
+    /// The change a write just made: the record as it stood, and as it stands now.
+    ///
+    /// The *after* is read back through the same transaction rather than assembled from what
+    /// was asked for, so what the audit entry records is what the store holds.
+    async fn changed(&mut self, before: User, id: &UserId) -> Result<Change, StoreError> {
+        Ok(Change {
+            before,
+            after: self.user(id).await?,
+        })
+    }
+}
+
 /// A user, from the row every read of one selects.
 fn a_user(row: &sqlx::sqlite::SqliteRow) -> User {
     User {
@@ -365,6 +442,7 @@ fn a_user(row: &sqlx::sqlite::SqliteRow) -> User {
         username: row.get("username"),
         is_system_administrator: row.get::<i64, _>("is_system_administrator") != 0,
         is_locked: row.get::<i64, _>("is_locked") != 0,
+        has_password: row.get::<Option<String>, _>("password_hash").is_some(),
         external_identity: row
             .get::<Option<String>, _>("external_issuer")
             .map(|issuer| ExternalIdentity {
@@ -374,45 +452,31 @@ fn a_user(row: &sqlx::sqlite::SqliteRow) -> User {
     }
 }
 
-/// Whether this user is the only system administrator the deployment can still be
-/// administered by.
+/// Whether this user is the only system administrator on the deployment.
 ///
-/// The rule protects the deployment's ability to be administered rather than the flag
-/// itself, so an administrator who is locked out, or who has no password yet, is not
-/// somebody the last one can be handed over to. Recovering from nobody at all means shell
-/// access to the box, which is the highest privilege in the system and deliberately not a
-/// thing the console can arrange ([ADR-0025]).
+/// It counts **flag holders and nothing else**. Narrowing it to the ones who could sign in
+/// today — unlocked, with a password — reads as an improvement on the rule and is a hole in
+/// it: an administrator who stops counting is one the next call may delete, so a box could
+/// be emptied of administrators one permitted act at a time.
+///
+/// Recovering from a deployment nobody can sign into as an administrator is shell access to
+/// the box, which is the highest privilege in the system and deliberately not something the
+/// console can arrange ([ADR-0025]).
 ///
 /// [ADR-0025]: ../../../docs/adr/0025-credentials-are-administered-because-there-is-no-email.md
 async fn is_the_last_administrator(
     transaction: &mut Transaction,
     id: &UserId,
 ) -> Result<bool, StoreError> {
-    let others: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM users \
-         WHERE is_system_administrator = 1 AND is_locked = 0 AND password_hash IS NOT NULL \
-         AND id <> ?",
-    )
-    .bind(&id.0)
-    .fetch_one(transaction.connection())
-    .await
-    .map_err(unavailable)?;
+    // Two is enough to answer: either somebody else holds the flag, or this user is the only
+    // one who does.
+    let holders: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM users WHERE is_system_administrator = 1 LIMIT 2")
+            .fetch_all(transaction.connection())
+            .await
+            .map_err(unavailable)?;
 
-    if others > 0 {
-        return Ok(false);
-    }
-
-    let counts: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM users \
-         WHERE is_system_administrator = 1 AND is_locked = 0 AND password_hash IS NOT NULL \
-         AND id = ?",
-    )
-    .bind(&id.0)
-    .fetch_one(transaction.connection())
-    .await
-    .map_err(unavailable)?;
-
-    Ok(counts > 0)
+    Ok(holders.as_slice() == [id.0.clone()])
 }
 
 /// Tell a name that is already taken apart from a store that could not answer.
@@ -474,6 +538,7 @@ mod tests {
                 username: "flight".to_owned(),
                 is_system_administrator: false,
                 is_locked: false,
+                has_password: true,
                 external_identity: None,
             })
         );
@@ -840,24 +905,93 @@ mod tests {
         );
     }
 
-    /// An administrator who cannot sign in cannot administer, so they are not somebody the
-    /// rule can leave the deployment in the hands of.
+    /// The rule counts flag holders and nothing else. Narrowing it to the ones who could
+    /// sign in today would let a box be emptied of administrators one permitted act at a
+    /// time: lock one, and the other stops being protected.
     #[tokio::test]
-    async fn an_administrator_who_could_not_sign_in_anyway_does_not_count_as_the_last_one() {
+    async fn an_administrator_who_cannot_sign_in_still_counts_against_the_rule() {
         let (_directory, store) = a_temporary_store().await;
         let mut transaction = store.begin().await.expect("a transaction");
         let locked_out = an_administrator(&mut transaction, "on-leave").await;
-        let last = an_administrator(&mut transaction, "root").await;
+        let awaiting_enrolment = transaction
+            .create_user(NewUser {
+                username: "new-hire".to_owned(),
+                password_hash: None,
+                is_system_administrator: true,
+            })
+            .await
+            .expect("an administrator with no password yet");
         transaction
             .set_account_lock(&locked_out, true)
             .await
             .expect("the lock to land");
 
-        let refusal = transaction.delete_user(&last).await;
+        transaction
+            .delete_user(&locked_out)
+            .await
+            .expect("one of three to go");
 
+        let refusal = transaction.delete_user(&awaiting_enrolment).await;
         assert!(
             matches!(refusal, Err(AdministrationRefused::LastSystemAdministrator)),
-            "expected the one administrator who can still sign in to be kept, got {refusal:?}",
+            "expected the last flag holder to be kept, got {refusal:?}",
+        );
+    }
+
+    /// A forced password reset is not one of the three acts the last administrator is
+    /// protected from (v1 §2): the record and the flag both survive it, and the on-box CLI
+    /// is what resets a password nobody left can reset.
+    #[tokio::test]
+    async fn forcing_a_password_reset_takes_the_password_and_leaves_the_record_standing() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let last = an_administrator(&mut transaction, "root").await;
+
+        let change = transaction
+            .clear_password(&last)
+            .await
+            .expect("the reset to land")
+            .expect("a change");
+
+        assert!(change.before.has_password);
+        let after = change.after.expect("the record to survive");
+        assert!(!after.has_password);
+        assert!(after.is_system_administrator);
+        assert!(
+            transaction
+                .stored_password("root")
+                .await
+                .expect("the read to answer")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_against_an_id_nobody_holds_changes_nothing_and_says_so() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let nobody = UserId::presented("no-such-id".to_owned());
+
+        assert!(
+            transaction
+                .set_account_lock(&nobody, true)
+                .await
+                .expect("an answer")
+                .is_none()
+        );
+        assert!(
+            transaction
+                .delete_user(&nobody)
+                .await
+                .expect("an answer")
+                .is_none()
+        );
+        assert!(
+            transaction
+                .rename_user(&nobody, "renamed")
+                .await
+                .expect("an answer")
+                .is_none()
         );
     }
 }
