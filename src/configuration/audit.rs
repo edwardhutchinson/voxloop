@@ -22,14 +22,17 @@ use std::net::IpAddr;
 use async_trait::async_trait;
 use sqlx::Row;
 
+use super::loops::Loop;
+use super::records::Change;
+use super::roles::Role;
 use super::store::{StoreError, Transaction, now, unavailable};
-use super::users::{Change, User, UserId};
+use super::users::{User, UserId};
 
 /// A decision worth recording.
 ///
 /// The classes are fixed by [ADR-0028] and grow one ticket at a time: five authentication
-/// events and, from #31, the user administration writes. Roles, loops and the grid join them
-/// with the writes that make them.
+/// events, the user administration writes from #31, and the role, loop and base-order writes
+/// from #33. The grid joins them with the writes that make it.
 ///
 /// An event says what was attempted, not whether it succeeded: a refused write is the same
 /// event carrying [`ConfigurationWrite::refusal`], so a log filtered to *deletions of this
@@ -52,6 +55,18 @@ pub(crate) enum AuditEvent {
     /// A rename, or the system-administration flag given or taken away.
     UserEdited,
     UserDeleted,
+    RoleCreated,
+    /// A rename, or a change to how many may occupy the role at once.
+    RoleEdited,
+    RoleDeleted,
+    LoopCreated,
+    LoopEdited,
+    LoopDeleted,
+    /// The deployment-wide base loop order, set. It is the one configuration write that is
+    /// about no single record: the order is a fact about all of them at once ([ADR-0053]).
+    ///
+    /// [ADR-0053]: ../../../docs/adr/0053-the-loop-order-is-complete-and-a-new-loop-lands-at-the-end.md
+    LoopOrderEdited,
     AccountLocked,
     AccountUnlocked,
     /// The password taken away, ending the sign-in and the session immediately (v1 §2).
@@ -96,6 +111,13 @@ impl AuditEvent {
             Self::UserCreated => "user_created",
             Self::UserEdited => "user_edited",
             Self::UserDeleted => "user_deleted",
+            Self::RoleCreated => "role_created",
+            Self::RoleEdited => "role_edited",
+            Self::RoleDeleted => "role_deleted",
+            Self::LoopCreated => "loop_created",
+            Self::LoopEdited => "loop_edited",
+            Self::LoopDeleted => "loop_deleted",
+            Self::LoopOrderEdited => "loop_order_edited",
             Self::AccountLocked => "account_locked",
             Self::AccountUnlocked => "account_unlocked",
             Self::PasswordResetForced => "password_reset_forced",
@@ -118,6 +140,13 @@ impl AuditEvent {
             "user_created" => Some(Self::UserCreated),
             "user_edited" => Some(Self::UserEdited),
             "user_deleted" => Some(Self::UserDeleted),
+            "role_created" => Some(Self::RoleCreated),
+            "role_edited" => Some(Self::RoleEdited),
+            "role_deleted" => Some(Self::RoleDeleted),
+            "loop_created" => Some(Self::LoopCreated),
+            "loop_edited" => Some(Self::LoopEdited),
+            "loop_deleted" => Some(Self::LoopDeleted),
+            "loop_order_edited" => Some(Self::LoopOrderEdited),
             "account_locked" => Some(Self::AccountLocked),
             "account_unlocked" => Some(Self::AccountUnlocked),
             "password_reset_forced" => Some(Self::PasswordResetForced),
@@ -184,8 +213,9 @@ pub(crate) struct AuditEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConfigurationWrite {
     /// The record the write was about. Absent where there is none to name — a creation
-    /// refused because the name was taken never got an id.
-    pub(crate) target: Option<UserId>,
+    /// refused because the name was taken never got an id, and the base loop order is about
+    /// every loop rather than any one of them.
+    pub(crate) target: Option<RecordId>,
     /// The target's name as it stood, which is what keeps the entry readable once the
     /// record it refers to is gone.
     pub(crate) target_name: String,
@@ -200,27 +230,124 @@ pub(crate) struct ConfigurationWrite {
 }
 
 impl ConfigurationWrite {
-    /// What a write to a user record did, as the log holds it.
+    /// What a write to a record did, as the log holds it.
     ///
-    /// It is here rather than with either caller because it is built from a [`Change`], and
-    /// [`Change`] is Configuration's. The admin console and the on-box CLI make the same
-    /// writes by different entitlements, and an entry that differed between them would say
+    /// It is here rather than with any caller because it is built from a [`Change`], and
+    /// [`Change`] is Configuration's. It is one function over users, roles and loops alike:
+    /// the admin console and the on-box CLI make the same writes by different entitlements,
+    /// and an entry that differed between them — or between two kinds of record — would say
     /// the write differed.
-    pub(crate) fn to_a_user(change: &Change, blast_radius: BlastRadius) -> Self {
+    pub(crate) fn about<T: Record>(change: &Change<T>, blast_radius: BlastRadius) -> Self {
+        let ended_as = change.after.as_ref().unwrap_or(&change.before);
+
         Self {
-            target: Some(change.before.id.clone()),
+            target: Some(change.before.recorded_id()),
             // The name as it ended, which is what a rename's entry has to be read by.
-            target_name: change
-                .after
-                .as_ref()
-                .unwrap_or(&change.before)
-                .username
-                .clone(),
-            before: Some(Snapshot::of(&change.before)),
-            after: change.after.as_ref().map(Snapshot::of),
+            target_name: ended_as.recorded_name().to_owned(),
+            before: Some(change.before.snapshot()),
+            after: change.after.as_ref().map(Record::snapshot),
             blast_radius,
             refusal: None,
         }
+    }
+}
+
+/// The internal id of whatever record an entry is about, whichever kind it is.
+///
+/// Which kind that was is the event's job to say — `role_deleted` names a role — so this is
+/// the id and nothing else. It is opaque here exactly as it is everywhere else: the log
+/// holds it so that an entry stays correct across a rename, and holds the name beside it so
+/// that the entry stays readable after the record is gone ([ADR-0028]).
+///
+/// [ADR-0028]: ../../../docs/adr/0028-the-audit-log-records-decisions-not-traffic.md
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RecordId(String);
+
+impl RecordId {
+    /// The record an opaque internal id names.
+    pub(super) fn of(id: &str) -> Self {
+        Self(id.to_owned())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A configuration record the log can be about: a user, a role or a loop.
+///
+/// Three writes, one audited path. What each record renders into a [`Snapshot`] is the only
+/// thing that differs between them, and it is here rather than with the record so that the
+/// strings customer deployments hold on disk are changed in one place, deliberately.
+pub(crate) trait Record {
+    fn recorded_id(&self) -> RecordId;
+
+    /// The name as it stands, which keeps the entry readable once the record is gone.
+    fn recorded_name(&self) -> &str;
+
+    fn snapshot(&self) -> Snapshot;
+}
+
+impl Record for User {
+    fn recorded_id(&self) -> RecordId {
+        RecordId::of(self.id.as_str())
+    }
+
+    fn recorded_name(&self) -> &str {
+        &self.username
+    }
+
+    /// A user as they stood.
+    ///
+    /// Whether a password is set is in here and what it is never could be: without it, a
+    /// forced password reset — a write whose entire effect is on the credential — would
+    /// record two identical lines and say nothing.
+    fn snapshot(&self) -> Snapshot {
+        Snapshot(format!(
+            "username={} system_administration={} locked={} password={}",
+            self.username,
+            yes_or_no(self.is_system_administrator),
+            yes_or_no(self.is_locked),
+            if self.has_password { "set" } else { "none" },
+        ))
+    }
+}
+
+impl Record for Role {
+    fn recorded_id(&self) -> RecordId {
+        RecordId::of(self.id.as_str())
+    }
+
+    fn recorded_name(&self) -> &str {
+        &self.name
+    }
+
+    /// A role as it stood, with the limit rendered as the absence it is where there is none.
+    fn snapshot(&self) -> Snapshot {
+        Snapshot(format!(
+            "role={} max_occupants={}",
+            self.name,
+            self.max_occupants
+                .map_or_else(|| "no limit".to_owned(), |limit| limit.to_string()),
+        ))
+    }
+}
+
+impl Record for Loop {
+    fn recorded_id(&self) -> RecordId {
+        RecordId::of(self.id.as_str())
+    }
+
+    fn recorded_name(&self) -> &str {
+        &self.name
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot(format!(
+            "loop={} reviewed={}",
+            self.name,
+            yes_or_no(!self.is_unreviewed),
+        ))
     }
 }
 
@@ -233,18 +360,19 @@ impl ConfigurationWrite {
 pub(crate) struct Snapshot(String);
 
 impl Snapshot {
-    /// A user as they stood.
+    /// The base loop order as it stood, which is the one snapshot about no single record.
     ///
-    /// Whether a password is set is in here and what it is never could be: without it, a
-    /// forced password reset — a write whose entire effect is on the credential — would
-    /// record two identical lines and say nothing.
-    pub(crate) fn of(user: &User) -> Self {
+    /// It holds the names rather than the ids, because an order is read by somebody
+    /// answering *did they mean to put `THERMAL` first* and a line of opaque ids answers
+    /// nothing. The write it belongs to names no target, so nothing is joined on these.
+    pub(crate) fn of_the_loop_order(order: &[Loop]) -> Self {
         Self(format!(
-            "username={} system_administration={} locked={} password={}",
-            user.username,
-            yes_or_no(user.is_system_administrator),
-            yes_or_no(user.is_locked),
-            if user.has_password { "set" } else { "none" },
+            "loop_order={}",
+            order
+                .iter()
+                .map(|held| held.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ))
     }
 
@@ -363,7 +491,7 @@ impl AuditLog for Transaction {
         .bind(entry.actor.as_ref().map(UserId::as_str))
         .bind(&entry.actor_name)
         .bind(entry.source.map(|source| source.to_string()))
-        .bind(write.and_then(|write| write.target.as_ref().map(UserId::as_str)))
+        .bind(write.and_then(|write| write.target.as_ref().map(RecordId::as_str)))
         .bind(write.map(|write| write.target_name.as_str()))
         .bind(write.and_then(|write| write.before.as_ref().map(Snapshot::as_str)))
         .bind(write.and_then(|write| write.after.as_ref().map(Snapshot::as_str)))
@@ -408,7 +536,9 @@ impl AuditLog for Transaction {
                 let write =
                     row.get::<Option<String>, _>("blast_radius")
                         .map(|radius| ConfigurationWrite {
-                            target: row.get::<Option<String>, _>("target_id").map(UserId::known),
+                            target: row
+                                .get::<Option<String>, _>("target_id")
+                                .map(|id| RecordId::of(&id)),
                             target_name: row.get("target_name"),
                             before: row
                                 .get::<Option<String>, _>("state_before")
@@ -695,7 +825,7 @@ mod tests {
         let (_directory, store) = a_temporary_store().await;
         let mut transaction = store.begin().await.expect("a transaction");
         let administrator = a_user(&mut transaction, "root").await;
-        let target = a_user(&mut transaction, "flight").await;
+        let target = RecordId::of(a_user(&mut transaction, "flight").await.as_str());
         let radius = BlastRadius::of(vec!["flight loses their session on Capcom".to_owned()]);
 
         transaction
@@ -708,11 +838,14 @@ mod tests {
                 write: Some(ConfigurationWrite {
                     target: Some(target.clone()),
                     target_name: "flight".to_owned(),
-                    before: Some(Snapshot::of(&a_user_named("flight"))),
-                    after: Some(Snapshot::of(&User {
-                        is_locked: true,
-                        ..a_user_named("flight")
-                    })),
+                    before: Some(a_user_named("flight").snapshot()),
+                    after: Some(
+                        (User {
+                            is_locked: true,
+                            ..a_user_named("flight")
+                        })
+                        .snapshot(),
+                    ),
                     blast_radius: radius.clone(),
                     refusal: None,
                 }),
@@ -749,7 +882,7 @@ mod tests {
                 write: Some(ConfigurationWrite {
                     target: None,
                     target_name: "root".to_owned(),
-                    before: Some(Snapshot::of(&a_user_named("root"))),
+                    before: Some(a_user_named("root").snapshot()),
                     after: None,
                     blast_radius: BlastRadius::nothing_live(),
                     refusal: Some("that is the last system administrator".to_owned()),
@@ -796,7 +929,7 @@ mod tests {
     async fn deleting_a_user_leaves_the_entries_naming_them_as_a_target_attributed() {
         let (_directory, store) = a_temporary_store().await;
         let mut transaction = store.begin().await.expect("a transaction");
-        let target = a_user(&mut transaction, "flight").await;
+        let target = RecordId::of(a_user(&mut transaction, "flight").await.as_str());
         transaction
             .record(AuditEntry {
                 event: AuditEvent::UserDeleted,
@@ -807,7 +940,7 @@ mod tests {
                 write: Some(ConfigurationWrite {
                     target: Some(target.clone()),
                     target_name: "flight".to_owned(),
-                    before: Some(Snapshot::of(&a_user_named("flight"))),
+                    before: Some(a_user_named("flight").snapshot()),
                     after: None,
                     blast_radius: BlastRadius::nothing_live(),
                     refusal: None,
@@ -835,11 +968,12 @@ mod tests {
     /// the snapshot has to say whether one is set or the entry records two identical lines.
     #[tokio::test]
     async fn a_snapshot_says_whether_a_password_is_set_and_never_what_it_is() {
-        let enrolled = Snapshot::of(&a_user_named("flight"));
-        let reset = Snapshot::of(&User {
+        let enrolled = a_user_named("flight").snapshot();
+        let reset = (User {
             has_password: false,
             ..a_user_named("flight")
-        });
+        })
+        .snapshot();
 
         assert_ne!(enrolled, reset);
         assert!(reset.as_str().contains("password=none"), "{reset:?}");
@@ -874,11 +1008,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_snapshot_says_everything_a_later_reader_needs_to_see_what_changed() {
-        let held = Snapshot::of(&User {
+        let held = (User {
             is_system_administrator: true,
             ..a_user_named("root")
-        });
-        let taken_away = Snapshot::of(&a_user_named("root"));
+        })
+        .snapshot();
+        let taken_away = a_user_named("root").snapshot();
 
         assert_ne!(held, taken_away);
         assert!(held.as_str().contains("root"), "{held:?}");

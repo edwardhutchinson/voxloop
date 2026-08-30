@@ -14,6 +14,7 @@
 use async_trait::async_trait;
 use sqlx::Row;
 
+use super::records::{AdministrationRefused, Change, taken_or_unavailable};
 use super::sign_ins::SignIns;
 use super::store::{StoreError, Transaction, now, unavailable};
 use crate::secrets;
@@ -91,31 +92,6 @@ pub(crate) struct User {
     pub(crate) external_identity: Option<ExternalIdentity>,
 }
 
-/// A user record before and after a write to it.
-///
-/// Every configuration change is audited with **before and after** (v1 §12), so a write
-/// answers with both rather than leaving the caller to read around it — which would be two
-/// more reads and a window in which the answer is assembled from three different moments.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Change {
-    pub(crate) before: User,
-    /// Absent on a deletion, which is the whole of what a deletion says.
-    pub(crate) after: Option<User>,
-}
-
-impl Change {
-    /// Two writes read as the one change they were asked for.
-    ///
-    /// An edit that renames and takes the flag away is one act by one administrator, and the
-    /// log records where the record started and where it ended rather than the step between.
-    pub(crate) fn then(self, next: Self) -> Self {
-        Self {
-            before: self.before,
-            after: next.after,
-        }
-    }
-}
-
 /// A user about to exist.
 pub(crate) struct NewUser {
     pub(crate) username: String,
@@ -123,33 +99,6 @@ pub(crate) struct NewUser {
     /// yet to set a password on it.
     pub(crate) password_hash: Option<PasswordHash>,
     pub(crate) is_system_administrator: bool,
-}
-
-/// What can stop a user administration write.
-///
-/// The refusals and the fault are different in kind, and the type says so rather than
-/// leaving it to whoever writes the next `match`: the first two are refusals a human acts
-/// on — by choosing another name, or by promoting somebody before demoting themselves — and
-/// the third is a fault. Folding a refusal into [`StoreError`] would let a caller who forgot
-/// the arm answer "that name is taken" with "VoxLoop could not answer that just now".
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum AdministrationRefused {
-    #[error("the username {username:?} is already taken")]
-    NameTaken { username: String },
-
-    /// The last system administrator cannot be removed (v1 §2). Clearing the flag on,
-    /// locking or deleting the final one is refused, because each of the three leaves a
-    /// deployment nobody can administer and only shell access to the box can recover it.
-    ///
-    /// *Final* counts flag holders and nothing else. Narrowing it to the ones who could
-    /// sign in today reads as an improvement and is a hole: an administrator who stops
-    /// counting is one the next call may delete, and a box can be emptied of them one act
-    /// at a time.
-    #[error("that is the last system administrator this deployment can be administered by")]
-    LastSystemAdministrator,
-
-    #[error(transparent)]
-    Store(#[from] StoreError),
 }
 
 /// What a local password check needs, and nothing more.
@@ -192,7 +141,7 @@ pub(crate) trait Users {
         &mut self,
         id: &UserId,
         username: &str,
-    ) -> Result<Option<Change>, AdministrationRefused>;
+    ) -> Result<Option<Change<User>>, AdministrationRefused>;
 
     /// Give or take away the system-administration flag.
     ///
@@ -204,7 +153,7 @@ pub(crate) trait Users {
         &mut self,
         id: &UserId,
         held: bool,
-    ) -> Result<Option<Change>, AdministrationRefused>;
+    ) -> Result<Option<Change<User>>, AdministrationRefused>;
 
     /// Lock or unlock an account.
     ///
@@ -215,14 +164,14 @@ pub(crate) trait Users {
         &mut self,
         id: &UserId,
         locked: bool,
-    ) -> Result<Option<Change>, AdministrationRefused>;
+    ) -> Result<Option<Change<User>>, AdministrationRefused>;
 
     /// Take away the password, so the user has none until an enrolment code sets one.
     ///
     /// This is the store half of a forced password reset. Like a lock, it **ends every
     /// sign-in the user holds** rather than leaving one open against a credential that no
     /// longer exists.
-    async fn clear_password(&mut self, id: &UserId) -> Result<Option<Change>, StoreError>;
+    async fn clear_password(&mut self, id: &UserId) -> Result<Option<Change<User>>, StoreError>;
 
     /// Set the password, whether the user had one or not.
     ///
@@ -238,7 +187,7 @@ pub(crate) trait Users {
         &mut self,
         id: &UserId,
         hashed: PasswordHash,
-    ) -> Result<Option<Change>, StoreError>;
+    ) -> Result<Option<Change<User>>, StoreError>;
 
     /// The password this user holds, for whoever is entitled to check it.
     ///
@@ -253,7 +202,10 @@ pub(crate) trait Users {
     /// — and their audit entries stay, readable and attributed ([ADR-0028]).
     ///
     /// [ADR-0028]: ../../../docs/adr/0028-the-audit-log-records-decisions-not-traffic.md
-    async fn delete_user(&mut self, id: &UserId) -> Result<Option<Change>, AdministrationRefused>;
+    async fn delete_user(
+        &mut self,
+        id: &UserId,
+    ) -> Result<Option<Change<User>>, AdministrationRefused>;
 
     /// The stored password a name resolves to, for whoever is entitled to check it.
     async fn stored_password(
@@ -283,7 +235,7 @@ impl Users for Transaction {
         .bind(now())
         .execute(self.connection())
         .await
-        .map_err(|error| taken_or_unavailable(error, &new.username))?;
+        .map_err(|error| taken_or_unavailable(error, "username", &new.username))?;
 
         Ok(id)
     }
@@ -330,7 +282,7 @@ impl Users for Transaction {
         &mut self,
         id: &UserId,
         username: &str,
-    ) -> Result<Option<Change>, AdministrationRefused> {
+    ) -> Result<Option<Change<User>>, AdministrationRefused> {
         let Some(before) = self.user(id).await? else {
             return Ok(None);
         };
@@ -340,7 +292,7 @@ impl Users for Transaction {
             .bind(&id.0)
             .execute(self.connection())
             .await
-            .map_err(|error| taken_or_unavailable(error, username))?;
+            .map_err(|error| taken_or_unavailable(error, "username", username))?;
 
         Ok(Some(self.changed(before, id).await?))
     }
@@ -349,7 +301,7 @@ impl Users for Transaction {
         &mut self,
         id: &UserId,
         held: bool,
-    ) -> Result<Option<Change>, AdministrationRefused> {
+    ) -> Result<Option<Change<User>>, AdministrationRefused> {
         let Some(before) = self.user(id).await? else {
             return Ok(None);
         };
@@ -372,7 +324,7 @@ impl Users for Transaction {
         &mut self,
         id: &UserId,
         locked: bool,
-    ) -> Result<Option<Change>, AdministrationRefused> {
+    ) -> Result<Option<Change<User>>, AdministrationRefused> {
         let Some(before) = self.user(id).await? else {
             return Ok(None);
         };
@@ -395,7 +347,7 @@ impl Users for Transaction {
         Ok(Some(self.changed(before, id).await?))
     }
 
-    async fn clear_password(&mut self, id: &UserId) -> Result<Option<Change>, StoreError> {
+    async fn clear_password(&mut self, id: &UserId) -> Result<Option<Change<User>>, StoreError> {
         let Some(before) = self.user(id).await? else {
             return Ok(None);
         };
@@ -415,7 +367,7 @@ impl Users for Transaction {
         &mut self,
         id: &UserId,
         hashed: PasswordHash,
-    ) -> Result<Option<Change>, StoreError> {
+    ) -> Result<Option<Change<User>>, StoreError> {
         let Some(before) = self.user(id).await? else {
             return Ok(None);
         };
@@ -441,7 +393,10 @@ impl Users for Transaction {
         Ok(found.flatten().map(PasswordHash))
     }
 
-    async fn delete_user(&mut self, id: &UserId) -> Result<Option<Change>, AdministrationRefused> {
+    async fn delete_user(
+        &mut self,
+        id: &UserId,
+    ) -> Result<Option<Change<User>>, AdministrationRefused> {
         let Some(before) = self.user(id).await? else {
             return Ok(None);
         };
@@ -500,7 +455,7 @@ impl Transaction {
     ///
     /// The *after* is read back through the same transaction rather than assembled from what
     /// was asked for, so what the audit entry records is what the store holds.
-    async fn changed(&mut self, before: User, id: &UserId) -> Result<Change, StoreError> {
+    async fn changed(&mut self, before: User, id: &UserId) -> Result<Change<User>, StoreError> {
         Ok(Change {
             before,
             after: self.user(id).await?,
@@ -550,21 +505,6 @@ async fn is_the_last_administrator(
             .map_err(unavailable)?;
 
     Ok(holders.as_slice() == [id.0.clone()])
-}
-
-/// Tell a name that is already taken apart from a store that could not answer.
-fn taken_or_unavailable(error: sqlx::Error, username: &str) -> AdministrationRefused {
-    let taken = error
-        .as_database_error()
-        .is_some_and(sqlx::error::DatabaseError::is_unique_violation);
-
-    if taken {
-        AdministrationRefused::NameTaken {
-            username: username.to_owned(),
-        }
-    } else {
-        AdministrationRefused::Store(unavailable(error))
-    }
 }
 
 #[cfg(test)]

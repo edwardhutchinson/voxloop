@@ -165,6 +165,8 @@ reaches it without dropping off the air
 ([v1 §9](docs/spec/v1.md#9-the-admin-console)). The flag is read from the store on every
 request rather than carried in the cookie, so taking it away closes the console at once.
 
+### Users
+
 Users are created here and set their own password from an enrolment code, because VoxLoop
 has no mail path — so a user created today cannot sign in until somebody issues them a code.
 The account list says which users are awaiting enrolment and which already have a code
@@ -179,6 +181,34 @@ password reset is not one of the three — the record and the flag both survive 
 forcing one on a sole administrator leaves a deployment nobody can sign into to administer.
 The bootstrap code is not re-minted, because somebody still holds the flag. Recovering from
 that is shell access to the box, which is what the on-box CLI is for.
+
+### Roles and loops
+
+The console's other two pages are the configuration objects voice authority is expressed
+over. A **role** is a staffable position with a limit on how many may occupy it at once —
+single-occupant and multi-occupant roles are one concept under different limits, and a role
+with no limit set admits anybody eligible for it. A **loop** is an audio conference and the
+only thing voice can be addressed to. There is no loop kind, type or naming convention
+anywhere, deliberately: a private room is an ordinary loop somebody configured
+([ADR-0055](docs/adr/0055-there-is-no-conference-loop.md)).
+
+Install seeds the `Observer` role and nothing else. Its reach is seeded only against the
+loops present at install, and a fresh deployment has none — so a loop created afterwards
+gets no Observer cell, and **a loop created after install arrives `unreviewed`** and says so
+until an administrator has ruled on its column. Absent-because-denied and
+absent-because-nobody-ruled render identically otherwise
+([ADR-0015](docs/adr/0015-the-admin-console-reads-one-row-at-a-time.md)).
+
+The loop list is the deployment's **base loop order**, and it is administered rather than
+derived — not alphabetical, and not creation order
+([ADR-0053](docs/adr/0053-the-loop-order-is-complete-and-a-new-loop-lands-at-the-end.md)).
+Arrange it with the arrows and save it: it is sent whole, as one decision and one audit
+entry, and an order that does not name every loop exactly once is refused rather than
+half-applied. A new loop lands at the end, because appending is the only honest placement
+for something VoxLoop has been told nothing about.
+
+Nothing here says which role may hear or say what on which loop. That is the grid, and it is
+its own page.
 
 Every write is audited with the record before and after and the **blast radius** — what the
 change does to anything live. No session exists yet, so that radius is empty; the shape is

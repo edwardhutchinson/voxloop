@@ -10,4 +10,7 @@ misunderstands.
 
 The first migration carries the user record, the sign-ins held against it, and the audit
 log. The second adds the account lock and the columns an audited configuration write needs.
-The third adds the enrolment codes by which a password is set.
+The third adds the enrolment codes by which a password is set. The fourth adds roles and
+loops, and **seeds the `Observer` role** — seeding at install rather than at every start is
+what makes it install, so a deployment that deletes or renames it does not find it back the
+next morning.

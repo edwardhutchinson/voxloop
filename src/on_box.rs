@@ -405,7 +405,7 @@ fn nothing_live() -> BlastRadius {
 async fn record(
     transaction: &mut Transaction,
     event: AuditEvent,
-    change: &Change,
+    change: &Change<User>,
 ) -> Result<(), StoreError> {
     transaction
         .record(AuditEntry {
@@ -415,7 +415,7 @@ async fn record(
             actor: None,
             actor_name: THE_CLI.to_owned(),
             source: None,
-            write: Some(ConfigurationWrite::to_a_user(change, nothing_live())),
+            write: Some(ConfigurationWrite::about(change, nothing_live())),
             operation: None,
         })
         .await

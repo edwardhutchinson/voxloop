@@ -21,7 +21,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sqlx::Row;
 
-use super::audit::{BlastRadius, ConfigurationWrite, Snapshot};
+use super::audit::{BlastRadius, ConfigurationWrite, RecordId, Snapshot};
 use super::store::{StoreError, Transaction, now, unavailable};
 use super::users::UserId;
 use crate::secrets;
@@ -99,7 +99,7 @@ impl Issued {
         blast_radius: BlastRadius,
     ) -> ConfigurationWrite {
         ConfigurationWrite {
-            target: Some(target.clone()),
+            target: Some(RecordId::of(target.as_str())),
             target_name: target_name.to_owned(),
             before: self
                 .replaced

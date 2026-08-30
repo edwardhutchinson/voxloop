@@ -114,8 +114,9 @@ async fn create(
             return Ok(answers::cannot(&taken.to_string()));
         }
         Err(AdministrationRefused::Store(error)) => return Err(error),
-        // Unreachable: creating a user takes no administrator away from the deployment.
-        Err(AdministrationRefused::LastSystemAdministrator) => {
+        // Unreachable: creating a user takes no administrator away from the deployment, and
+        // the other two refusals are about roles and loops, which this route never touches.
+        Err(_) => {
             return Ok(answers::cannot("That user could not be created."));
         }
     };
