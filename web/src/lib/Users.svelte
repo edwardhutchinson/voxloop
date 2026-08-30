@@ -1,7 +1,6 @@
 <script>
 	import Confirm from './Confirm.svelte';
 	import {
-		NotDone,
 		createUser,
 		deleteUser,
 		editUser,
@@ -9,7 +8,8 @@
 		issueEnrolmentCode,
 		lockAccount,
 		unlockAccount,
-		users
+		users,
+		whatWentWrong
 	} from './server.js';
 
 	let accounts = $state([]);
@@ -50,7 +50,7 @@
 		try {
 			await what();
 		} catch (said) {
-			refusal = said instanceof NotDone ? said.message : 'VoxLoop could not answer that.';
+			refusal = whatWentWrong(said);
 		}
 	}
 

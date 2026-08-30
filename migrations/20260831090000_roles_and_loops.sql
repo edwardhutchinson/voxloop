@@ -12,8 +12,8 @@ CREATE TABLE roles (
     id            TEXT    PRIMARY KEY,
     -- NOCASE so that `Flight` and `flight` cannot be two positions on one console.
     name          TEXT    NOT NULL COLLATE NOCASE UNIQUE,
-    -- Null is *no limit*, which is the same concept with the limit left unset rather than a
-    -- second kind of role. `Observer` is seeded that way: every user is eligible for it, so
+    -- Null is *no limit* (ADR-0068), the same concept with the limit left unset rather than
+    -- a second kind of role. `Observer` is seeded that way: every user is eligible for it, so
     -- any number this column held instead would be VoxLoop guessing how many people work
     -- here, and the guess is only ever discovered by the person it turns away.
     max_occupants INTEGER,

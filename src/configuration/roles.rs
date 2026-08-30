@@ -49,9 +49,11 @@ pub(crate) struct Role {
     /// How many users may occupy this role at once, where there is a limit.
     ///
     /// `None` is *no limit*: the same concept with the limit left unset, rather than a second
-    /// kind of role. `Observer` is seeded that way, because every user is eligible for it and
-    /// any number VoxLoop picked instead would be a guess discovered only by the person it
-    /// turned away.
+    /// kind of role ([ADR-0068]). `Observer` is seeded that way, because every user is
+    /// eligible for it and any number VoxLoop picked instead would be a guess discovered only
+    /// by the person it turned away.
+    ///
+    /// [ADR-0068]: ../../../docs/adr/0068-a-role-with-no-limit-is-the-limit-left-unset.md
     pub(crate) max_occupants: Option<u32>,
 }
 
@@ -221,9 +223,12 @@ fn a_role(row: &sqlx::sqlite::SqliteRow) -> Role {
     Role {
         id: RoleId::known(row.get("id")),
         name: row.get("name"),
+        // A limit too large for a `u32` is one somebody hand-edited into the file, and it
+        // reads back as an absurdly large limit rather than as `None`: `None` is *no limit*,
+        // an administered decision, and a fault must never be answered with one of those.
         max_occupants: row
             .get::<Option<i64>, _>("max_occupants")
-            .and_then(|limit| u32::try_from(limit).ok()),
+            .map(|limit| u32::try_from(limit).unwrap_or(u32::MAX)),
     }
 }
 

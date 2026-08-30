@@ -5,6 +5,7 @@
 //! say, which is the grid (#34). This page administers the position itself.
 
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
@@ -13,13 +14,13 @@ use super::{acting, administer, create, unreachable_caller};
 use crate::authorisation::Caller;
 use crate::configuration::{
     AdministrationRefused, AuditEvent, Change, NewRole, Role, RoleId, Roles, StoreError,
-    Transaction,
+    Transaction, UserId,
 };
 use crate::transport::{Api, answers};
 
 /// A role, as the console reads one.
 #[derive(Serialize)]
-struct Position {
+struct RoleAsRead {
     id: String,
     name: String,
     /// Absent is *no limit*, which is how the console renders it: the same concept with the
@@ -27,7 +28,7 @@ struct Position {
     max_occupants: Option<u32>,
 }
 
-impl Position {
+impl RoleAsRead {
     fn of(role: &Role) -> Self {
         Self {
             id: role.id.as_str().to_owned(),
@@ -44,9 +45,9 @@ impl Position {
     }
 }
 
-/// What the console sends to create a role.
+/// What the console sends to create a role. The domain's own [`NewRole`] is what it becomes.
 #[derive(Deserialize)]
-pub(in crate::transport) struct NewPosition {
+pub(in crate::transport) struct Creating {
     name: String,
     /// Absent is no limit, and that is a decision an administrator makes rather than a field
     /// they forgot: `Observer` is seeded that way, and a site's own listen-only role wants
@@ -76,9 +77,9 @@ async fn read_all(api: &Api) -> Result<Response, StoreError> {
     let read = transaction.roles().await;
     transaction.roll_back().await?;
 
-    let positions: Vec<Position> = read?.iter().map(Position::of).collect();
+    let roles: Vec<RoleAsRead> = read?.iter().map(RoleAsRead::of).collect();
 
-    Ok(Json(positions).into_response())
+    Ok(Json(roles).into_response())
 }
 
 /// Read one role. `SystemAdministration`. A read, so it is not audited.
@@ -93,7 +94,7 @@ async fn read_one(api: &Api, id: &RoleId) -> Result<Response, StoreError> {
 
     Ok(match read? {
         None => answers::no_such("role"),
-        Some(role) => Json(Position::of(&role)).into_response(),
+        Some(role) => Json(RoleAsRead::of(&role)).into_response(),
     })
 }
 
@@ -101,7 +102,7 @@ async fn read_one(api: &Api, id: &RoleId) -> Result<Response, StoreError> {
 pub(in crate::transport) async fn create_role(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
-    Json(new): Json<NewPosition>,
+    Json(new): Json<Creating>,
 ) -> Response {
     let Some(acting) = acting(&caller) else {
         return unreachable_caller();
@@ -124,7 +125,7 @@ pub(in crate::transport) async fn create_role(
                 Ok(transaction.role(&id).await?)
             },
             async |_transaction: &mut Transaction, made: &Role| {
-                Ok((axum::http::StatusCode::CREATED, Json(Position::of(made))).into_response())
+                Ok((StatusCode::CREATED, Json(RoleAsRead::of(made))).into_response())
             },
         )
         .await,
@@ -205,7 +206,7 @@ pub(in crate::transport) async fn delete(
 /// Every write to a role record, on the one audited path, answering with the role.
 async fn administering(
     api: &Api,
-    acting: &crate::configuration::UserId,
+    acting: &UserId,
     event: AuditEvent,
     target: &RoleId,
     write: impl AsyncFnOnce(&mut Transaction) -> Result<Option<Change<Role>>, AdministrationRefused>,
@@ -218,7 +219,7 @@ async fn administering(
             "role",
             async |transaction: &mut Transaction| transaction.role(target).await,
             write,
-            Position::read_through,
+            RoleAsRead::read_through,
         )
         .await,
     )

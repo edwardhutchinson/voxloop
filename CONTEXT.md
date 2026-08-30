@@ -71,7 +71,7 @@ Giving up an assumed role, ending the session and returning the user to the lobb
 _Avoid_: sign out (which ends the whole authenticated state), release, drop, switch
 
 **Max occupants**:
-The limit on how many users may occupy a role at once. Single-occupant and multi-occupant roles are the same concept under different limits, not different kinds of thing. A role may have **no limit**, which is that same concept with the limit left unset rather than a third kind of role — it is what the seeded `Observer` role carries, because every user is eligible for it and any number picked instead would be a guess.
+The limit on how many users may occupy a role at once. Single-occupant and multi-occupant roles are the same concept under different limits, not different kinds of thing. A role may have **no limit**, which is that same concept with the limit left unset rather than a third kind of role ([ADR-0068](docs/adr/0068-a-role-with-no-limit-is-the-limit-left-unset.md)) — it is what the seeded `Observer` role carries, because every user is eligible for it and any number picked instead would be a guess. A limit of zero is refused: a role nobody may occupy is not a staffable position.
 _Avoid_: cardinality, capacity, seats, unlimited role
 
 **Staffing role**:

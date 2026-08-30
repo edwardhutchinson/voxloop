@@ -8,9 +8,16 @@
 	// A new loop lands at the end, because appending is the only honest placement for
 	// something VoxLoop has been told nothing about.
 	import Confirm from './Confirm.svelte';
-	import { NotDone, createLoop, deleteLoop, editLoop, loops, setLoopOrder } from './server.js';
+	import {
+		createLoop,
+		deleteLoop,
+		editLoop,
+		loops,
+		setLoopOrder,
+		whatWentWrong
+	} from './server.js';
 
-	let conferences = $state([]);
+	let allLoops = $state([]);
 	// The order as the server last answered it, so an arrangement in progress can be told
 	// apart from the one that is actually saved. Nothing here renders optimistically: the
 	// list says plainly that a rearrangement has not been committed yet.
@@ -21,7 +28,7 @@
 	let creating = $state({ name: '' });
 	let editing = $state(null);
 
-	const arranged = $derived(conferences.map((held) => held.id).join() !== saved.join());
+	const arranged = $derived(allLoops.map((held) => held.id).join() !== saved.join());
 
 	$effect(() => {
 		read();
@@ -30,8 +37,8 @@
 	async function read() {
 		reading = true;
 		await attempt(async () => {
-			conferences = await loops();
-			saved = conferences.map((held) => held.id);
+			allLoops = await loops();
+			saved = allLoops.map((held) => held.id);
 		});
 		reading = false;
 	}
@@ -41,7 +48,7 @@
 		try {
 			await what();
 		} catch (said) {
-			refusal = said instanceof NotDone ? said.message : 'VoxLoop could not answer that.';
+			refusal = whatWentWrong(said);
 		}
 	}
 
@@ -65,19 +72,23 @@
 	// Moving a loop rearranges this list and nothing else. The order is one write, sent when
 	// the administrator says so, rather than one write per press: an order arrived at by six
 	// clicks is one decision, and the audit log should read as one.
+	//
+	// This is the one place the console shows something the server has not agreed to, and it
+	// is not optimistic rendering: an arrangement in progress is marked as unsaved until it
+	// is committed, so what is on screen is never asserted to be what the deployment holds.
 	function move(at, by) {
 		const to = at + by;
-		if (to < 0 || to >= conferences.length) {
+		if (to < 0 || to >= allLoops.length) {
 			return;
 		}
 
-		const rearranged = [...conferences];
+		const rearranged = [...allLoops];
 		[rearranged[at], rearranged[to]] = [rearranged[to], rearranged[at]];
-		conferences = rearranged;
+		allLoops = rearranged;
 	}
 
 	async function save() {
-		await attempt(() => setLoopOrder(conferences.map((held) => held.id)));
+		await attempt(() => setLoopOrder(allLoops.map((held) => held.id)));
 		await read();
 	}
 
@@ -110,7 +121,7 @@
 
 	{#if reading}
 		<p class="quiet">Reading…</p>
-	{:else if conferences.length === 0}
+	{:else if allLoops.length === 0}
 		<p class="quiet">No loops yet. Create the first one above.</p>
 	{:else}
 		<table>
@@ -118,12 +129,12 @@
 				<tr>
 					<th>Order</th>
 					<th>Loop</th>
-					<th>Permissions</th>
+					<th>Review</th>
 					<th class="acts">Acts</th>
 				</tr>
 			</thead>
 			<tbody>
-				{#each conferences as held, at (held.id)}
+				{#each allLoops as held, at (held.id)}
 					<tr>
 						<td class="place">
 							<button
@@ -133,7 +144,7 @@
 							>
 							<button
 								aria-label="Move {held.name} down"
-								disabled={at === conferences.length - 1}
+								disabled={at === allLoops.length - 1}
 								onclick={() => move(at, 1)}>↓</button
 							>
 						</td>
@@ -154,10 +165,13 @@
 								</button>
 							{/if}
 						</td>
+						<!-- Every loop is unreviewed until an administrator has set or dismissed
+						     each role's cell, which is the grid's act: nothing on this page
+						     clears the mark, and nothing here pretends to. -->
 						<td class:quiet={!held.unreviewed}>
 							{#if held.unreviewed}
 								unreviewed
-								<span class="note">nobody has ruled on this loop yet</span>
+								<span class="note">nobody has ruled on this loop's permissions yet</span>
 							{:else}
 								ruled on
 							{/if}

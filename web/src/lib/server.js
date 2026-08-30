@@ -20,6 +20,17 @@ export class NotDone extends Error {
 	}
 }
 
+/**
+ * What to show an operator when VoxLoop did not do it.
+ *
+ * The server's own sentence, wherever there is one: a refusal says *you may not* with the
+ * reason (v1 §3), and replacing it with wording of the console's own would be the console
+ * inventing an answer nobody can act on. It is one function because every page shows the
+ * same thing the same way.
+ */
+export const whatWentWrong = (said) =>
+	said instanceof NotDone ? said.message : 'VoxLoop could not answer that.';
+
 async function ask(path, options = {}) {
 	let answer;
 	try {

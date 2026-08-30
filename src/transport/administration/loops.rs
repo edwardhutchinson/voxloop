@@ -32,7 +32,7 @@ use crate::transport::{Api, answers};
 
 /// A loop, as the console reads one. The list is in the base order, which is the order.
 #[derive(Serialize)]
-struct Conference {
+struct LoopAsRead {
     id: String,
     name: String,
     /// Whether anybody has ruled on this loop's column yet ([ADR-0015]). The console says so
@@ -43,7 +43,7 @@ struct Conference {
     unreviewed: bool,
 }
 
-impl Conference {
+impl LoopAsRead {
     fn of(held: &Loop) -> Self {
         Self {
             id: held.id.as_str().to_owned(),
@@ -62,7 +62,7 @@ impl Conference {
 
 /// What the console sends to create a loop. A name, and nothing else there could be.
 #[derive(Deserialize)]
-pub(in crate::transport) struct NewConference {
+pub(in crate::transport) struct Creating {
     name: String,
 }
 
@@ -88,9 +88,9 @@ async fn read_all(api: &Api) -> Result<Response, StoreError> {
     let read = transaction.loops().await;
     transaction.roll_back().await?;
 
-    let conferences: Vec<Conference> = read?.iter().map(Conference::of).collect();
+    let held: Vec<LoopAsRead> = read?.iter().map(LoopAsRead::of).collect();
 
-    Ok(Json(conferences).into_response())
+    Ok(Json(held).into_response())
 }
 
 /// Read one loop. `SystemAdministration`. A read, so it is not audited.
@@ -105,7 +105,7 @@ async fn read_one(api: &Api, id: &LoopId) -> Result<Response, StoreError> {
 
     Ok(match read? {
         None => answers::no_such("loop"),
-        Some(held) => Json(Conference::of(&held)).into_response(),
+        Some(held) => Json(LoopAsRead::of(&held)).into_response(),
     })
 }
 
@@ -116,7 +116,7 @@ async fn read_one(api: &Api, id: &LoopId) -> Result<Response, StoreError> {
 pub(in crate::transport) async fn create_loop(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
-    Json(new): Json<NewConference>,
+    Json(new): Json<Creating>,
 ) -> Response {
     let Some(acting) = acting(&caller) else {
         return unreachable_caller();
@@ -134,7 +134,7 @@ pub(in crate::transport) async fn create_loop(
                 Ok(transaction.a_loop(&id).await?)
             },
             async |_transaction: &mut Transaction, made: &Loop| {
-                Ok((StatusCode::CREATED, Json(Conference::of(made))).into_response())
+                Ok((StatusCode::CREATED, Json(LoopAsRead::of(made))).into_response())
             },
         )
         .await,
@@ -206,7 +206,7 @@ async fn administering(
             "loop",
             async |transaction: &mut Transaction| transaction.a_loop(target).await,
             write,
-            Conference::read_through,
+            LoopAsRead::read_through,
         )
         .await,
     )
@@ -265,9 +265,9 @@ async fn ordering(api: &Api, acting: &UserId, order: Vec<String>) -> Result<Resp
 
     tracing::info!(target: module::CONFIGURATION, "the base loop order was set");
 
-    let conferences: Vec<Conference> = after.iter().map(Conference::of).collect();
+    let ordered: Vec<LoopAsRead> = after.iter().map(LoopAsRead::of).collect();
 
-    Ok(Json(conferences).into_response())
+    Ok(Json(ordered).into_response())
 }
 
 /// What setting the order did, as the log holds it.

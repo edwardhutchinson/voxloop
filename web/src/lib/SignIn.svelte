@@ -1,5 +1,5 @@
 <script>
-	import { NotDone, signIn } from './server.js';
+	import { signIn, whatWentWrong } from './server.js';
 
 	// A line the page above wants shown here — after an enrolment code has just been
 	// redeemed, there is nothing to refuse and something to say.
@@ -19,7 +19,7 @@
 			password = '';
 			await onSignedIn();
 		} catch (said) {
-			refusal = said instanceof NotDone ? said.message : 'VoxLoop could not answer that.';
+			refusal = whatWentWrong(said);
 		} finally {
 			attempting = false;
 		}

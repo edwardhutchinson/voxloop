@@ -6,9 +6,9 @@
 	// Who may assume a role is eligibility, and what a role may hear or say is the grid.
 	// Neither is here: this page administers the position itself.
 	import Confirm from './Confirm.svelte';
-	import { NotDone, createRole, deleteRole, editRole, roles } from './server.js';
+	import { createRole, deleteRole, editRole, roles, whatWentWrong } from './server.js';
 
-	let positions = $state([]);
+	let allRoles = $state([]);
 	let refusal = $state(null);
 	let reading = $state(true);
 	let confirming = $state(null);
@@ -22,7 +22,7 @@
 	async function read() {
 		reading = true;
 		await attempt(async () => {
-			positions = await roles();
+			allRoles = await roles();
 		});
 		reading = false;
 	}
@@ -32,7 +32,7 @@
 		try {
 			await what();
 		} catch (said) {
-			refusal = said instanceof NotDone ? said.message : 'VoxLoop could not answer that.';
+			refusal = whatWentWrong(said);
 		}
 	}
 
@@ -118,7 +118,7 @@
 				</tr>
 			</thead>
 			<tbody>
-				{#each positions as role (role.id)}
+				{#each allRoles as role (role.id)}
 					<tr>
 						{#if editing?.id === role.id}
 							<td colspan="3">
