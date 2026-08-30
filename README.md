@@ -135,8 +135,16 @@ voxloop help
 ```
 
 Both print a single-use enrolment code to hand over; neither sets a password itself, because
-an enrolment code is the only way one is ever set. Point either at a deployment file with
+an enrolment code is the only way one is ever set. **That code is redeemed over HTTPS**, so
+the recovery these commands offer is a way back into a deployment that is still serving —
+not a way to sign in to one that is down. Point either at a deployment file with
 `--config <file>` or `VOXLOOP_CONFIG`, exactly as serving does.
+
+`administrator` also **unlocks the account**, which is a third act neither the console's
+*unlock* nor the enrolment path performs from here. It has to: *last system administrator*
+counts flag holders and nothing else, deliberately, so a box with two administrators can have
+both of them locked and nobody left to unlock either. That is the state this command exists
+to get out of.
 
 **These commands run outside VoxLoop's authorisation model entirely.** They evaluate no
 requirement, resolve no principal and answer to nobody: being able to run this binary against

@@ -20,23 +20,27 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use serde::Deserialize;
 
-use super::{Api, answers, name_as_it_stands};
+use super::{Api, answers, name_as_it_stands, unstorable};
 use crate::authorisation::Caller;
 use crate::configuration::{AuditEntry, AuditEvent, AuditLog, StoreError, UserId, Users};
-use crate::identity::PasswordRefused;
 use crate::telemetry::module;
 
 /// What a signed-in user presents to change their own password.
+///
+/// Named for what it holds rather than for the act, so that it cannot be mistaken for
+/// Configuration's [`Change`], which is a record before and after a write.
+///
+/// [`Change`]: crate::configuration::Change
 #[derive(Deserialize)]
-pub(super) struct Change {
+pub(super) struct BothPasswords {
     current: String,
     new: String,
 }
 
 /// Both halves are live credentials, and one that turns up in a log is spent.
-impl std::fmt::Debug for Change {
+impl std::fmt::Debug for BothPasswords {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("Change { current: withheld, new: withheld }")
+        formatter.write_str("BothPasswords { current: withheld, new: withheld }")
     }
 }
 
@@ -45,7 +49,7 @@ pub(super) async fn change(
     State(api): State<Api>,
     ConnectInfo(source): ConnectInfo<SocketAddr>,
     Extension(caller): Extension<Caller>,
-    Json(presented): Json<Change>,
+    Json(presented): Json<BothPasswords>,
 ) -> Response {
     let Caller::User { id, .. } = caller else {
         // Unreachable: the requirement resolved a user before this handler ran.
@@ -62,7 +66,7 @@ pub(super) async fn change(
 async fn changing(
     api: &Api,
     user: &UserId,
-    presented: Change,
+    presented: BothPasswords,
     source: &SocketAddr,
 ) -> Result<Response, StoreError> {
     let mut transaction = api.store.begin().await?;
@@ -93,14 +97,9 @@ async fn changing(
 
     let hashed = match api.identity.hash_password(&presented.new) {
         Ok(hashed) => hashed,
-        Err(refusal @ PasswordRefused::TooShort) => {
+        Err(refusal) => {
             transaction.roll_back().await?;
-            return Ok(answers::cannot(&refusal.to_string()));
-        }
-        Err(PasswordRefused::Unusable) => {
-            transaction.roll_back().await?;
-            tracing::error!(target: module::IDENTITY, "a password could not be hashed");
-            return Ok(answers::cannot("That password could not be stored."));
+            return Ok(unstorable(&refusal));
         }
     };
 

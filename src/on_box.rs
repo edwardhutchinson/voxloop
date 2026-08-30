@@ -32,7 +32,7 @@ use std::path::PathBuf;
 
 use crate::configuration::{
     AuditEntry, AuditEvent, AuditLog, BlastRadius, Change, ConfigurationWrite, Enrolment,
-    EnrolmentCode, NewUser, Snapshot, Store, StoreError, Transaction, User, UserId, Users,
+    EnrolmentCode, NewUser, Store, StoreError, Transaction, User, UserId, Users,
 };
 
 /// How the audit log names an act nobody signed in to perform.
@@ -101,20 +101,18 @@ pub(crate) fn invoked(
 
     match first.as_str() {
         "help" | "--help" | "-h" => Ok(Invocation::Explain),
-        ADMINISTRATOR | RESET_PASSWORD => {
-            let (username, named) = rest_of(arguments, &first)?;
-            let deployment = deployment_file(named);
-
-            Ok(if first == ADMINISTRATOR {
-                Invocation::MakeAnAdministrator {
-                    deployment,
-                    username,
-                }
-            } else {
-                Invocation::ResetAPassword {
-                    deployment,
-                    username,
-                }
+        ADMINISTRATOR => {
+            let (username, deployment) = rest_of(arguments, ADMINISTRATOR)?;
+            Ok(Invocation::MakeAnAdministrator {
+                deployment,
+                username,
+            })
+        }
+        RESET_PASSWORD => {
+            let (username, deployment) = rest_of(arguments, RESET_PASSWORD)?;
+            Ok(Invocation::ResetAPassword {
+                deployment,
+                username,
             })
         }
         _ => Ok(Invocation::Serve {
@@ -127,7 +125,7 @@ pub(crate) fn invoked(
 fn rest_of(
     arguments: impl Iterator<Item = String>,
     command: &str,
-) -> Result<(String, Option<PathBuf>), OnBoxError> {
+) -> Result<(String, PathBuf), OnBoxError> {
     let mut username = None;
     let mut deployment = None;
     let mut arguments = arguments.peekable();
@@ -143,7 +141,7 @@ fn rest_of(
     }
 
     username
-        .map(|username| (username, deployment))
+        .map(|username| (username, deployment_file(deployment)))
         .ok_or_else(|| OnBoxError::NoUsername {
             command: command.to_owned(),
         })
@@ -379,16 +377,7 @@ async fn enrol(
             actor: None,
             actor_name: THE_CLI.to_owned(),
             source: None,
-            write: Some(ConfigurationWrite {
-                target: Some(user.clone()),
-                target_name: username.to_owned(),
-                before: issued
-                    .replaced
-                    .map(|code| Snapshot::of_enrolment(code.expires_at)),
-                after: Some(Snapshot::of_enrolment(issued.outstanding.expires_at)),
-                blast_radius: BlastRadius::nothing_live(),
-                refusal: None,
-            }),
+            write: Some(issued.to_the_code(user, username, nothing_live())),
             operation: None,
         })
         .await?;
@@ -399,6 +388,17 @@ async fn enrol(
         expires_at: issued.outstanding.expires_at,
         did,
     })
+}
+
+/// What a write from here does to anything live, which is nothing it can know about.
+///
+/// This process is not the one serving the deployment — it is what somebody reaches for when
+/// that one is not answering them — so there is no state authority here to compute a radius
+/// from. An empty one is the honest answer rather than a placeholder ([ADR-0039]).
+///
+/// [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+fn nothing_live() -> BlastRadius {
+    BlastRadius::nothing_live()
 }
 
 /// Record a write this binary made with nobody signed in to make it.
@@ -415,22 +415,7 @@ async fn record(
             actor: None,
             actor_name: THE_CLI.to_owned(),
             source: None,
-            write: Some(ConfigurationWrite {
-                target: Some(change.before.id.clone()),
-                target_name: change
-                    .after
-                    .as_ref()
-                    .unwrap_or(&change.before)
-                    .username
-                    .clone(),
-                before: Some(Snapshot::of(&change.before)),
-                after: change.after.as_ref().map(Snapshot::of),
-                // Nothing live is on this box's mind: the CLI is what somebody reaches for
-                // when the deployment is not answering them, and there is no state authority
-                // in this process to ask.
-                blast_radius: BlastRadius::nothing_live(),
-                refusal: None,
-            }),
+            write: Some(ConfigurationWrite::to_a_user(change, nothing_live())),
             operation: None,
         })
         .await
@@ -482,9 +467,14 @@ voxloop — a software voice loop system.
 {listed}
 
 Both commands print a single-use enrolment code. Hand it over out of band; redeeming it
-sets the password, which is the only way one is ever set in VoxLoop. Point either at a
-deployment file with --config <file>, or through VOXLOOP_CONFIG; otherwise they read
+sets the password, which is the only way one is ever set in VoxLoop. The code is redeemed
+over HTTPS, so this is a way back into a deployment that is still serving. Point either at
+a deployment file with --config <file>, or through VOXLOOP_CONFIG; otherwise they read
 {deployment} in the working directory, exactly as serving does.
+
+`{ADMINISTRATOR}` also unlocks the account. It has to: the last-administrator rule counts
+flag holders and nothing else, so a box with two administrators can have both of them
+locked and nobody left to unlock either.
 
 These two commands run outside VoxLoop's authorisation model entirely. They evaluate no
 requirement, resolve no principal and answer to nobody: being able to run this binary

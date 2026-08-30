@@ -33,8 +33,10 @@ use axum_server::tls_rustls::RustlsConfig;
 use tokio::task::JoinHandle;
 
 use crate::authorisation::Requirement;
+use axum::response::Response;
+
 use crate::configuration::{Deployment, Store, StoreError, Transaction, UserId, Users};
-use crate::identity::{Bootstrap, Identity};
+use crate::identity::{Bootstrap, Identity, PasswordRefused};
 use crate::telemetry::module;
 use rate_limit::{Admission, RateLimits};
 use routes::RouteTable;
@@ -66,6 +68,22 @@ impl Api {
     /// [ADR-0025]: ../../../docs/adr/0025-credentials-are-administered-because-there-is-no-email.md
     fn admits(&self, source: &SocketAddr) -> bool {
         self.limits.admit(source.ip()) == Admission::Permitted
+    }
+}
+
+/// Why VoxLoop will not store a password, said to whoever offered one.
+///
+/// Two routes set a password — redeeming an enrolment code and changing one's own — and they
+/// differ in what they have open to abandon, never in what makes a password unstorable. Only
+/// the second half is shared, so each caller still rolls back its own transaction: a refusal
+/// that left a spent enrolment code behind would cost somebody their only way in over a typo.
+fn unstorable(refusal: &PasswordRefused) -> Response {
+    match refusal {
+        PasswordRefused::TooShort => answers::cannot(&refusal.to_string()),
+        PasswordRefused::Unusable => {
+            tracing::error!(target: module::IDENTITY, "a password could not be hashed");
+            answers::cannot("That password could not be stored.")
+        }
     }
 }
 
@@ -1922,6 +1940,38 @@ mod tests {
             !listed.body.contains(&code),
             "the console was handed the code back"
         );
+    }
+
+    /// Displayed state is factual (v1's standing requirements). A write's answer says what
+    /// the record and its code are, together — not what the record is and *nothing* about
+    /// the code, which reads identically to *no code* and is not the same claim.
+    #[tokio::test]
+    async fn a_write_answers_with_the_code_outstanding_rather_than_with_silence() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let flight = box_of.a_user_awaiting_enrolment(&held, "flight").await;
+        box_of.a_code_for(&held, &flight).await;
+
+        let locked = box_of
+            .post_holding(&held, &format!("/api/users/{flight}/lock"), "")
+            .await;
+        let renamed = box_of
+            .holding(
+                &held,
+                "PATCH",
+                &format!("/api/users/{flight}"),
+                r#"{"username":"flight-director"}"#,
+            )
+            .await;
+
+        for answer in [&locked, &renamed] {
+            assert_eq!(answer.status, StatusCode::OK, "{:?}", answer.body);
+            assert!(
+                !answer.body.contains(r#""enrolment_expires_at":null"#),
+                "a write said there was no code outstanding: {:?}",
+                answer.body
+            );
+        }
     }
 
     // ---- Changing one's own password ---------------------------------------------------

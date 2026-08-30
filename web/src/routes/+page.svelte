@@ -54,7 +54,7 @@
 			onBack={() => (enrolling = false)}
 		/>
 	{:else}
-		<SignIn onSignedIn={ask} said={enrolled ? 'Password set. Sign in with it.' : null} />
+		<SignIn onSignedIn={ask} note={enrolled ? 'Password set. Sign in with it.' : null} />
 		<p class="aside">
 			<button class="plain" onclick={() => ((enrolling = true), (enrolled = false))}>
 				I have an enrolment code

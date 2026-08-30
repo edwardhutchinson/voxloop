@@ -58,6 +58,12 @@ struct Account {
 }
 
 impl Account {
+    /// A user, and whatever enrolment code is outstanding against them.
+    ///
+    /// The code is a second read rather than something a write's answer may leave out.
+    /// Displayed state is factual (v1's standing requirements), and answering *no code
+    /// outstanding* because this particular write did not look is the console asserting
+    /// something the server never checked.
     fn of(user: &User, outstanding: Option<Outstanding>) -> Self {
         Self {
             id: user.id.as_str().to_owned(),
@@ -67,18 +73,6 @@ impl Account {
             enrolled: user.has_password,
             enrolment_expires_at: outstanding.map(|code| code.expires_at),
         }
-    }
-}
-
-impl From<&User> for Account {
-    /// A user as they stand after a write to their record, which touches no enrolment code.
-    ///
-    /// Every write that goes through [`administer`] leaves whatever code was outstanding
-    /// exactly as it was, so re-reading it would be a second query answering what the caller
-    /// already knew. Issuing a code is the one act that changes it, and it answers with the
-    /// code itself rather than with an account.
-    fn from(user: &User) -> Self {
-        Self::of(user, None)
     }
 }
 
@@ -235,7 +229,10 @@ async fn creating(api: &Api, acting: &UserId, new: NewAccount) -> Result<Respons
 
     tracing::info!(target: module::CONFIGURATION, user = %created.id.as_str(), "user created");
 
-    Ok((StatusCode::CREATED, Json(Account::from(&created))).into_response())
+    // A record that came into existence a moment ago holds no code, and that is a fact about
+    // this write rather than an assumption: nothing can have issued one against an id nobody
+    // had yet.
+    Ok((StatusCode::CREATED, Json(Account::of(&created, None))).into_response())
 }
 
 /// Edit a user: the name they type, the flag they hold, or both.
@@ -434,24 +431,10 @@ async fn issuing(api: &Api, acting: &UserId, target: &UserId) -> Result<Response
     let issued = transaction.issue_enrolment_code(target).await?;
 
     transaction
-        .record(
-            administrator.wrote(
-                AuditEvent::EnrolmentCodeIssued,
-                ConfigurationWrite {
-                    target: Some(user.id.clone()),
-                    target_name: user.username.clone(),
-                    // The before and after are the codes rather than the record, because the
-                    // record is untouched: what this write changed is which credential enrols
-                    // this user, and an entry showing the account unchanged would say nothing.
-                    before: issued
-                        .replaced
-                        .map(|code| Snapshot::of_enrolment(code.expires_at)),
-                    after: Some(Snapshot::of_enrolment(issued.outstanding.expires_at)),
-                    blast_radius: nothing_live(),
-                    refusal: None,
-                },
-            ),
-        )
+        .record(administrator.wrote(
+            AuditEvent::EnrolmentCodeIssued,
+            issued.to_the_code(&user.id, &user.username, nothing_live()),
+        ))
         .await?;
     transaction.commit().await?;
 
@@ -502,8 +485,21 @@ async fn administer(
     };
 
     transaction
-        .record(administrator.wrote(event, recorded(&change)))
+        .record(administrator.wrote(
+            event,
+            ConfigurationWrite::to_a_user(&change, nothing_live()),
+        ))
         .await?;
+
+    // Read through the same transaction the write went through, so what is answered is the
+    // record and its code as they stand together rather than as they stood at two moments.
+    let outstanding = match &change.after {
+        Some(after) => transaction
+            .outstanding_enrolments()
+            .await?
+            .remove(&after.id),
+        None => None,
+    };
     transaction.commit().await?;
 
     tracing::info!(
@@ -514,7 +510,7 @@ async fn administer(
     );
 
     Ok(match &change.after {
-        Some(after) => Json(Account::from(after)).into_response(),
+        Some(after) => Json(Account::of(after, outstanding)).into_response(),
         // A deletion has nothing to answer with, which is the whole of what it says.
         None => StatusCode::NO_CONTENT.into_response(),
     })
@@ -576,23 +572,6 @@ impl Administrator {
 /// [ADR-0039]: ../../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
 fn nothing_live() -> BlastRadius {
     BlastRadius::nothing_live()
-}
-
-/// A change to a user record, as the log holds it.
-fn recorded(change: &Change) -> ConfigurationWrite {
-    ConfigurationWrite {
-        target: Some(change.before.id.clone()),
-        target_name: change
-            .after
-            .as_ref()
-            .unwrap_or(&change.before)
-            .username
-            .clone(),
-        before: Some(Snapshot::of(&change.before)),
-        after: change.after.as_ref().map(Snapshot::of),
-        blast_radius: nothing_live(),
-        refusal: None,
-    }
 }
 
 /// Why a write did not happen, in one sentence, and how it is answered.

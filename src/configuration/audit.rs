@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use sqlx::Row;
 
 use super::store::{StoreError, Transaction, now, unavailable};
-use super::users::{User, UserId};
+use super::users::{Change, User, UserId};
 
 /// A decision worth recording.
 ///
@@ -197,6 +197,31 @@ pub(crate) struct ConfigurationWrite {
     /// Why the write did not happen, where it did not. Refused administration writes are
     /// audited; refused reads are not (v1 §3).
     pub(crate) refusal: Option<String>,
+}
+
+impl ConfigurationWrite {
+    /// What a write to a user record did, as the log holds it.
+    ///
+    /// It is here rather than with either caller because it is built from a [`Change`], and
+    /// [`Change`] is Configuration's. The admin console and the on-box CLI make the same
+    /// writes by different entitlements, and an entry that differed between them would say
+    /// the write differed.
+    pub(crate) fn to_a_user(change: &Change, blast_radius: BlastRadius) -> Self {
+        Self {
+            target: Some(change.before.id.clone()),
+            // The name as it ended, which is what a rename's entry has to be read by.
+            target_name: change
+                .after
+                .as_ref()
+                .unwrap_or(&change.before)
+                .username
+                .clone(),
+            before: Some(Snapshot::of(&change.before)),
+            after: change.after.as_ref().map(Snapshot::of),
+            blast_radius,
+            refusal: None,
+        }
+    }
 }
 
 /// A configuration record as it stood, in the form the log holds it.

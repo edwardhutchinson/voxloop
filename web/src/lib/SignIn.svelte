@@ -1,7 +1,9 @@
 <script>
 	import { NotDone, signIn } from './server.js';
 
-	let { onSignedIn, said = null } = $props();
+	// A line the page above wants shown here — after an enrolment code has just been
+	// redeemed, there is nothing to refuse and something to say.
+	let { onSignedIn, note = null } = $props();
 
 	let username = $state('');
 	let password = $state('');
@@ -41,8 +43,8 @@
 
 	{#if refusal}
 		<p class="refusal" role="alert">{refusal}</p>
-	{:else if said}
-		<p class="quiet" role="status">{said}</p>
+	{:else if note}
+		<p class="quiet" role="status">{note}</p>
 	{/if}
 </form>
 

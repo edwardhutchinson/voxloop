@@ -171,9 +171,9 @@ pub(crate) trait Users {
 
     /// Read a user by the name a human types, however it was capitalised.
     ///
-    /// The id is what everything holds, so this exists for the two callers that start from
-    /// something a person typed: the on-box CLI, which is handed a username at a shell, and
-    /// nothing else.
+    /// The id is what everything else holds, so this exists for the one caller that starts
+    /// from something a person typed: the on-box CLI, which is handed a username at a shell
+    /// and has no id to be given.
     async fn user_named(&mut self, username: &str) -> Result<Option<User>, StoreError>;
 
     /// Every user on the deployment, by name.

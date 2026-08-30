@@ -21,6 +21,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sqlx::Row;
 
+use super::audit::{BlastRadius, ConfigurationWrite, Snapshot};
 use super::store::{StoreError, Transaction, now, unavailable};
 use super::users::UserId;
 use crate::secrets;
@@ -81,6 +82,33 @@ pub(crate) struct Issued {
     pub(crate) code: EnrolmentCode,
     pub(crate) outstanding: Outstanding,
     pub(crate) replaced: Option<Outstanding>,
+}
+
+impl Issued {
+    /// What issuing this code did, as the log holds it.
+    ///
+    /// The before and after are the **codes** rather than the user record, because the
+    /// record is untouched: what an issue changes is which credential enrols this user, and
+    /// an entry showing the account unchanged either side would say nothing at all. Neither
+    /// snapshot is ever the code — a credential readable out of the audit log is one that
+    /// everybody entitled to read the log holds.
+    pub(crate) fn to_the_code(
+        &self,
+        target: &UserId,
+        target_name: &str,
+        blast_radius: BlastRadius,
+    ) -> ConfigurationWrite {
+        ConfigurationWrite {
+            target: Some(target.clone()),
+            target_name: target_name.to_owned(),
+            before: self
+                .replaced
+                .map(|code| Snapshot::of_enrolment(code.expires_at)),
+            after: Some(Snapshot::of_enrolment(self.outstanding.expires_at)),
+            blast_radius,
+            refusal: None,
+        }
+    }
 }
 
 /// Enrolment codes, as domain operations rather than queries.

@@ -20,11 +20,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use super::{Api, answers, name_as_it_stands};
+use super::{Api, answers, name_as_it_stands, unstorable};
 use crate::configuration::{
     AuditEntry, AuditEvent, AuditLog, Enrolment, EnrolmentCode, SignIns, StoreError, Users,
 };
-use crate::identity::PasswordRefused;
 use crate::telemetry::module;
 
 /// What somebody holding a code presents to set their password.
@@ -73,19 +72,15 @@ async fn enrol(
     // Hashing here holds a pooled connection for as long as Argon2id takes, which is the
     // trade `sign_in` makes for the same reason: the alternative is a seam that hands the
     // work outside Identity. The rate limits are what bound the cost.
+    //
+    // The code survives a password VoxLoop would not store, because the rollback puts it
+    // back. Spending it here would cost somebody their only way in over a typo, and the
+    // administrator who issued it is not necessarily in the building.
     let hashed = match api.identity.hash_password(&presented.password) {
         Ok(hashed) => hashed,
-        Err(refusal @ PasswordRefused::TooShort) => {
-            // The code survives a password VoxLoop would not store. Spending it here would
-            // cost somebody their only way in over a typo, and the administrator who issued
-            // it is not necessarily in the building.
+        Err(refusal) => {
             transaction.roll_back().await?;
-            return Ok(answers::cannot(&refusal.to_string()));
-        }
-        Err(PasswordRefused::Unusable) => {
-            transaction.roll_back().await?;
-            tracing::error!(target: module::IDENTITY, "a password could not be hashed");
-            return Ok(answers::cannot("That password could not be stored."));
+            return Ok(unstorable(&refusal));
         }
     };
 
