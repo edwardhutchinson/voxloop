@@ -14,7 +14,7 @@ Nothing here defaults to open. A route is registered with its requirement as a m
 |---|---|---|
 | Fetch the client bundle | HTTP | Static assets embedded at release ([ADR-0037](../adr/0037-the-client-ships-as-static-assets-embedded-at-release.md)) |
 | Sign in | HTTP | Rate-limited on source. **Audited**, success and failure |
-| Redeem an enrolment code | HTTP | Single-use, expiring. The code identifies the user. Rate-limited. **Audited** |
+| Redeem an enrolment code | HTTP | Single-use, expiring. The code identifies the user, so there is no name to submit. Ends every sign-in the user holds (v1 §2). Rate-limited. **Audited** |
 | Redeem the bootstrap code | HTTP | Registered only while no system administrator exists. Re-minted each start, invalidating the previous code. Rate-limited. **Audited** |
 | Liveness | HTTP | Liveness only. No version, no counts, no names |
 
@@ -75,7 +75,7 @@ All `SystemAdministration`, all HTTP. Every **write** is audited, with before an
 |---|---|
 | Create · read · edit · delete users | Deleting a user must not orphan their audit entries |
 | Lock / unlock an account | System administration, distinct from forced relinquish ([ADR-0014](../adr/0014-authority-acts-on-emission-are-transient.md)) |
-| Issue an enrolment code | It is a credential: expiring, single-use |
+| Issue an enrolment code | It is a credential: expiring, single-use. Issuing one invalidates whatever that user had outstanding, and it is handed back exactly once. It does **not** take the existing password away — forcing a reset is the row below |
 | Force a password reset | Ends the user's sign-in and session immediately |
 | Create · read · edit · delete roles | Includes `max_occupants` |
 | Create · read · edit · delete loops | New loops arrive `unreviewed` |
@@ -106,7 +106,7 @@ The token reaches nothing else. It is refused on the socket upgrade and on every
 
 | Surface | Notes |
 |---|---|
-| The on-box CLI | Creates an administrator, resets a password. Bypasses every check here. Shell access to the host is the highest privilege in the system ([ADR-0025](../adr/0025-credentials-are-administered-because-there-is-no-email.md)) |
+| The on-box CLI | Creates or promotes an administrator — **unlocking the account**, since the last-administrator rule counts flag holders and so cannot stop every administrator being locked at once — and resets a password. Both print an enrolment code rather than setting a password, because a code is the only way one is ever set. Bypasses every check here. Shell access to the host is the highest privilege in the system ([ADR-0025](../adr/0025-credentials-are-administered-because-there-is-no-email.md)) |
 | The first-start bootstrap code | Written to the server's own log, so log-read access is equivalent to administrator at that moment |
 
 ## Deliberately absent

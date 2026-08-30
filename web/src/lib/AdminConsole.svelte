@@ -5,6 +5,7 @@
 		deleteUser,
 		editUser,
 		forcePasswordReset,
+		issueEnrolmentCode,
 		lockAccount,
 		unlockAccount,
 		users
@@ -25,6 +26,11 @@
 	let confirming = $state(null);
 	let creating = $state({ username: '', systemAdministration: false });
 	let editing = $state(null);
+
+	// The one code the server ever hands back, held only until this page is left. Reading one
+	// twice is what a single-use credential must not allow, so there is nowhere to read it
+	// from afterwards — not the account list, not the audit log, not here.
+	let issued = $state(null);
 
 	$effect(() => {
 		read();
@@ -75,6 +81,21 @@
 		await read();
 	}
 
+	async function issue(account) {
+		issued = null;
+		confirming = null;
+		await attempt(async () => {
+			const code = await issueEnrolmentCode(account.id);
+			issued = { username: account.username, ...code };
+		});
+		await read();
+	}
+
+	// When a code stops being good, in this browser's own idea of the time.
+	function until(expiresAt) {
+		return new Date(expiresAt).toLocaleString();
+	}
+
 	function setFlag(account, held) {
 		const set = () => editUser(account.id, { system_administration: held });
 
@@ -98,7 +119,8 @@
 		<h2>Users</h2>
 		<p>
 			A user is created here and sets their own password from an enrolment code, because
-			VoxLoop has no mail path.
+			VoxLoop has no mail path. A code is single-use, expiring, and handed over out of
+			band; a reset is the same act again.
 		</p>
 	</header>
 
@@ -160,6 +182,11 @@
 						<td class:locked={account.locked}>{account.locked ? 'locked' : 'unlocked'}</td>
 						<td class:quiet={!account.enrolled}>
 							{account.enrolled ? 'set' : 'awaiting enrolment'}
+							{#if account.enrolment_expires_at !== null}
+								<span class="outstanding">
+									code outstanding until {until(account.enrolment_expires_at)}
+								</span>
+							{/if}
 						</td>
 						<td class="acts">
 							{#if account.locked}
@@ -181,6 +208,7 @@
 										)}>Lock</button
 								>
 							{/if}
+							<button onclick={() => issue(account)}>Issue enrolment code</button>
 							<button
 								onclick={() =>
 									ask(
@@ -203,6 +231,21 @@
 				{/each}
 			</tbody>
 		</table>
+	{/if}
+
+	{#if issued}
+		<div class="issued" role="status">
+			<p>
+				An enrolment code for <strong>{issued.username}</strong>, good once, until
+				{until(issued.expires_at)}.
+			</p>
+			<code>{issued.code}</code>
+			<p class="quiet">
+				Hand it over out of band — in person, or over the comms you already have. VoxLoop
+				will not show it again, and issuing another invalidates this one.
+			</p>
+			<button onclick={() => (issued = null)}>Done</button>
+		</div>
 	{/if}
 
 	{#if confirming}
@@ -294,5 +337,37 @@
 
 	.confirming p {
 		margin: 0 0 0.75rem;
+	}
+
+	.outstanding {
+		display: block;
+		color: var(--quiet);
+		font-size: 0.75rem;
+	}
+
+	.issued {
+		position: fixed;
+		inset: auto 1.5rem 1.5rem auto;
+		max-width: 28rem;
+		padding: 1rem;
+		background: var(--raised);
+		border: 1px solid var(--rule);
+		border-radius: 0.25rem;
+	}
+
+	.issued p {
+		margin: 0 0 0.75rem;
+	}
+
+	.issued code {
+		display: block;
+		margin-bottom: 0.75rem;
+		padding: 0.5rem;
+		background: var(--ground);
+		border: 1px solid var(--rule);
+		border-radius: 0.2rem;
+		font-size: 0.95rem;
+		word-break: break-all;
+		user-select: all;
 	}
 </style>

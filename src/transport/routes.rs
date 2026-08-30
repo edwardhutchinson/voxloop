@@ -416,8 +416,7 @@ mod tests {
         let (status, body) = table.answer_to((), "/shut").await;
 
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(body.starts_with("You may not."), "got {body:?}");
-        assert!(body.contains("signed-in"), "got {body:?}");
+        assert_eq!(body, "That operation is for a signed-in user.\n");
     }
 
     #[tokio::test]

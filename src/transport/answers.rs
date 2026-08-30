@@ -1,10 +1,14 @@
 //! Every HTTP status VoxLoop names, in the one module allowed to name one.
 //!
-//! **A refusal says *you may not*, with the reason** (v1 §3), rather than hiding an
-//! operation's existence. There is one organisation on one box; pretending an operation is
-//! not there tells an operator with a stale tab that the product is broken. The bootstrap
-//! route is the sole exception, and it genuinely stops existing rather than answering
-//! evasively.
+//! **A refusal says what the caller did not meet** (v1 §3), rather than hiding an operation's
+//! existence. There is one organisation on one box; pretending an operation is not there
+//! tells an operator with a stale tab that the product is broken. The bootstrap route is the
+//! sole exception, and it genuinely stops existing rather than answering evasively.
+//!
+//! **A credential that was not accepted is not a refusal**, and does not answer as one. The
+//! caller may perform the operation; what they presented was wrong. Telling somebody holding
+//! a mistyped enrolment code that they may not redeem enrolment codes is an answer they
+//! cannot act on, so those routes answer [`not_accepted`] instead.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -12,21 +16,25 @@ use axum::response::{IntoResponse, Response};
 use crate::configuration::StoreError;
 use crate::telemetry::module;
 
-/// You may not, and here is why.
+/// The caller may not, and here is what they did not meet.
+///
+/// The reason is the whole of the answer. Prefixing it with *You may not* was tried and
+/// dropped: the status already says refused, in the one module entitled to say it, and the
+/// prefix read as a non-sequitur on every message whose reason is a fact about the
+/// deployment rather than about the caller's standing.
 pub(super) fn refusal(reason: &str) -> Response {
-    (StatusCode::FORBIDDEN, format!("You may not. {reason}\n")).into_response()
+    (StatusCode::FORBIDDEN, format!("{reason}\n")).into_response()
 }
 
-/// The credentials presented were not accepted.
+/// Something the caller presented was not accepted.
 ///
-/// It does not say which half was wrong. Whether a username exists is not something an
+/// Not a refusal: they may perform this operation, and the credential they offered is not
+/// one this deployment holds. A password, a bootstrap code and an enrolment code all answer
+/// this way, and none of them says which part was wrong — whether a username exists, or
+/// whether a code was never issued rather than already spent, is not something an
 /// unauthenticated caller is entitled to learn.
-pub(super) fn credentials_refused() -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        "You may not. Those credentials were not accepted.\n",
-    )
-        .into_response()
+pub(super) fn not_accepted(reason: &str) -> Response {
+    (StatusCode::UNAUTHORIZED, format!("{reason}\n")).into_response()
 }
 
 /// Too many attempts from here, or too many across the deployment.

@@ -92,6 +92,71 @@ operation VoxLoop hides rather than refuses. From then on it is `/api/sign-in` a
 `/api/sign-out`, and **the root of trust is being on the box**: whoever can read the server's
 log at first start is the administrator.
 
+## Enrolment codes
+
+Everyone after the first administrator gets in the same way. VoxLoop has no mail path, so
+there is no invitation link, no "forgot password" and no self-service reset — and no
+self-registration either. What replaces all of them is one thing
+([ADR-0025](docs/adr/0025-credentials-are-administered-because-there-is-no-email.md)):
+
+An administrator creates the user record, then issues an **enrolment code** against it —
+single-use, expiring after a week, and **handed over out of band**, in person or over the
+comms the operations centre already has. Redeeming it sets that user's password:
+
+```sh
+curl -k -X POST https://localhost:8443/api/enrolment \
+  -H 'content-type: application/json' \
+  -d '{"code":"<handed to you>","password":"a long enough password"}'
+```
+
+The code identifies the user, so there is no username to send and nothing to aim at somebody
+else's account. **A password reset is the same act again**: issue another code. Issuing one
+invalidates whatever that user had outstanding, so a mislaid code is replaced rather than
+left in circulation, and the console shows a code exactly once — nothing reads one back
+afterwards, the audit log included.
+
+Redeeming a code **ends every sign-in the user holds**, because the credential those
+sign-ins stood against is not the one the account has any more.
+
+A signed-in user changes their own password by re-presenting the current one, at
+`POST /api/password`. That one **does not end the session**: an operator on the air who
+changes their password should not lose audio for it. Both routes are rate-limited on source
+and audited, and no number of failures locks anybody out — auto-lock is a denial of service
+aimed at whoever is starting a shift, so account lock stays a deliberate administrative act.
+
+## The on-box CLI
+
+The same binary, run with a subcommand instead of a deployment file:
+
+```sh
+voxloop administrator <username>     # make or promote a system administrator
+voxloop reset-password <username>    # take a password away and issue a code
+voxloop help
+```
+
+Both print a single-use enrolment code to hand over; neither sets a password itself, because
+an enrolment code is the only way one is ever set. **That code is redeemed over HTTPS**, so
+the recovery these commands offer is a way back into a deployment that is still serving —
+not a way to sign in to one that is down. Point either at a deployment file with
+`--config <file>` or `VOXLOOP_CONFIG`, exactly as serving does.
+
+`administrator` also **unlocks the account**, which is a third act neither the console's
+*unlock* nor the enrolment path performs from here. It has to: *last system administrator*
+counts flag holders and nothing else, deliberately, so a box with two administrators can have
+both of them locked and nobody left to unlock either. That is the state this command exists
+to get out of.
+
+**These commands run outside VoxLoop's authorisation model entirely.** They evaluate no
+requirement, resolve no principal and answer to nobody: being able to run this binary against
+the deployment's store is the whole of the authorisation. That is deliberate and permanent
+rather than a first-run convenience — with no mail path, the last administrator locking
+themselves out would otherwise be an unrecoverable deployment, and the bootstrap code is not
+re-minted while somebody still holds the flag. **It means shell access to this box is the
+highest privilege in the system** ([v1 §16](docs/spec/v1.md#16-accepted-gaps)).
+
+Everything the CLI does is written to the audit log, attributed to `the on-box CLI` with no
+actor id, because there is no person to attribute it to.
+
 ## The admin console
 
 Signing in as a system administrator opens the console. It is gated on the user's
@@ -101,8 +166,11 @@ reaches it without dropping off the air
 request rather than carried in the cookie, so taking it away closes the console at once.
 
 Users are created here and set their own password from an enrolment code, because VoxLoop
-has no mail path — so a user created today cannot sign in until enrolment lands. Locking an
-account and forcing a password reset both end every sign-in the user holds, immediately.
+has no mail path — so a user created today cannot sign in until somebody issues them a code.
+The account list says which users are awaiting enrolment and which already have a code
+outstanding. Locking an account and forcing a password reset both end every sign-in the user
+holds, immediately; issuing a code does neither, which is why forcing a reset is the separate
+act it is.
 
 **The last system administrator cannot be locked, deleted or stripped of the flag.** *Last*
 counts flag holders and nothing else, deliberately: narrowing it to the ones who could sign

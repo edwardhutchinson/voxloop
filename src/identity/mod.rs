@@ -106,6 +106,21 @@ impl Identity {
     pub(crate) fn hash_password(&self, password: &str) -> Result<PasswordHash, PasswordRefused> {
         self.passwords.hash(password)
     }
+
+    /// Whether this is the password that user holds.
+    ///
+    /// Also local password administration, and deliberately not [`Self::resolve`]: the
+    /// caller already knows who they are talking to and is asking one question about a
+    /// credential, so nothing here resolves anybody. Changing one's own password by
+    /// re-presenting the current one is the caller (v1 §2).
+    pub(crate) async fn confirms(
+        &self,
+        transaction: &mut Transaction,
+        user: &UserId,
+        password: &str,
+    ) -> Result<bool, StoreError> {
+        self.passwords.confirms(transaction, user, password).await
+    }
 }
 
 #[cfg(test)]

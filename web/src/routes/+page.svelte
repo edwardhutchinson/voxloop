@@ -7,11 +7,18 @@
 	// anything out of the cookie: the cookie carries no claims, so the flag is whatever the
 	// store says it is on this request.
 	import AdminConsole from '$lib/AdminConsole.svelte';
+	import ChangePassword from '$lib/ChangePassword.svelte';
+	import Enrol from '$lib/Enrol.svelte';
 	import SignIn from '$lib/SignIn.svelte';
 	import { principal, signOut } from '$lib/server.js';
 
 	let who = $state(null);
 	let asked = $state(false);
+	// Redeeming a code and signing in are two public acts on the same page. Somebody holding
+	// a code has no password yet and so cannot sign in at all, which is why this is a way in
+	// rather than something reached from inside.
+	let enrolling = $state(false);
+	let enrolled = $state(false);
 
 	$effect(() => {
 		ask();
@@ -38,7 +45,22 @@
 {#if !asked}
 	<p class="quiet">Asking VoxLoop…</p>
 {:else if !who}
-	<SignIn onSignedIn={ask} />
+	{#if enrolling}
+		<Enrol
+			onEnrolled={() => {
+				enrolling = false;
+				enrolled = true;
+			}}
+			onBack={() => (enrolling = false)}
+		/>
+	{:else}
+		<SignIn onSignedIn={ask} note={enrolled ? 'Password set. Sign in with it.' : null} />
+		<p class="aside">
+			<button class="plain" onclick={() => ((enrolling = true), (enrolled = false))}>
+				I have an enrolment code
+			</button>
+		</p>
+	{/if}
 {:else}
 	<main>
 		<header>
@@ -57,6 +79,8 @@
 				rather than any role that opens it.
 			</p>
 		{/if}
+
+		<ChangePassword />
 	</main>
 {/if}
 
@@ -136,5 +160,19 @@
 
 	.refusal {
 		color: var(--refusal);
+	}
+
+	.aside {
+		max-width: 22rem;
+		margin: -2.5rem auto 0;
+		font-size: 0.85rem;
+	}
+
+	.plain {
+		background: none;
+		border: 0;
+		padding: 0;
+		color: var(--quiet);
+		text-decoration: underline dotted;
 	}
 </style>

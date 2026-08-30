@@ -1,6 +1,7 @@
 //! Configuration — users, roles, loops, the (role, loop) grid, eligibility, service
 //! principals, the pronunciation dictionary, personalisation and the audit log, plus the
-//! file-held configuration needed to reach any of it.
+//! sign-ins and enrolment codes held against a user and the file-held configuration needed
+//! to reach any of it.
 //!
 //! Persistence is not a module of its own ([ADR-0038]); it is this module's seam, and
 //! nothing else in the system reaches a database. Audit is not a module either — an entry
@@ -24,6 +25,7 @@
 
 mod audit;
 mod deployment;
+mod enrolment;
 mod sign_ins;
 mod store;
 mod users;
@@ -34,6 +36,7 @@ pub(crate) use audit::{
     AuditEntry, AuditEvent, AuditLog, BlastRadius, ConfigurationWrite, Snapshot,
 };
 pub(crate) use deployment::{Deployment, DeploymentError};
+pub(crate) use enrolment::{Enrolment, EnrolmentCode, Outstanding};
 pub(crate) use sign_ins::{SignInToken, SignIns};
 #[cfg(test)]
 pub(crate) use store::a_temporary_store;

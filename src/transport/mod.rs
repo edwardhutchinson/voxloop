@@ -16,7 +16,9 @@ mod answers;
 mod assets;
 mod bootstrap;
 mod cookies;
+mod enrolment;
 mod liveness;
+mod password;
 mod principal;
 mod rate_limit;
 mod routes;
@@ -31,8 +33,10 @@ use axum_server::tls_rustls::RustlsConfig;
 use tokio::task::JoinHandle;
 
 use crate::authorisation::Requirement;
+use axum::response::Response;
+
 use crate::configuration::{Deployment, Store, StoreError, Transaction, UserId, Users};
-use crate::identity::{Bootstrap, Identity};
+use crate::identity::{Bootstrap, Identity, PasswordRefused};
 use crate::telemetry::module;
 use rate_limit::{Admission, RateLimits};
 use routes::RouteTable;
@@ -64,6 +68,22 @@ impl Api {
     /// [ADR-0025]: ../../../docs/adr/0025-credentials-are-administered-because-there-is-no-email.md
     fn admits(&self, source: &SocketAddr) -> bool {
         self.limits.admit(source.ip()) == Admission::Permitted
+    }
+}
+
+/// Why VoxLoop will not store a password, said to whoever offered one.
+///
+/// Two routes set a password — redeeming an enrolment code and changing one's own — and they
+/// differ in what they have open to abandon, never in what makes a password unstorable. Only
+/// the second half is shared, so each caller still rolls back its own transaction: a refusal
+/// that left a spent enrolment code behind would cost somebody their only way in over a typo.
+fn unstorable(refusal: &PasswordRefused) -> Response {
+    match refusal {
+        PasswordRefused::TooShort => answers::cannot(&refusal.to_string()),
+        PasswordRefused::Unusable => {
+            tracing::error!(target: module::IDENTITY, "a password could not be hashed");
+            answers::cannot("That password could not be stored.")
+        }
     }
 }
 
@@ -192,7 +212,13 @@ fn routes(api: &Api) -> RouteTable<Api> {
         .get("/api/liveness", Public, liveness::liveness)
         .post("/api/sign-in", Public, sign_in::sign_in)
         .post("/api/sign-out", SignedIn, sign_in::sign_out)
+        // The credential lifetime of everybody who is not the first administrator: an
+        // administrator issues a code, whoever holds it redeems it, and a signed-in user
+        // changes their own by re-presenting it. There is no self-registration route and no
+        // self-service reset route, because there is no mail path to carry one ([ADR-0025]).
+        .post("/api/enrolment", Public, enrolment::redeem)
         .get("/api/principal", SignedIn, principal::own)
+        .post("/api/password", SignedIn, password::change)
         // System administration. Every one of these is gated on the user's flag and never on
         // a role (v1 §9), so the console opens from the lobby and from within a session
         // alike. Every write is audited; the two reads are not.
@@ -227,6 +253,11 @@ fn routes(api: &Api) -> RouteTable<Api> {
             "/api/users/{id}/force-password-reset",
             SystemAdministration,
             administration::force_password_reset,
+        )
+        .post(
+            "/api/users/{id}/enrolment-code",
+            SystemAdministration,
+            administration::issue_enrolment_code,
         );
 
     // Registered only while no system administrator exists, and genuinely absent otherwise:
@@ -620,8 +651,8 @@ mod tests {
             )
             .await;
 
-        assert_eq!(again.status, StatusCode::FORBIDDEN);
-        assert!(again.body.starts_with("You may not."), "{:?}", again.body);
+        assert_eq!(again.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(again.body, "That is not this server's bootstrap code.\n");
     }
 
     #[tokio::test]
@@ -635,7 +666,7 @@ mod tests {
                 &redeeming("not the code", "flight", "a long enough password"),
             )
             .await;
-        assert_eq!(guessed.status, StatusCode::FORBIDDEN);
+        assert_eq!(guessed.status, StatusCode::UNAUTHORIZED);
 
         let redeemed = box_of
             .post(
@@ -789,7 +820,7 @@ mod tests {
         let answer = box_of.post("/api/sign-out", "").await;
 
         assert_eq!(answer.status, StatusCode::FORBIDDEN);
-        assert!(answer.body.starts_with("You may not."), "{:?}", answer.body);
+        assert_eq!(answer.body, "That operation is for a signed-in user.\n");
     }
 
     #[tokio::test]
@@ -1091,7 +1122,6 @@ mod tests {
         let answer = box_of.get_holding(&held, "/api/users").await;
 
         assert_eq!(answer.status, StatusCode::FORBIDDEN);
-        assert!(answer.body.starts_with("You may not."), "{:?}", answer.body);
         assert!(
             answer.body.contains("system administrator"),
             "{:?}",
@@ -1312,11 +1342,6 @@ mod tests {
 
         for refused in [&locked, &demoted, &deleted] {
             assert_eq!(refused.status, StatusCode::FORBIDDEN);
-            assert!(
-                refused.body.starts_with("You may not."),
-                "{:?}",
-                refused.body
-            );
             assert!(
                 refused.body.contains("last system administrator"),
                 "{:?}",
@@ -1558,5 +1583,664 @@ mod tests {
                 "expected {method} {path} to say there is no such user"
             );
         }
+    }
+
+    // ---- #32: enrolment codes, own-password change, and the routes that do not exist ----
+
+    /// The code the console just issued, read out of what it answered. It is the only time
+    /// anything hands one back.
+    fn code_in(body: &str) -> String {
+        let at = body.find("\"code\":\"").expect("a code in the answer") + 8;
+        body[at..].split('"').next().expect("the code").to_owned()
+    }
+
+    fn redeeming_with(code: &str, password: &str) -> String {
+        format!(r#"{{"code":"{code}","password":"{password}"}}"#)
+    }
+
+    fn changing(current: &str, new: &str) -> String {
+        format!(r#"{{"current":"{current}","new":"{new}"}}"#)
+    }
+
+    impl ABox {
+        /// Create a user with no password, the only way the console makes one.
+        async fn a_user_awaiting_enrolment(&self, held: &str, username: &str) -> String {
+            let created = self
+                .post_holding(held, "/api/users", &an_account(username, false))
+                .await;
+            assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+
+            id_in(&created.body)
+        }
+
+        /// Issue an enrolment code against a user, and answer with the code itself.
+        async fn a_code_for(&self, held: &str, id: &str) -> String {
+            let issued = self
+                .post_holding(held, &format!("/api/users/{id}/enrolment-code"), "")
+                .await;
+            assert_eq!(issued.status, StatusCode::CREATED, "{:?}", issued.body);
+
+            code_in(&issued.body)
+        }
+    }
+
+    /// The whole of what #32 is for: a record system administration made, a code handed over
+    /// out of band, and an account somebody can sign into at the end of it.
+    #[tokio::test]
+    async fn an_administrator_issues_a_code_and_redeeming_it_sets_the_password() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let flight = box_of.a_user_awaiting_enrolment(&held, "flight").await;
+        let code = box_of.a_code_for(&held, &flight).await;
+
+        let redeemed = box_of
+            .post(
+                "/api/enrolment",
+                &redeeming_with(&code, "a long enough password"),
+            )
+            .await;
+
+        assert_eq!(
+            redeemed.status,
+            StatusCode::NO_CONTENT,
+            "{:?}",
+            redeemed.body
+        );
+        let signed_in = box_of
+            .post(
+                "/api/sign-in",
+                &signing_in("flight", "a long enough password"),
+            )
+            .await;
+        assert_eq!(
+            signed_in.status,
+            StatusCode::NO_CONTENT,
+            "{:?}",
+            signed_in.body
+        );
+    }
+
+    /// A reset is the same act again (v1 §2), which is the whole reason there is one route
+    /// rather than an enrolment route and a reset route.
+    #[tokio::test]
+    async fn a_password_reset_is_the_same_act_again() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let flight = box_of.a_user_awaiting_enrolment(&held, "flight").await;
+        let first = box_of.a_code_for(&held, &flight).await;
+        box_of
+            .post(
+                "/api/enrolment",
+                &redeeming_with(&first, "the first password"),
+            )
+            .await;
+        box_of
+            .post_holding(
+                &held,
+                &format!("/api/users/{flight}/force-password-reset"),
+                "",
+            )
+            .await;
+
+        let again = box_of.a_code_for(&held, &flight).await;
+        let redeemed = box_of
+            .post(
+                "/api/enrolment",
+                &redeeming_with(&again, "the second password"),
+            )
+            .await;
+
+        assert_eq!(
+            redeemed.status,
+            StatusCode::NO_CONTENT,
+            "{:?}",
+            redeemed.body
+        );
+        assert_eq!(
+            box_of
+                .post("/api/sign-in", &signing_in("flight", "the first password"))
+                .await
+                .status,
+            StatusCode::UNAUTHORIZED,
+            "the password the reset took away still works"
+        );
+        assert_eq!(
+            box_of
+                .post("/api/sign-in", &signing_in("flight", "the second password"))
+                .await
+                .status,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn an_enrolment_code_is_good_once_and_a_second_one_invalidates_the_first() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let flight = box_of.a_user_awaiting_enrolment(&held, "flight").await;
+        let first = box_of.a_code_for(&held, &flight).await;
+        let second = box_of.a_code_for(&held, &flight).await;
+
+        assert_eq!(
+            box_of
+                .post(
+                    "/api/enrolment",
+                    &redeeming_with(&first, "a long enough password")
+                )
+                .await
+                .status,
+            StatusCode::UNAUTHORIZED,
+            "the code a reissue replaced still works"
+        );
+        assert_eq!(
+            box_of
+                .post(
+                    "/api/enrolment",
+                    &redeeming_with(&second, "a long enough password")
+                )
+                .await
+                .status,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            box_of
+                .post(
+                    "/api/enrolment",
+                    &redeeming_with(&second, "another long password")
+                )
+                .await
+                .status,
+            StatusCode::UNAUTHORIZED,
+            "a code was spent twice"
+        );
+    }
+
+    /// The code survives a password VoxLoop would not store. Spending it on a typo would cost
+    /// somebody their only way in, and the administrator who issued it may not be in today.
+    #[tokio::test]
+    async fn a_password_under_the_floor_is_refused_without_spending_the_code() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let flight = box_of.a_user_awaiting_enrolment(&held, "flight").await;
+        let code = box_of.a_code_for(&held, &flight).await;
+
+        let refused = box_of
+            .post("/api/enrolment", &redeeming_with(&code, "too short"))
+            .await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::BAD_REQUEST,
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(
+            box_of
+                .post(
+                    "/api/enrolment",
+                    &redeeming_with(&code, "a long enough password")
+                )
+                .await
+                .status,
+            StatusCode::NO_CONTENT,
+            "a refused password spent the code"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_code_nobody_issued_is_refused_and_the_refusal_is_audited_against_its_source() {
+        let box_of = ABox::already_administered().await;
+
+        let refused = box_of
+            .post_from(
+                "198.51.100.7",
+                "/api/enrolment",
+                &redeeming_with("guessed", "a long enough password"),
+            )
+            .await;
+
+        assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
+        assert!(
+            refused.body.starts_with("That enrolment code is not one"),
+            "{:?}",
+            refused.body
+        );
+        let audited = box_of.audited().await;
+        assert_eq!(
+            audited.first(),
+            Some(&(
+                AuditEvent::EnrolmentRefused,
+                String::new(),
+                Some("198.51.100.7".parse::<IpAddr>().expect("an address"))
+            )),
+            "{audited:?}"
+        );
+    }
+
+    /// The credential this account had is not the one it has now, so nothing standing against
+    /// the old one is left standing.
+    #[tokio::test]
+    async fn redeeming_a_code_ends_the_sign_ins_standing_against_the_password_it_replaces() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let id = box_of.a_user_who_can_sign_in("flight", false).await;
+        let stale = box_of.signed_in_as("flight").await;
+        let code = box_of.a_code_for(&held, &id).await;
+
+        box_of
+            .post(
+                "/api/enrolment",
+                &redeeming_with(&code, "a brand new password"),
+            )
+            .await;
+
+        assert_eq!(
+            box_of.get_holding(&stale, "/api/principal").await.status,
+            StatusCode::FORBIDDEN,
+            "a sign-in survived the credential it stood against"
+        );
+    }
+
+    #[tokio::test]
+    async fn nobody_but_a_system_administrator_may_issue_an_enrolment_code() {
+        let box_of = ABox::already_administered().await;
+        let flight = box_of.a_user_who_can_sign_in("flight", false).await;
+        let theirs = box_of.signed_in_as("flight").await;
+
+        let by_nobody = box_of
+            .post(&format!("/api/users/{flight}/enrolment-code"), "")
+            .await;
+        let by_an_operator = box_of
+            .post_holding(&theirs, &format!("/api/users/{flight}/enrolment-code"), "")
+            .await;
+
+        assert_eq!(by_nobody.status, StatusCode::FORBIDDEN);
+        assert_eq!(by_an_operator.status, StatusCode::FORBIDDEN);
+        // Refused administration writes are audited, and issuing a credential is one.
+        let refusals = box_of
+            .audited()
+            .await
+            .into_iter()
+            .filter(|(event, ..)| *event == AuditEvent::AdministrationRefused)
+            .count();
+        assert_eq!(refusals, 2, "a refused issue was not audited");
+    }
+
+    /// Issuing is an administration write, so it is audited with what it changed — and what
+    /// it changed is which credential enrols this user, never the credential itself.
+    #[tokio::test]
+    async fn issuing_a_code_is_audited_with_what_it_replaced_and_never_with_the_code() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let flight = box_of.a_user_awaiting_enrolment(&held, "flight").await;
+        let first = box_of.a_code_for(&held, &flight).await;
+        let second = box_of.a_code_for(&held, &flight).await;
+
+        let entries = box_of.entries().await;
+        let issues: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.event == AuditEvent::EnrolmentCodeIssued)
+            .collect();
+
+        assert_eq!(issues.len(), 2);
+        let reissue = issues.first().expect("the second issue");
+        let write = reissue.write.as_ref().expect("a configuration write");
+        assert_eq!(write.target_name, "flight");
+        assert_eq!(reissue.actor_name, "root");
+        assert!(
+            write.before.is_some(),
+            "the code it replaced was not recorded"
+        );
+        assert!(write.after.is_some());
+        for entry in &entries {
+            let held = format!("{entry:?}");
+            assert!(!held.contains(&first), "the log holds a code");
+            assert!(!held.contains(&second), "the log holds a code");
+        }
+    }
+
+    /// The console is told a code is out there so an administrator does not issue a second
+    /// and leave the first in somebody's hand. It is never told what the code is.
+    #[tokio::test]
+    async fn the_console_is_told_a_code_is_outstanding_and_never_what_it_is() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let flight = box_of.a_user_awaiting_enrolment(&held, "flight").await;
+
+        let before = box_of
+            .get_holding(&held, &format!("/api/users/{flight}"))
+            .await;
+        let code = box_of.a_code_for(&held, &flight).await;
+        let after = box_of
+            .get_holding(&held, &format!("/api/users/{flight}"))
+            .await;
+        let listed = box_of.get_holding(&held, "/api/users").await;
+
+        assert!(
+            before.body.contains(r#""enrolment_expires_at":null"#),
+            "{:?}",
+            before.body
+        );
+        assert!(
+            !after.body.contains(r#""enrolment_expires_at":null"#),
+            "{:?}",
+            after.body
+        );
+        assert!(
+            !after.body.contains(&code),
+            "the console was handed the code back"
+        );
+        assert!(
+            !listed.body.contains(&code),
+            "the console was handed the code back"
+        );
+    }
+
+    /// Displayed state is factual (v1's standing requirements). A write's answer says what
+    /// the record and its code are, together — not what the record is and *nothing* about
+    /// the code, which reads identically to *no code* and is not the same claim.
+    #[tokio::test]
+    async fn a_write_answers_with_the_code_outstanding_rather_than_with_silence() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let flight = box_of.a_user_awaiting_enrolment(&held, "flight").await;
+        box_of.a_code_for(&held, &flight).await;
+
+        let locked = box_of
+            .post_holding(&held, &format!("/api/users/{flight}/lock"), "")
+            .await;
+        let renamed = box_of
+            .holding(
+                &held,
+                "PATCH",
+                &format!("/api/users/{flight}"),
+                r#"{"username":"flight-director"}"#,
+            )
+            .await;
+
+        for answer in [&locked, &renamed] {
+            assert_eq!(answer.status, StatusCode::OK, "{:?}", answer.body);
+            assert!(
+                !answer.body.contains(r#""enrolment_expires_at":null"#),
+                "a write said there was no code outstanding: {:?}",
+                answer.body
+            );
+        }
+    }
+
+    // ---- Changing one's own password ---------------------------------------------------
+
+    /// An operator on the air who changes their password should not lose audio for it, so the
+    /// session survives — which is the whole difference between this and every other act on
+    /// a password (v1 §2).
+    #[tokio::test]
+    async fn a_signed_in_user_changes_their_own_password_and_the_sign_in_survives() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", false).await;
+        let held = box_of.signed_in_as("flight").await;
+
+        let changed = box_of
+            .post_holding(
+                &held,
+                "/api/password",
+                &changing("a long enough password", "a brand new password"),
+            )
+            .await;
+
+        assert_eq!(changed.status, StatusCode::NO_CONTENT, "{:?}", changed.body);
+        assert_eq!(
+            box_of.get_holding(&held, "/api/principal").await.status,
+            StatusCode::OK,
+            "changing a password ended the session"
+        );
+        assert_eq!(
+            box_of
+                .post(
+                    "/api/sign-in",
+                    &signing_in("flight", "a brand new password")
+                )
+                .await
+                .status,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            box_of
+                .post(
+                    "/api/sign-in",
+                    &signing_in("flight", "a long enough password")
+                )
+                .await
+                .status,
+            StatusCode::UNAUTHORIZED,
+            "the password that was changed still works"
+        );
+    }
+
+    #[tokio::test]
+    async fn changing_a_password_needs_the_current_one_and_a_wrong_one_is_audited() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", false).await;
+        let held = box_of.signed_in_as("flight").await;
+
+        let refused = box_of
+            .post_holding(
+                &held,
+                "/api/password",
+                &changing("not their password", "a brand new password"),
+            )
+            .await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::UNAUTHORIZED,
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(
+            box_of
+                .post(
+                    "/api/sign-in",
+                    &signing_in("flight", "a long enough password")
+                )
+                .await
+                .status,
+            StatusCode::NO_CONTENT,
+            "a refused change wrote the new password anyway"
+        );
+        let audited = box_of.audited().await;
+        assert!(
+            audited.iter().any(
+                |(event, name, source)| *event == AuditEvent::PasswordChangeRefused
+                    && name == "flight"
+                    && source.is_some()
+            ),
+            "{audited:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_password_under_the_floor_is_refused_and_leaves_the_old_one_standing() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", false).await;
+        let held = box_of.signed_in_as("flight").await;
+
+        let refused = box_of
+            .post_holding(
+                &held,
+                "/api/password",
+                &changing("a long enough password", "too short"),
+            )
+            .await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::BAD_REQUEST,
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(
+            box_of
+                .post(
+                    "/api/sign-in",
+                    &signing_in("flight", "a long enough password")
+                )
+                .await
+                .status,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn nobody_who_is_not_signed_in_may_change_a_password() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", false).await;
+
+        let refused = box_of
+            .post(
+                "/api/password",
+                &changing("a long enough password", "a brand new password"),
+            )
+            .await;
+
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert!(refused.body.contains("signed-in"), "{:?}", refused.body);
+    }
+
+    /// Both routes accept a credential, so both are throttled on source — and neither is
+    /// throttled on the account, because no number of attempts locks anybody out (ADR-0025).
+    #[tokio::test]
+    async fn redemption_and_a_password_change_are_throttled_on_source() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", false).await;
+        let held = box_of.signed_in_as("flight").await;
+
+        let mut throttled = None;
+        for _ in 0..40 {
+            let answer = box_of
+                .post_from(
+                    "198.51.100.9",
+                    "/api/enrolment",
+                    &redeeming_with("guessed", "a long enough password"),
+                )
+                .await;
+            if answer.status == StatusCode::TOO_MANY_REQUESTS {
+                throttled = Some(answer);
+                break;
+            }
+        }
+        assert!(throttled.is_some(), "redemption was never throttled");
+
+        let mut change_throttled = false;
+        for _ in 0..80 {
+            let answer = box_of
+                .post_holding(
+                    &held,
+                    "/api/password",
+                    &changing("not their password", "a brand new password"),
+                )
+                .await;
+            if answer.status == StatusCode::TOO_MANY_REQUESTS {
+                change_throttled = true;
+                break;
+            }
+        }
+        assert!(change_throttled, "a password change was never throttled");
+
+        // Throttled, never locked: the account is exactly as it was.
+        assert_eq!(
+            box_of
+                .post_from(
+                    "203.0.113.4",
+                    "/api/sign-in",
+                    &signing_in("flight", "a long enough password")
+                )
+                .await
+                .status,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    // ---- What deliberately does not exist ----------------------------------------------
+
+    /// There is no self-registration and no self-service reset, because there is no mail path
+    /// to carry one (ADR-0025). Every plausible name for one answers as what it is: an
+    /// operation VoxLoop does not have.
+    #[tokio::test]
+    async fn there_is_no_self_registration_route_and_no_self_service_reset_route() {
+        let box_of = ABox::already_administered().await;
+
+        for path in [
+            "/api/register",
+            "/api/sign-up",
+            "/api/forgot-password",
+            "/api/reset-password",
+            "/api/password-reset",
+        ] {
+            let answer = box_of.post(path, r#"{"username":"flight"}"#).await;
+
+            assert_eq!(
+                answer.status,
+                StatusCode::NOT_FOUND,
+                "expected {path} not to exist, got {:?}",
+                answer.body
+            );
+        }
+
+        // The one route that creates a user is system administration, and it says so.
+        assert_eq!(
+            box_of
+                .post("/api/users", &an_account("flight", false))
+                .await
+                .status,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    /// The code identifies the user, so a redemption has nobody to name — and nothing a
+    /// caller adds to it aims the redemption anywhere else.
+    #[tokio::test]
+    async fn a_redemption_names_no_user_so_there_is_nobody_to_aim_it_at() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let flight = box_of.a_user_awaiting_enrolment(&held, "flight").await;
+        let code = box_of.a_code_for(&held, &flight).await;
+
+        let redeemed = box_of
+            .post(
+                "/api/enrolment",
+                &format!(
+                    r#"{{"code":"{code}","password":"a long enough password","username":"root"}}"#
+                ),
+            )
+            .await;
+
+        assert_eq!(
+            redeemed.status,
+            StatusCode::NO_CONTENT,
+            "{:?}",
+            redeemed.body
+        );
+        assert_eq!(
+            box_of
+                .post(
+                    "/api/sign-in",
+                    &signing_in("flight", "a long enough password")
+                )
+                .await
+                .status,
+            StatusCode::NO_CONTENT,
+            "the code did not enrol the user it was issued against"
+        );
+        assert_eq!(
+            box_of
+                .post(
+                    "/api/sign-in",
+                    &signing_in("root", "a long enough password")
+                )
+                .await
+                .status,
+            StatusCode::NO_CONTENT,
+            "the named user's password was touched"
+        );
     }
 }

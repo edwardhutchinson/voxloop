@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use sqlx::Row;
 
 use super::store::{StoreError, Transaction, now, unavailable};
-use super::users::{User, UserId};
+use super::users::{Change, User, UserId};
 
 /// A decision worth recording.
 ///
@@ -56,6 +56,26 @@ pub(crate) enum AuditEvent {
     AccountUnlocked,
     /// The password taken away, ending the sign-in and the session immediately (v1 §2).
     PasswordResetForced,
+    /// An enrolment code issued against a user. It is a credential, so issuing one is an
+    /// administration write in its own right rather than a step in some other act
+    /// ([ADR-0025]).
+    ///
+    /// [ADR-0025]: ../../../docs/adr/0025-credentials-are-administered-because-there-is-no-email.md
+    EnrolmentCodeIssued,
+    /// A code spent, and the password it set. The actor is the user the code named: they
+    /// proved possession of it, which is the whole of what a redemption establishes.
+    EnrolmentRedeemed,
+    /// A code presented and not accepted — never issued, already spent, or expired. It names
+    /// nobody, because a code that enrols nobody says nothing about who presented it, and
+    /// where it came from is the whole of what is known.
+    EnrolmentRefused,
+    /// A signed-in user changing their own password by re-presenting the current one. It
+    /// does not end their session (v1 §2).
+    PasswordChanged,
+    /// A change of one's own password where the current one presented was not it. It is the
+    /// same brute-force signal a failed sign-in is, arriving on a route that already has a
+    /// user attached to it.
+    PasswordChangeRefused,
     /// An administration write somebody was turned away from before it reached the record
     /// it was about. Refused administration writes are audited; refused reads are not
     /// (v1 §3), and an unauthorised attempt to make an administrator is the case this is
@@ -79,6 +99,11 @@ impl AuditEvent {
             Self::AccountLocked => "account_locked",
             Self::AccountUnlocked => "account_unlocked",
             Self::PasswordResetForced => "password_reset_forced",
+            Self::EnrolmentCodeIssued => "enrolment_code_issued",
+            Self::EnrolmentRedeemed => "enrolment_redeemed",
+            Self::EnrolmentRefused => "enrolment_refused",
+            Self::PasswordChanged => "password_changed",
+            Self::PasswordChangeRefused => "password_change_refused",
             Self::AdministrationRefused => "administration_refused",
         }
     }
@@ -96,6 +121,11 @@ impl AuditEvent {
             "account_locked" => Some(Self::AccountLocked),
             "account_unlocked" => Some(Self::AccountUnlocked),
             "password_reset_forced" => Some(Self::PasswordResetForced),
+            "enrolment_code_issued" => Some(Self::EnrolmentCodeIssued),
+            "enrolment_redeemed" => Some(Self::EnrolmentRedeemed),
+            "enrolment_refused" => Some(Self::EnrolmentRefused),
+            "password_changed" => Some(Self::PasswordChanged),
+            "password_change_refused" => Some(Self::PasswordChangeRefused),
             "administration_refused" => Some(Self::AdministrationRefused),
             _ => None,
         }
@@ -169,6 +199,31 @@ pub(crate) struct ConfigurationWrite {
     pub(crate) refusal: Option<String>,
 }
 
+impl ConfigurationWrite {
+    /// What a write to a user record did, as the log holds it.
+    ///
+    /// It is here rather than with either caller because it is built from a [`Change`], and
+    /// [`Change`] is Configuration's. The admin console and the on-box CLI make the same
+    /// writes by different entitlements, and an entry that differed between them would say
+    /// the write differed.
+    pub(crate) fn to_a_user(change: &Change, blast_radius: BlastRadius) -> Self {
+        Self {
+            target: Some(change.before.id.clone()),
+            // The name as it ended, which is what a rename's entry has to be read by.
+            target_name: change
+                .after
+                .as_ref()
+                .unwrap_or(&change.before)
+                .username
+                .clone(),
+            before: Some(Snapshot::of(&change.before)),
+            after: change.after.as_ref().map(Snapshot::of),
+            blast_radius,
+            refusal: None,
+        }
+    }
+}
+
 /// A configuration record as it stood, in the form the log holds it.
 ///
 /// One line of `field=value`, so that a before and an after can be read side by side by
@@ -190,6 +245,17 @@ impl Snapshot {
             yes_or_no(user.is_system_administrator),
             yes_or_no(user.is_locked),
             if user.has_password { "set" } else { "none" },
+        ))
+    }
+
+    /// An enrolment code as it stands, which is never the code itself.
+    ///
+    /// A credential readable out of the audit log would be a credential anybody who may read
+    /// the log holds, so what is recorded is when it stops being good. That is enough for
+    /// the entry to say what issuing did: this code replaced that one, and it dies then.
+    pub(crate) fn of_enrolment(expires_at: i64) -> Self {
+        Self(format!(
+            "enrolment_code=outstanding expires_at={expires_at}"
         ))
     }
 
@@ -545,6 +611,66 @@ mod tests {
                 .expect("the log to be readable")
                 .len(),
             1
+        );
+    }
+
+    /// The stored names are on disk in customer deployments, so a variant that writes one
+    /// name and reads back another is a log this binary cannot read. There is no way to make
+    /// the compiler check the two `match`es agree, so this checks it instead.
+    #[tokio::test]
+    async fn every_event_reads_back_as_the_event_it_was_written_as() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+
+        let every = [
+            AuditEvent::SignInSucceeded,
+            AuditEvent::SignInFailed,
+            AuditEvent::SignedOut,
+            AuditEvent::BootstrapRedeemed,
+            AuditEvent::BootstrapRefused,
+            AuditEvent::UserCreated,
+            AuditEvent::UserEdited,
+            AuditEvent::UserDeleted,
+            AuditEvent::AccountLocked,
+            AuditEvent::AccountUnlocked,
+            AuditEvent::PasswordResetForced,
+            AuditEvent::EnrolmentCodeIssued,
+            AuditEvent::EnrolmentRedeemed,
+            AuditEvent::EnrolmentRefused,
+            AuditEvent::PasswordChanged,
+            AuditEvent::PasswordChangeRefused,
+        ];
+
+        for event in every {
+            transaction
+                .record(AuditEntry {
+                    event,
+                    ..a_sign_in_by(None, "flight")
+                })
+                .await
+                .expect("the entry to be recorded");
+        }
+
+        let read: Vec<AuditEvent> = transaction
+            .recent_entries(100)
+            .await
+            .expect("the log to be readable")
+            .into_iter()
+            .rev()
+            .map(|entry| entry.event)
+            .collect();
+
+        assert_eq!(read, every);
+    }
+
+    /// A credential readable out of the audit log is one anybody who may read the log holds.
+    #[tokio::test]
+    async fn an_enrolment_snapshot_says_when_a_code_dies_and_never_what_it_is() {
+        let rendered = Snapshot::of_enrolment(1_800_000_000_000);
+
+        assert_eq!(
+            rendered.as_str(),
+            "enrolment_code=outstanding expires_at=1800000000000"
         );
     }
 

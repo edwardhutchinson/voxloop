@@ -85,7 +85,9 @@ async fn attempt(
             .await?;
         transaction.commit().await?;
 
-        return Ok(answers::credentials_refused());
+        return Ok(answers::not_accepted(
+            "Those credentials were not accepted.",
+        ));
     };
 
     let token = transaction.open_sign_in(&user).await?;
