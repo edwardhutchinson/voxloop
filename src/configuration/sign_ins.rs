@@ -6,7 +6,7 @@
 //!
 //! What is stored is a fingerprint of the token, never the token: the store is one file a
 //! deployment is obliged to back up, and a backup should not be a drawer full of usable
-//! sessions.
+//! sign-ins.
 
 use async_trait::async_trait;
 use sqlx::Row;

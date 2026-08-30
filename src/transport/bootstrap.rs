@@ -82,7 +82,10 @@ async fn make_the_first_administrator(
     }
 
     // Everything that can refuse happens before the code is spent. A transaction abandoned
-    // here rolls back, and the code is still good.
+    // here rolls back, and the code is still good — so a name already taken costs an attempt
+    // rather than the deployment. What is left is the store failing between the redemption
+    // and the commit, which spends the code without making an administrator; the next start
+    // mints another, which is why that is a restart rather than a dead box.
     let created = transaction
         .create_user(NewUser {
             username: presented.username.clone(),

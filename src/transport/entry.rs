@@ -69,7 +69,9 @@ async fn attempt(
     let resolved = api.identity.resolve(&mut transaction, &credential).await?;
 
     // Identity answers a user id or nobody, and never why. A failure therefore has no actor
-    // to attribute — only the name that was submitted, which is the whole of what is known.
+    // to attribute — only the name that was submitted, which is the whole of what is known,
+    // and which is recorded as given because a name being sprayed at is the thing the log
+    // exists to make visible. Reading the log is system administration, deliberately.
     let Some(user) = resolved else {
         transaction
             .record(AuditEntry {

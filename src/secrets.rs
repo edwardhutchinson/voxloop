@@ -31,7 +31,7 @@ pub(crate) fn unguessable() -> String {
 ///
 /// A sign-in token is stored as its fingerprint rather than itself: the store is one file a
 /// deployment is obliged to back up, and a backup should not be a drawer full of usable
-/// sessions. This is not password hashing and must never be used for one — a password is
+/// sign-ins. This is not password hashing and must never be used for one — a password is
 /// guessable by construction and needs Argon2id ([ADR-0025]).
 ///
 /// [ADR-0025]: ../../docs/adr/0025-credentials-are-administered-because-there-is-no-email.md

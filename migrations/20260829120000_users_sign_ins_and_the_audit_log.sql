@@ -36,7 +36,7 @@ CREATE UNIQUE INDEX users_by_external_identity
 --
 -- What is stored is a fingerprint of the token the browser holds, never the token itself: a
 -- backup of this file is a real artefact sitting on somebody's disk, and it should not be a
--- drawer full of usable sessions.
+-- drawer full of usable sign-ins.
 CREATE TABLE sign_ins (
     fingerprint TEXT    PRIMARY KEY,
     -- Deleting a user signs them out. There is no state in which a deleted user is signed in.
