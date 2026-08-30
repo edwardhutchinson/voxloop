@@ -142,12 +142,13 @@ async fn creating(api: &Api, caller: &Caller, new: NewAccount) -> Result<Respons
                 ConfigurationWrite {
                     target: None,
                     target_name: new.username,
+                    // Nothing before it and nothing after it: the record never existed.
                     before: None,
                     after: None,
                     blast_radius: nothing_live(),
-                    refusal: Some(refusal.to_string()),
+                    refusal: Some(reason(&refusal)),
                 },
-                answers::cannot(&refusal.to_string()),
+                answer_to(&refusal),
             )
             .await;
         }
@@ -482,19 +483,40 @@ fn a_refused_write(before: &User, refusal: &AdministrationRefused) -> Configurat
         // Nothing after it: the write did not happen.
         after: None,
         blast_radius: nothing_live(),
-        refusal: Some(refusal.to_string()),
+        refusal: Some(reason(refusal)),
+    }
+}
+
+/// Why a write did not happen, in one sentence.
+///
+/// Configuration answers refused and never *why* in a form somebody can act on, and turning
+/// that into something a human reads is Transport's job — the same division routes.rs makes
+/// for a requirement nobody met. The log holds this sentence rather than the error's own
+/// wording, so what the console shows later is what the administrator was told at the time.
+fn reason(refusal: &AdministrationRefused) -> String {
+    match refusal {
+        AdministrationRefused::LastSystemAdministrator => {
+            "This is the last system administrator this deployment can be administered by, and \
+             the last one cannot be removed."
+                .to_owned()
+        }
+        AdministrationRefused::NameTaken { username } => {
+            format!("The username {username:?} is already taken.")
+        }
+        // Unreachable: a store fault is answered as a fault rather than as a refusal.
+        AdministrationRefused::Store(_) => "That write could not be made.".to_owned(),
     }
 }
 
 /// What a refusal says to whoever asked for it.
 ///
-/// A refusal says *you may not* with the reason rather than hiding the operation (v1 §3).
-/// A name already taken is a different thing: the caller may make users, and this attempt at
-/// it will not do.
+/// A refusal says *you may not* with the reason rather than hiding the operation (v1 §3). A
+/// name already taken is a different thing and answered as one: the caller may make users,
+/// and this particular attempt at it will not do.
 fn answer_to(refusal: &AdministrationRefused) -> Response {
     match refusal {
-        AdministrationRefused::LastSystemAdministrator => answers::refusal(&refusal.to_string()),
-        _ => answers::cannot(&refusal.to_string()),
+        AdministrationRefused::LastSystemAdministrator => answers::refusal(&reason(refusal)),
+        _ => answers::cannot(&reason(refusal)),
     }
 }
 

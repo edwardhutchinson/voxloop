@@ -68,6 +68,26 @@ operation VoxLoop hides rather than refuses. From then on it is `/api/sign-in` a
 `/api/sign-out`, and **the root of trust is being on the box**: whoever can read the server's
 log at first start is the administrator.
 
+## The admin console
+
+Signing in as a system administrator opens the console. It is gated on the user's
+system-administration flag and **never on a role**, so an operator who is also a sysadmin
+reaches it without dropping off the air
+([v1 §9](docs/spec/v1.md#9-the-admin-console)). The flag is read from the store on every
+request rather than carried in the cookie, so taking it away closes the console at once.
+
+Users are created here and set their own password from an enrolment code, because VoxLoop
+has no mail path — so a user created today cannot sign in until enrolment lands. Locking an
+account and forcing a password reset both end every sign-in the user holds, immediately. The
+last system administrator cannot be locked, deleted or stripped of the flag; recovering from
+nobody at all means shell access to the box.
+
+Every write is audited with the record before and after and the **blast radius** — what the
+change does to anything live. No session exists yet, so that radius is empty; the shape is
+there because the write and its audit entry commit in one transaction, and the radius is a
+value the write is handed rather than a field it may omit
+([ADR-0039](docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md)).
+
 ## Working on the console
 
 Development is two processes; release is one artefact. Run the binary as above, then:
