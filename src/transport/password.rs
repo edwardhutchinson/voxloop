@@ -92,7 +92,7 @@ async fn changing(
             .await?;
         transaction.commit().await?;
 
-        return Ok(answers::credentials_refused());
+        return Ok(answers::not_accepted("That is not your current password."));
     }
 
     let hashed = match api.identity.hash_password(&presented.new) {

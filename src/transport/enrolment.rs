@@ -152,7 +152,7 @@ async fn refuse(api: &Api, source: &SocketAddr) -> Result<Response, StoreError> 
         .await?;
     transaction.commit().await?;
 
-    Ok(answers::refusal(
+    Ok(answers::not_accepted(
         "That enrolment code is not one this deployment is holding. Ask an administrator for \
          another.",
     ))

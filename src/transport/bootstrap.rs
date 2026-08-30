@@ -179,7 +179,7 @@ async fn refuse(api: &Api, submitted: &str, source: &SocketAddr) -> Result<Respo
         .await?;
     transaction.commit().await?;
 
-    Ok(answers::refusal(
+    Ok(answers::not_accepted(
         "That is not this server's bootstrap code.",
     ))
 }

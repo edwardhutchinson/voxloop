@@ -651,8 +651,8 @@ mod tests {
             )
             .await;
 
-        assert_eq!(again.status, StatusCode::FORBIDDEN);
-        assert!(again.body.starts_with("You may not."), "{:?}", again.body);
+        assert_eq!(again.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(again.body, "That is not this server's bootstrap code.\n");
     }
 
     #[tokio::test]
@@ -666,7 +666,7 @@ mod tests {
                 &redeeming("not the code", "flight", "a long enough password"),
             )
             .await;
-        assert_eq!(guessed.status, StatusCode::FORBIDDEN);
+        assert_eq!(guessed.status, StatusCode::UNAUTHORIZED);
 
         let redeemed = box_of
             .post(
@@ -820,7 +820,7 @@ mod tests {
         let answer = box_of.post("/api/sign-out", "").await;
 
         assert_eq!(answer.status, StatusCode::FORBIDDEN);
-        assert!(answer.body.starts_with("You may not."), "{:?}", answer.body);
+        assert_eq!(answer.body, "That operation is for a signed-in user.\n");
     }
 
     #[tokio::test]
@@ -1122,7 +1122,6 @@ mod tests {
         let answer = box_of.get_holding(&held, "/api/users").await;
 
         assert_eq!(answer.status, StatusCode::FORBIDDEN);
-        assert!(answer.body.starts_with("You may not."), "{:?}", answer.body);
         assert!(
             answer.body.contains("system administrator"),
             "{:?}",
@@ -1343,11 +1342,6 @@ mod tests {
 
         for refused in [&locked, &demoted, &deleted] {
             assert_eq!(refused.status, StatusCode::FORBIDDEN);
-            assert!(
-                refused.body.starts_with("You may not."),
-                "{:?}",
-                refused.body
-            );
             assert!(
                 refused.body.contains("last system administrator"),
                 "{:?}",
@@ -1735,7 +1729,7 @@ mod tests {
                 )
                 .await
                 .status,
-            StatusCode::FORBIDDEN,
+            StatusCode::UNAUTHORIZED,
             "the code a reissue replaced still works"
         );
         assert_eq!(
@@ -1756,7 +1750,7 @@ mod tests {
                 )
                 .await
                 .status,
-            StatusCode::FORBIDDEN,
+            StatusCode::UNAUTHORIZED,
             "a code was spent twice"
         );
     }
@@ -1805,9 +1799,9 @@ mod tests {
             )
             .await;
 
-        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
         assert!(
-            refused.body.starts_with("You may not."),
+            refused.body.starts_with("That enrolment code is not one"),
             "{:?}",
             refused.body
         );
