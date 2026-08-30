@@ -20,7 +20,7 @@ use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
 use axum::handler::Handler;
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::routing::{MethodRouter, any, get, post};
+use axum::routing::{MethodRouter, any, delete, get, patch, post};
 use tracing::Instrument;
 
 use super::{answers, cookies};
@@ -66,6 +66,24 @@ where
         T: 'static,
     {
         self.route(path, requirement, post(handler))
+    }
+
+    /// Register a `PATCH`, under `requirement`.
+    pub(super) fn patch<H, T>(self, path: &str, requirement: Requirement, handler: H) -> Self
+    where
+        H: Handler<T, S>,
+        T: 'static,
+    {
+        self.route(path, requirement, patch(handler))
+    }
+
+    /// Register a `DELETE`, under `requirement`.
+    pub(super) fn delete<H, T>(self, path: &str, requirement: Requirement, handler: H) -> Self
+    where
+        H: Handler<T, S>,
+        T: 'static,
+    {
+        self.route(path, requirement, delete(handler))
     }
 
     /// Register the route that answers everything else, under `requirement`.

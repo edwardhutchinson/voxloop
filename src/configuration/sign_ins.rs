@@ -56,6 +56,13 @@ pub(crate) trait SignIns {
 
     /// End this sign-in, answering with whom it belonged to so the act can be recorded.
     async fn end_sign_in(&mut self, token: &SignInToken) -> Result<Option<UserId>, StoreError>;
+
+    /// End every sign-in this user holds, on every machine.
+    ///
+    /// Locking an account and forcing a password reset both end the sign-in rather than
+    /// waiting for it to expire (v1 §2's lifetime table), and a user may hold one per
+    /// machine — so signing them out means all of them or none.
+    async fn end_every_sign_in(&mut self, user: &UserId) -> Result<(), StoreError>;
 }
 
 #[async_trait]
@@ -92,6 +99,16 @@ impl SignIns for Transaction {
             .map_err(unavailable)?;
 
         Ok(ended.map(|row| UserId::known(row.get("user_id"))))
+    }
+
+    async fn end_every_sign_in(&mut self, user: &UserId) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM sign_ins WHERE user_id = ?")
+            .bind(user.as_str())
+            .execute(self.connection())
+            .await
+            .map_err(unavailable)?;
+
+        Ok(())
     }
 }
 
@@ -238,6 +255,43 @@ mod tests {
                 .await
                 .expect("the read to answer"),
             Some(user)
+        );
+    }
+
+    #[tokio::test]
+    async fn ending_every_sign_in_leaves_the_user_signed_in_nowhere() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let user = a_user(&mut transaction, "flight").await;
+        let elsewhere = a_user(&mut transaction, "capcom").await;
+        let console = transaction.open_sign_in(&user).await.expect("one sign-in");
+        let laptop = transaction.open_sign_in(&user).await.expect("another");
+        let untouched = transaction
+            .open_sign_in(&elsewhere)
+            .await
+            .expect("somebody else's");
+
+        transaction
+            .end_every_sign_in(&user)
+            .await
+            .expect("the sign-ins to end");
+
+        for ended in [&console, &laptop] {
+            assert_eq!(
+                transaction
+                    .holder_of(ended)
+                    .await
+                    .expect("the read to answer"),
+                None
+            );
+        }
+        assert_eq!(
+            transaction
+                .holder_of(&untouched)
+                .await
+                .expect("the read to answer"),
+            Some(elsewhere),
+            "somebody else was signed out too"
         );
     }
 

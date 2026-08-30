@@ -14,7 +14,7 @@
 //!
 //! [ADR-0054]: ../../docs/adr/0054-every-operation-declares-its-authorisation.md
 
-use crate::configuration::{SignInToken, SignIns, Store, StoreError, UserId};
+use crate::configuration::{SignInToken, SignIns, Store, StoreError, UserId, Users};
 
 /// What an operation demands of whoever calls it.
 ///
@@ -24,10 +24,9 @@ use crate::configuration::{SignInToken, SignIns, Store, StoreError, UserId};
 /// carrying it is a signalling-channel message rather than an HTTP route
 /// (`docs/spec/api-surface.md`). It arrives with the socket and the grid, alongside the loop
 /// identity and the four rungs it needs, and it is deliberately not invented here.
-// Three of the five name something no principal can hold yet: a role (#31 onwards), the
-// system-administration flag as an enforced requirement (#31), or a service token (#40).
-// They are declared together anyway: the list is fixed by ADR-0054, not grown one route at
-// a time.
+// Two of the five name something no principal can hold yet: a role (#37) or a service token
+// (#57). They are declared together anyway: the list is fixed by ADR-0054, not grown one
+// route at a time.
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Requirement {
@@ -79,34 +78,66 @@ pub(crate) async fn evaluate(
     match requirement {
         Requirement::Public => Ok(Outcome::Permitted(Caller::Nobody)),
 
-        Requirement::SignedIn => {
-            let Some(token) = presented else {
-                return Ok(Outcome::Refused);
-            };
+        Requirement::SignedIn => signed_in(presented, store, |_| true).await,
 
-            let mut transaction = store.begin().await?;
-            let holder = transaction.holder_of(&token).await;
-            transaction.roll_back().await?;
-
-            Ok(match holder? {
-                Some(id) => Outcome::Permitted(Caller::User { id, sign_in: token }),
-                None => Outcome::Refused,
+        // Gated on the user's flag and **never on a role** (v1 §9), which is why this arm
+        // reads the same record `SignedIn` does and asks it one more question. An operator
+        // who is also a sysadmin reaches the console without relinquishing, because there is
+        // nothing here for a session to satisfy.
+        //
+        // A locked account is refused as well: locking ends the sign-in, so this is the
+        // belt to that braces, and it costs nothing because the record is already read.
+        Requirement::SystemAdministration => {
+            signed_in(presented, store, |user| {
+                user.is_system_administrator && !user.is_locked
             })
+            .await
         }
 
         // A role is assumed over the signalling channel and a service principal is
         // administered, and neither exists yet. They are refused rather than waved through:
         // the default is refusal, everywhere and always.
-        Requirement::Session | Requirement::SystemAdministration | Requirement::ServiceToken => {
-            Ok(Outcome::Refused)
-        }
+        Requirement::Session | Requirement::ServiceToken => Ok(Outcome::Refused),
     }
+}
+
+/// Resolve the sign-in presented, and permit it where the user it names satisfies `holds`.
+///
+/// Everything about the caller is read here, from the store, on this request — the cookie
+/// carries no claims (v1 §3) — which is what makes taking a flag away take effect now.
+async fn signed_in(
+    presented: Option<SignInToken>,
+    store: &Store,
+    holds: impl Fn(&crate::configuration::User) -> bool,
+) -> Result<Outcome, StoreError> {
+    let Some(token) = presented else {
+        return Ok(Outcome::Refused);
+    };
+
+    let mut transaction = store.begin().await?;
+    let resolved = async {
+        let Some(id) = transaction.holder_of(&token).await? else {
+            return Ok(None);
+        };
+
+        transaction.user(&id).await
+    }
+    .await;
+    transaction.roll_back().await?;
+
+    Ok(match resolved? {
+        Some(user) if holds(&user) => Outcome::Permitted(Caller::User {
+            id: user.id,
+            sign_in: token,
+        }),
+        _ => Outcome::Refused,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::{NewUser, Users, a_temporary_store};
+    use crate::configuration::{NewUser, PasswordHash, Users, a_temporary_store};
 
     fn is_permitted(outcome: &Outcome) -> bool {
         matches!(outcome, Outcome::Permitted(_))
@@ -215,6 +246,114 @@ mod tests {
         assert!(!is_permitted(&outcome));
     }
 
+    /// The console opens on the flag alone and never on a role (v1 §9): this caller has
+    /// assumed nothing, and an operator who is also a sysadmin must not have to drop off the
+    /// air to administer the deployment.
+    #[tokio::test]
+    async fn system_administration_is_permitted_to_the_flag_holder_who_has_assumed_no_role() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let user = transaction
+            .create_user(NewUser {
+                username: "root".to_owned(),
+                password_hash: None,
+                is_system_administrator: true,
+            })
+            .await
+            .expect("an administrator");
+        let token = transaction
+            .open_sign_in(&user)
+            .await
+            .expect("the sign-in to open");
+        transaction.commit().await.expect("the sign-in to land");
+
+        let outcome = evaluate(&Requirement::SystemAdministration, Some(token), &store)
+            .await
+            .expect("an answer");
+
+        let Outcome::Permitted(Caller::User { id, .. }) = outcome else {
+            panic!("expected the administrator to be permitted, got {outcome:?}");
+        };
+        assert_eq!(id, user);
+    }
+
+    #[tokio::test]
+    async fn system_administration_is_refused_to_a_signed_in_user_without_the_flag() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let user = transaction
+            .create_user(NewUser {
+                username: "flight".to_owned(),
+                password_hash: None,
+                is_system_administrator: false,
+            })
+            .await
+            .expect("an ordinary user");
+        let token = transaction
+            .open_sign_in(&user)
+            .await
+            .expect("the sign-in to open");
+        transaction.commit().await.expect("the sign-in to land");
+
+        let outcome = evaluate(&Requirement::SystemAdministration, Some(token), &store)
+            .await
+            .expect("an answer");
+
+        assert!(!is_permitted(&outcome));
+    }
+
+    /// The cookie carries no claims, so the flag is read from the store on every request and
+    /// taking it away stops the console now rather than when something expires (v1 §3).
+    #[tokio::test]
+    async fn taking_the_flag_away_stops_the_console_opening_at_once() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let user = transaction
+            .create_user(NewUser {
+                username: "root".to_owned(),
+                password_hash: None,
+                is_system_administrator: true,
+            })
+            .await
+            .expect("an administrator");
+        transaction
+            .create_user(NewUser {
+                username: "deputy".to_owned(),
+                password_hash: Some(PasswordHash::already_hashed(
+                    "$argon2id$stand-in".to_owned(),
+                )),
+                is_system_administrator: true,
+            })
+            .await
+            .expect("a second administrator");
+        let token = transaction
+            .open_sign_in(&user)
+            .await
+            .expect("the sign-in to open");
+        transaction.commit().await.expect("the sign-in to land");
+        assert!(is_permitted(
+            &evaluate(
+                &Requirement::SystemAdministration,
+                Some(token.clone()),
+                &store
+            )
+            .await
+            .expect("an answer")
+        ));
+
+        let mut transaction = store.begin().await.expect("a transaction");
+        transaction
+            .set_system_administration(&user, false)
+            .await
+            .expect("the flag to be cleared");
+        transaction.commit().await.expect("the edit to land");
+
+        let outcome = evaluate(&Requirement::SystemAdministration, Some(token), &store)
+            .await
+            .expect("an answer");
+        assert!(!is_permitted(&outcome));
+    }
+
     #[tokio::test]
     async fn every_requirement_no_principal_can_hold_yet_is_refused() {
         let (_directory, store) = a_temporary_store().await;
@@ -233,11 +372,7 @@ mod tests {
             .expect("the sign-in to open");
         transaction.commit().await.expect("the sign-in to land");
 
-        for requirement in [
-            Requirement::Session,
-            Requirement::SystemAdministration,
-            Requirement::ServiceToken,
-        ] {
+        for requirement in [Requirement::Session, Requirement::ServiceToken] {
             let outcome = evaluate(&requirement, Some(token.clone()), &store)
                 .await
                 .expect("an answer");

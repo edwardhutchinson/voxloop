@@ -20,7 +20,8 @@ use serde::Deserialize;
 
 use super::{Api, answers};
 use crate::configuration::{
-    AuditEntry, AuditEvent, AuditLog, NameRefused, NewUser, PasswordHash, StoreError, Users,
+    AdministrationRefused, AuditEntry, AuditEvent, AuditLog, NewUser, PasswordHash, StoreError,
+    Users,
 };
 use crate::identity::{Bootstrap, PasswordRefused, Redemption};
 use crate::telemetry::module;
@@ -109,8 +110,14 @@ async fn create(
 
     let user = match created {
         Ok(user) => user,
-        Err(taken @ NameRefused::Taken { .. }) => return Ok(answers::cannot(&taken.to_string())),
-        Err(NameRefused::Store(error)) => return Err(error),
+        Err(taken @ AdministrationRefused::NameTaken { .. }) => {
+            return Ok(answers::cannot(&taken.to_string()));
+        }
+        Err(AdministrationRefused::Store(error)) => return Err(error),
+        // Unreachable: creating a user takes no administrator away from the deployment.
+        Err(AdministrationRefused::LastSystemAdministrator) => {
+            return Ok(answers::cannot("That user could not be created."));
+        }
     };
 
     // Between the check at the top and here, another request may have spent the code. It is
@@ -130,6 +137,7 @@ async fn create(
             actor: Some(user.clone()),
             actor_name: presented.username,
             source: Some(source.ip()),
+            write: None,
         })
         .await?;
     transaction.commit().await?;
@@ -164,6 +172,7 @@ async fn refuse(api: &Api, submitted: &str, source: &SocketAddr) -> Result<Respo
             actor: None,
             actor_name: submitted.to_owned(),
             source: Some(source.ip()),
+            write: None,
         })
         .await?;
     transaction.commit().await?;

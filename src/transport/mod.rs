@@ -11,11 +11,13 @@
 //! [ADR-0040]: ../../../docs/adr/0040-one-binary-one-unit-four-moving-parts.md
 //! [ADR-0062]: ../../../docs/adr/0062-the-call-graph-is-acyclic-and-effects-modules-are-sinks.md
 
+mod administration;
 mod answers;
 mod assets;
 mod bootstrap;
 mod cookies;
 mod liveness;
+mod principal;
 mod rate_limit;
 mod routes;
 mod sign_in;
@@ -29,7 +31,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use tokio::task::JoinHandle;
 
 use crate::authorisation::Requirement;
-use crate::configuration::{Deployment, Store};
+use crate::configuration::{Deployment, Store, StoreError, Transaction, UserId, Users};
 use crate::identity::{Bootstrap, Identity};
 use crate::telemetry::module;
 use rate_limit::{Admission, RateLimits};
@@ -63,6 +65,22 @@ impl Api {
     fn admits(&self, source: &SocketAddr) -> bool {
         self.limits.admit(source.ip()) == Admission::Permitted
     }
+}
+
+/// The name to snapshot into an audit entry: the one the store holds, not the one submitted.
+///
+/// The log outlives the records it references ([ADR-0028]), so every entry carries the name
+/// as it stood alongside the internal id that stays correct across a rename.
+///
+/// [ADR-0028]: ../../../docs/adr/0028-the-audit-log-records-decisions-not-traffic.md
+async fn name_as_it_stands(
+    transaction: &mut Transaction,
+    user: &UserId,
+) -> Result<String, StoreError> {
+    Ok(transaction
+        .user(user)
+        .await?
+        .map_or_else(String::new, |user| user.username))
 }
 
 /// How long a connection has to finish what it was doing once the server is asked to stop.
@@ -168,18 +186,56 @@ impl Serving {
 /// This function is the whole of what VoxLoop exposes. Reading it top to bottom is meant to
 /// be the same experience as reading `docs/spec/api-surface.md`.
 fn routes(api: &Api) -> RouteTable<Api> {
+    use Requirement::{Public, SignedIn, SystemAdministration};
+
     let mut table = RouteTable::new(Arc::clone(&api.store))
-        .get("/api/liveness", Requirement::Public, liveness::liveness)
-        .post("/api/sign-in", Requirement::Public, sign_in::sign_in)
-        .post("/api/sign-out", Requirement::SignedIn, sign_in::sign_out);
+        .get("/api/liveness", Public, liveness::liveness)
+        .post("/api/sign-in", Public, sign_in::sign_in)
+        .post("/api/sign-out", SignedIn, sign_in::sign_out)
+        .get("/api/principal", SignedIn, principal::own)
+        // System administration. Every one of these is gated on the user's flag and never on
+        // a role (v1 §9), so the console opens from the lobby and from within a session
+        // alike. Every write is audited; the two reads are not.
+        .get("/api/users", SystemAdministration, administration::list)
+        .post("/api/users", SystemAdministration, administration::create)
+        .get(
+            "/api/users/{id}",
+            SystemAdministration,
+            administration::read,
+        )
+        .patch(
+            "/api/users/{id}",
+            SystemAdministration,
+            administration::edit,
+        )
+        .delete(
+            "/api/users/{id}",
+            SystemAdministration,
+            administration::delete,
+        )
+        .post(
+            "/api/users/{id}/lock",
+            SystemAdministration,
+            administration::lock,
+        )
+        .post(
+            "/api/users/{id}/unlock",
+            SystemAdministration,
+            administration::unlock,
+        )
+        .post(
+            "/api/users/{id}/force-password-reset",
+            SystemAdministration,
+            administration::force_password_reset,
+        );
 
     // Registered only while no system administrator exists, and genuinely absent otherwise:
     // the one operation VoxLoop hides rather than refuses (v1 §3).
     if api.bootstrap.is_some() {
-        table = table.post("/api/bootstrap", Requirement::Public, bootstrap::redeem);
+        table = table.post("/api/bootstrap", Public, bootstrap::redeem);
     }
 
-    table.fallback(Requirement::Public, assets::bundle)
+    table.fallback(Public, assets::bundle)
 }
 
 #[cfg(test)]
@@ -264,7 +320,7 @@ mod tests {
                     username: "root".to_owned(),
                     password_hash: Some(
                         identity
-                            .hash_password("an established password")
+                            .hash_password("a long enough password")
                             .expect("the password to hash"),
                     ),
                     is_system_administrator: true,
@@ -282,6 +338,47 @@ mod tests {
                 .map(Arc::new);
 
             box_of
+        }
+
+        /// Somebody who can sign in, which is a record with a password on it.
+        ///
+        /// Written straight to the store because the console creates users with no password
+        /// and an enrolment code sets one (#32), so there is no route that does this yet.
+        async fn a_user_who_can_sign_in(&self, username: &str, administers: bool) -> String {
+            let hashed = self
+                .api
+                .identity
+                .hash_password("a long enough password")
+                .expect("the password to hash");
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            let id = transaction
+                .create_user(NewUser {
+                    username: username.to_owned(),
+                    password_hash: Some(hashed),
+                    is_system_administrator: administers,
+                })
+                .await
+                .expect("the user to be created");
+            transaction.commit().await.expect("the user to land");
+
+            id.as_str().to_owned()
+        }
+
+        /// Sign somebody in, and answer with the cookie a browser would present back.
+        async fn signed_in_as(&self, username: &str) -> String {
+            let signed_in = self
+                .post(
+                    "/api/sign-in",
+                    &signing_in(username, "a long enough password"),
+                )
+                .await;
+            assert_eq!(
+                signed_in.status,
+                StatusCode::NO_CONTENT,
+                "{username} could not sign in"
+            );
+
+            signed_in.presented()
         }
 
         fn bootstrap_code(&self) -> String {
@@ -322,9 +419,17 @@ mod tests {
         }
 
         async fn post_holding(&self, cookie: &str, path: &str, body: &str) -> Answer {
+            self.holding(cookie, "POST", path, body).await
+        }
+
+        async fn get_holding(&self, cookie: &str, path: &str) -> Answer {
+            self.holding(cookie, "GET", path, "").await
+        }
+
+        async fn holding(&self, cookie: &str, method: &str, path: &str, body: &str) -> Answer {
             self.ask(
                 from("192.0.2.1")
-                    .method("POST")
+                    .method(method)
                     .uri(path)
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::COOKIE, cookie)
@@ -336,16 +441,23 @@ mod tests {
 
         /// Everything the audit log holds, newest first.
         async fn audited(&self) -> Vec<(AuditEvent, String, Option<IpAddr>)> {
-            let mut transaction = self.api.store.begin().await.expect("a transaction");
-            let entries = transaction
-                .recent_entries(20)
+            self.entries()
                 .await
-                .expect("the log to be readable");
-
-            entries
                 .into_iter()
                 .map(|entry| (entry.event, entry.actor_name, entry.source))
                 .collect()
+        }
+
+        /// The entries themselves, for the promises that are about what an entry holds.
+        async fn entries(&self) -> Vec<crate::configuration::RecordedEntry> {
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            let entries = transaction
+                .recent_entries(50)
+                .await
+                .expect("the log to be readable");
+            transaction.roll_back().await.expect("the read to finish");
+
+            entries
         }
     }
 
@@ -943,5 +1055,450 @@ mod tests {
         assert_eq!(signed_out.status(), reqwest::StatusCode::NO_CONTENT);
 
         serving.stop().await;
+    }
+
+    // ---- #31: the admin console shell and user administration -------------------------
+
+    fn an_account(username: &str, administers: bool) -> String {
+        format!(r#"{{"username":"{username}","system_administration":{administers}}}"#)
+    }
+
+    /// The id of the user the console just made, read out of what it answered.
+    fn id_in(body: &str) -> String {
+        let at = body.find("\"id\":\"").expect("an id in the answer") + 6;
+        body[at..].split('"').next().expect("the id").to_owned()
+    }
+
+    /// The console is gated on the system-administration flag **alone** (v1 §9). This
+    /// administrator has assumed no role, which is what the lobby is, and the console opens.
+    #[tokio::test]
+    async fn the_admin_console_opens_on_the_flag_alone_and_never_on_a_role() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+
+        let answer = box_of.get_holding(&held, "/api/users").await;
+
+        assert_eq!(answer.status, StatusCode::OK);
+        assert!(answer.body.contains("root"), "{:?}", answer.body);
+    }
+
+    #[tokio::test]
+    async fn a_signed_in_user_without_the_flag_may_not_open_the_console() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", false).await;
+        let held = box_of.signed_in_as("flight").await;
+
+        let answer = box_of.get_holding(&held, "/api/users").await;
+
+        assert_eq!(answer.status, StatusCode::FORBIDDEN);
+        assert!(answer.body.starts_with("You may not."), "{:?}", answer.body);
+        assert!(
+            answer.body.contains("system administrator"),
+            "{:?}",
+            answer.body
+        );
+    }
+
+    /// What the console frame asks to know whether it exists for this person, and the flag
+    /// comes from the store rather than from the cookie, which carries no claims (v1 §3).
+    #[tokio::test]
+    async fn the_signed_in_user_is_told_whether_they_hold_the_flag() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", false).await;
+
+        let administrator = box_of
+            .get_holding(&box_of.signed_in_as("root").await, "/api/principal")
+            .await;
+        let operator = box_of
+            .get_holding(&box_of.signed_in_as("flight").await, "/api/principal")
+            .await;
+
+        assert_eq!(administrator.status, StatusCode::OK);
+        assert!(
+            administrator
+                .body
+                .contains(r#""system_administration":true"#),
+            "{:?}",
+            administrator.body
+        );
+        assert!(
+            operator.body.contains(r#""system_administration":false"#),
+            "{:?}",
+            operator.body
+        );
+    }
+
+    #[tokio::test]
+    async fn creates_reads_edits_and_deletes_a_user() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+
+        let created = box_of
+            .post_holding(&held, "/api/users", &an_account("flight", false))
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        let id = id_in(&created.body);
+
+        let read = box_of.get_holding(&held, &format!("/api/users/{id}")).await;
+        assert_eq!(read.status, StatusCode::OK);
+        assert!(read.body.contains("flight"), "{:?}", read.body);
+
+        let edited = box_of
+            .holding(
+                &held,
+                "PATCH",
+                &format!("/api/users/{id}"),
+                r#"{"username":"flight-director","system_administration":true}"#,
+            )
+            .await;
+        assert_eq!(edited.status, StatusCode::OK);
+        assert!(edited.body.contains("flight-director"), "{:?}", edited.body);
+
+        let deleted = box_of
+            .holding(&held, "DELETE", &format!("/api/users/{id}"), "")
+            .await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            box_of
+                .get_holding(&held, &format!("/api/users/{id}"))
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn a_username_already_taken_is_refused_and_the_refusal_is_audited() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+
+        let answer = box_of
+            .post_holding(&held, "/api/users", &an_account("root", false))
+            .await;
+
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+        assert!(answer.body.contains("taken"), "{:?}", answer.body);
+        let entries = box_of.entries().await;
+        let write = entries[0].write.as_ref().expect("a configuration write");
+        assert_eq!(entries[0].event, AuditEvent::UserCreated);
+        assert!(write.refusal.is_some(), "the refusal was not recorded");
+        assert_eq!(write.after, None, "a refused write recorded an after");
+    }
+
+    /// Locking ends the sign-in and the session immediately (v1 §2's lifetime table), so the
+    /// cookie the locked user is holding stops working on their very next request.
+    #[tokio::test]
+    async fn locking_an_account_ends_the_sign_in_it_holds_and_the_next_one_attempted() {
+        let box_of = ABox::already_administered().await;
+        let id = box_of.a_user_who_can_sign_in("flight", false).await;
+        let theirs = box_of.signed_in_as("flight").await;
+        let held = box_of.signed_in_as("root").await;
+
+        let locked = box_of
+            .post_holding(&held, &format!("/api/users/{id}/lock"), "")
+            .await;
+
+        assert_eq!(locked.status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            box_of
+                .post_holding(&theirs, "/api/sign-out", "")
+                .await
+                .status,
+            StatusCode::FORBIDDEN,
+            "a locked account was still signed in"
+        );
+        assert_eq!(
+            box_of
+                .post(
+                    "/api/sign-in",
+                    &signing_in("flight", "a long enough password")
+                )
+                .await
+                .status,
+            StatusCode::UNAUTHORIZED,
+            "a locked account could still sign in"
+        );
+    }
+
+    #[tokio::test]
+    async fn unlocking_an_account_lets_them_sign_in_again() {
+        let box_of = ABox::already_administered().await;
+        let id = box_of.a_user_who_can_sign_in("flight", false).await;
+        let held = box_of.signed_in_as("root").await;
+        box_of
+            .post_holding(&held, &format!("/api/users/{id}/lock"), "")
+            .await;
+
+        let unlocked = box_of
+            .post_holding(&held, &format!("/api/users/{id}/unlock"), "")
+            .await;
+
+        assert_eq!(unlocked.status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            box_of
+                .post(
+                    "/api/sign-in",
+                    &signing_in("flight", "a long enough password")
+                )
+                .await
+                .status,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn forcing_a_password_reset_ends_the_sign_in_and_takes_the_password_away() {
+        let box_of = ABox::already_administered().await;
+        let id = box_of.a_user_who_can_sign_in("flight", false).await;
+        let theirs = box_of.signed_in_as("flight").await;
+        let held = box_of.signed_in_as("root").await;
+
+        let forced = box_of
+            .post_holding(&held, &format!("/api/users/{id}/force-password-reset"), "")
+            .await;
+
+        assert_eq!(forced.status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            box_of
+                .post_holding(&theirs, "/api/sign-out", "")
+                .await
+                .status,
+            StatusCode::FORBIDDEN,
+            "the sign-in survived a forced reset"
+        );
+        assert_eq!(
+            box_of
+                .post(
+                    "/api/sign-in",
+                    &signing_in("flight", "a long enough password")
+                )
+                .await
+                .status,
+            StatusCode::UNAUTHORIZED,
+            "the old password still signed them in"
+        );
+        assert!(
+            box_of
+                .entries()
+                .await
+                .iter()
+                .any(|entry| entry.event == AuditEvent::PasswordResetForced),
+            "the forced reset was not audited"
+        );
+    }
+
+    /// The last system administrator cannot be removed (v1 §2), and each of the three acts
+    /// that would remove them says *you may not* with the reason rather than hiding.
+    #[tokio::test]
+    async fn the_last_system_administrator_cannot_be_locked_deleted_or_demoted() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let id = id_in(&box_of.get_holding(&held, "/api/users").await.body);
+
+        let locked = box_of
+            .post_holding(&held, &format!("/api/users/{id}/lock"), "")
+            .await;
+        let demoted = box_of
+            .holding(
+                &held,
+                "PATCH",
+                &format!("/api/users/{id}"),
+                r#"{"system_administration":false}"#,
+            )
+            .await;
+        let deleted = box_of
+            .holding(&held, "DELETE", &format!("/api/users/{id}"), "")
+            .await;
+
+        for refused in [&locked, &demoted, &deleted] {
+            assert_eq!(refused.status, StatusCode::FORBIDDEN);
+            assert!(
+                refused.body.starts_with("You may not."),
+                "{:?}",
+                refused.body
+            );
+            assert!(
+                refused.body.contains("last system administrator"),
+                "{:?}",
+                refused.body
+            );
+        }
+        assert_eq!(
+            box_of.get_holding(&held, "/api/users").await.status,
+            StatusCode::OK,
+            "the last administrator lost the console"
+        );
+    }
+
+    /// An edit is one write: the rename and the flag land together or neither does, which is
+    /// what makes the audit entry's before and after a true account of what happened.
+    #[tokio::test]
+    async fn an_edit_refused_halfway_leaves_the_record_exactly_as_it_was() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let id = id_in(&box_of.get_holding(&held, "/api/users").await.body);
+
+        let refused = box_of
+            .holding(
+                &held,
+                "PATCH",
+                &format!("/api/users/{id}"),
+                r#"{"username":"renamed","system_administration":false}"#,
+            )
+            .await;
+
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        let read = box_of.get_holding(&held, &format!("/api/users/{id}")).await;
+        assert!(
+            read.body.contains("root"),
+            "the rename landed: {:?}",
+            read.body
+        );
+        assert!(
+            read.body.contains(r#""system_administration":true"#),
+            "{:?}",
+            read.body
+        );
+    }
+
+    /// Every write is audited with before and after **plus a blast radius passed into the
+    /// transaction as a value**, and the write and its entry commit together (v1 §12).
+    #[tokio::test]
+    async fn every_administration_write_is_audited_with_before_after_and_a_blast_radius() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let id = id_in(
+            &box_of
+                .post_holding(&held, "/api/users", &an_account("flight", false))
+                .await
+                .body,
+        );
+
+        box_of
+            .holding(
+                &held,
+                "PATCH",
+                &format!("/api/users/{id}"),
+                r#"{"username":"flight-director"}"#,
+            )
+            .await;
+        box_of
+            .post_holding(&held, &format!("/api/users/{id}/lock"), "")
+            .await;
+
+        let entries = box_of.entries().await;
+        let written: Vec<AuditEvent> = entries
+            .iter()
+            .filter(|entry| entry.write.is_some())
+            .map(|entry| entry.event)
+            .collect();
+        assert_eq!(
+            written,
+            [
+                AuditEvent::AccountLocked,
+                AuditEvent::UserEdited,
+                AuditEvent::UserCreated
+            ]
+        );
+        for entry in entries.iter().filter(|entry| entry.write.is_some()) {
+            let write = entry.write.as_ref().expect("a configuration write");
+            assert!(!write.target_name.is_empty(), "an entry named no target");
+            assert!(write.after.is_some(), "{:?} recorded no after", entry.event);
+            assert_eq!(
+                write.blast_radius,
+                crate::configuration::BlastRadius::nothing_live(),
+                "no session exists, so nothing live was touched"
+            );
+        }
+        let edited = &entries[1].write.as_ref().expect("a configuration write");
+        assert_ne!(edited.before, edited.after, "the edit recorded no change");
+    }
+
+    /// A refused read is not audited — a denied read is usually a stale browser tab (v1 §3).
+    #[tokio::test]
+    async fn a_refused_read_is_not_audited() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", false).await;
+        let held = box_of.signed_in_as("flight").await;
+        let before = box_of.entries().await.len();
+
+        box_of.get_holding(&held, "/api/users").await;
+
+        assert_eq!(box_of.entries().await.len(), before);
+    }
+
+    /// The log outlives the records it references ([ADR-0028]): the entries about a deleted
+    /// user stay, carrying the internal id and the name as it stood.
+    ///
+    /// [ADR-0028]: ../../../docs/adr/0028-the-audit-log-records-decisions-not-traffic.md
+    #[tokio::test]
+    async fn deleting_a_user_leaves_their_entries_readable_and_attributed() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let id = id_in(
+            &box_of
+                .post_holding(&held, "/api/users", &an_account("flight", false))
+                .await
+                .body,
+        );
+
+        box_of
+            .holding(&held, "DELETE", &format!("/api/users/{id}"), "")
+            .await;
+
+        let entries = box_of.entries().await;
+        let about_them: Vec<&crate::configuration::RecordedEntry> = entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .write
+                    .as_ref()
+                    .is_some_and(|write| write.target_name == "flight")
+            })
+            .collect();
+        assert_eq!(about_them.len(), 2, "the entries went with the user");
+        for entry in about_them {
+            let write = entry.write.as_ref().expect("a configuration write");
+            assert_eq!(
+                write.target.as_ref().map(|id| id.as_str()),
+                Some(id.as_str())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_edit_that_asks_for_no_change_is_refused_rather_than_audited() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let id = id_in(&box_of.get_holding(&held, "/api/users").await.body);
+        let before = box_of.entries().await.len();
+
+        let answer = box_of
+            .holding(&held, "PATCH", &format!("/api/users/{id}"), "{}")
+            .await;
+
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+        assert_eq!(box_of.entries().await.len(), before);
+    }
+
+    #[tokio::test]
+    async fn administering_a_user_nobody_holds_says_so_rather_than_pretending_to_have_done_it() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+
+        for (method, path) in [
+            ("GET", "/api/users/nobody"),
+            ("DELETE", "/api/users/nobody"),
+            ("POST", "/api/users/nobody/lock"),
+            ("POST", "/api/users/nobody/force-password-reset"),
+        ] {
+            let answer = box_of.holding(&held, method, path, "").await;
+
+            assert_eq!(
+                answer.status,
+                StatusCode::NOT_FOUND,
+                "expected {method} {path} to say there is no such user"
+            );
+        }
     }
 }
