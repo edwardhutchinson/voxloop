@@ -22,6 +22,7 @@ use std::net::IpAddr;
 use async_trait::async_trait;
 use sqlx::Row;
 
+use super::grid::Cell;
 use super::loops::Loop;
 use super::records::Change;
 use super::roles::Role;
@@ -31,8 +32,8 @@ use super::users::{User, UserId};
 /// A decision worth recording.
 ///
 /// The classes are fixed by [ADR-0028] and grow one ticket at a time: five authentication
-/// events, the user administration writes from #31, and the role, loop and base-order writes
-/// from #33. The grid joins them with the writes that make it.
+/// events, the user administration writes from #31, the role, loop and base-order writes from
+/// #33, and the two writes the grid is made of.
 ///
 /// An event says what was attempted, not whether it succeeded: a refused write is the same
 /// event carrying [`ConfigurationWrite::refusal`], so a log filtered to *deletions of this
@@ -67,6 +68,17 @@ pub(crate) enum AuditEvent {
     ///
     /// [ADR-0053]: ../../../docs/adr/0053-the-loop-order-is-complete-and-a-new-loop-lands-at-the-end.md
     LoopOrderEdited,
+    /// A (role, loop) cell set: the only place voice authority is configured ([ADR-0011]).
+    ///
+    /// One event for every cell write, whichever rung it lands on and whichever page it was
+    /// made from. Granting and revoking are the same act on the same value, so an entry that
+    /// named them differently would be inventing a distinction the model does not have.
+    ///
+    /// [ADR-0011]: ../../../docs/adr/0011-a-permission-is-one-cell-on-the-grid.md
+    GridCellEdited,
+    /// A loop's `unreviewed` mark dismissed, recording a deliberate `none` for every role
+    /// nobody had ruled on. It is per loop, never per cell (v1 §9).
+    LoopReviewed,
     AccountLocked,
     AccountUnlocked,
     /// The password taken away, ending the sign-in and the session immediately (v1 §2).
@@ -118,6 +130,8 @@ impl AuditEvent {
             Self::LoopEdited => "loop_edited",
             Self::LoopDeleted => "loop_deleted",
             Self::LoopOrderEdited => "loop_order_edited",
+            Self::GridCellEdited => "grid_cell_edited",
+            Self::LoopReviewed => "loop_reviewed",
             Self::AccountLocked => "account_locked",
             Self::AccountUnlocked => "account_unlocked",
             Self::PasswordResetForced => "password_reset_forced",
@@ -147,6 +161,8 @@ impl AuditEvent {
             "loop_edited" => Some(Self::LoopEdited),
             "loop_deleted" => Some(Self::LoopDeleted),
             "loop_order_edited" => Some(Self::LoopOrderEdited),
+            "grid_cell_edited" => Some(Self::GridCellEdited),
+            "loop_reviewed" => Some(Self::LoopReviewed),
             "account_locked" => Some(Self::AccountLocked),
             "account_unlocked" => Some(Self::AccountUnlocked),
             "password_reset_forced" => Some(Self::PasswordResetForced),
@@ -243,7 +259,7 @@ impl ConfigurationWrite {
         Self {
             target: Some(change.before.recorded_id()),
             // The name as it ended, which is what a rename's entry has to be read by.
-            target_name: ended_as.recorded_name().to_owned(),
+            target_name: ended_as.recorded_name(),
             before: Some(change.before.snapshot()),
             after: change.after.as_ref().map(Record::snapshot),
             blast_radius,
@@ -274,16 +290,19 @@ impl RecordId {
     }
 }
 
-/// A configuration record the log can be about: a user, a role or a loop.
+/// A configuration record the log can be about: a user, a role, a loop or a grid cell.
 ///
-/// Three writes, one audited path. What each record renders into a [`Snapshot`] is the only
+/// Four writes, one audited path. What each record renders into a [`Snapshot`] is the only
 /// thing that differs between them, and it is here rather than with the record so that the
 /// strings customer deployments hold on disk are changed in one place, deliberately.
 pub(crate) trait Record {
     fn recorded_id(&self) -> RecordId;
 
     /// The name as it stands, which keeps the entry readable once the record is gone.
-    fn recorded_name(&self) -> &str;
+    ///
+    /// Owned rather than borrowed, because a cell's name is *both* its records' names and
+    /// there is nothing on a cell to hand back a reference to.
+    fn recorded_name(&self) -> String;
 
     fn snapshot(&self) -> Snapshot;
 }
@@ -293,8 +312,8 @@ impl Record for User {
         RecordId::of(self.id.as_str())
     }
 
-    fn recorded_name(&self) -> &str {
-        &self.username
+    fn recorded_name(&self) -> String {
+        self.username.clone()
     }
 
     /// A user as they stood.
@@ -318,8 +337,8 @@ impl Record for Role {
         RecordId::of(self.id.as_str())
     }
 
-    fn recorded_name(&self) -> &str {
-        &self.name
+    fn recorded_name(&self) -> String {
+        self.name.clone()
     }
 
     /// A role as it stood, with the limit rendered as the absence it is where there is none.
@@ -338,8 +357,8 @@ impl Record for Loop {
         RecordId::of(self.id.as_str())
     }
 
-    fn recorded_name(&self) -> &str {
-        &self.name
+    fn recorded_name(&self) -> String {
+        self.name.clone()
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -347,6 +366,35 @@ impl Record for Loop {
             "loop={} reviewed={}",
             self.name,
             yes_or_no(!self.is_unreviewed),
+        ))
+    }
+}
+
+impl Record for Cell {
+    /// A cell is about two records, and the entry names the **loop**.
+    ///
+    /// One target id is what the log holds, so one of the pair has to be chosen. The loop is
+    /// what authority is *over*, and it is the thing whose review state and whose column an
+    /// administrator reads — so filtering the log to a loop answers *who was given what on
+    /// this, and by whom*, which is the question a permission change is looked up for. The
+    /// role is not lost: it is in the target name and in both snapshots, either side of the
+    /// change.
+    fn recorded_id(&self) -> RecordId {
+        RecordId::of(self.held_on.id.as_str())
+    }
+
+    /// Both names, because a cell nobody can name is a cell nobody can read the entry for.
+    fn recorded_name(&self) -> String {
+        format!("{} on {}", self.role.name, self.held_on.name)
+    }
+
+    /// A cell as it stood: the pair, and the one value it holds.
+    fn snapshot(&self) -> Snapshot {
+        Snapshot(format!(
+            "role={} loop={} permission={}",
+            self.role.name,
+            self.held_on.name,
+            self.permission.as_str(),
         ))
     }
 }

@@ -207,8 +207,36 @@ entry, and an order that does not name every loop exactly once is refused rather
 half-applied. A new loop lands at the end, because appending is the only honest placement
 for something VoxLoop has been told nothing about.
 
-Nothing here says which role may hear or say what on which loop. That is the grid, and it is
-its own page.
+Nothing on those two pages says which role may hear or say what on which loop. That is the
+grid, below.
+
+### The grid
+
+Voice authority is **one value per (role, loop) pair**, from an ordered four — `none`,
+`monitor`, `emit`, `control` — each rung carrying everything below it
+([ADR-0011](docs/adr/0011-a-permission-is-one-cell-on-the-grid.md)). An absent cell is
+`none`. There is no second layer anywhere: no per-user grant, no per-user deny, no override,
+no exception and no precedence rule, so evaluating a permission is one lookup. Granting one
+person one extra loop always costs a role, deliberately.
+
+It is administered **one row or one column at a time**
+([ADR-0015](docs/adr/0015-the-admin-console-reads-one-row-at-a-time.md)). A role's **Reach**
+page is its row — every loop with what this role holds on it, in the base order — and a
+loop's **Permissions** page is its column — every role with what it holds on that loop. Both
+are lists at full size, because that is how administrators were found to read this: a
+realistic pilot grid fills 167 of 300 cells, and past roughly thirty loops a row's header and
+its far end cannot share a screen. Taking a permission away is setting `none`; there is no
+separate act for it.
+
+The **Grid** page is the whole matrix, and it is a reference view: the only place a
+whole-configuration read is possible, which is a reviewing act rather than an administering
+one. Nothing is edited there.
+
+A loop nobody has ruled on shows as `unreviewed`, and its cells are **enforced as `none` on
+every rung whatever they are set to**. The mark is cleared from the loop's own page, per loop
+and never per cell, and clearing it records a deliberate `none` against every role left
+alone. It is a display state and an administrator's prompt throughout: the evaluator cannot
+tell an unreviewed loop's cell from a deliberate `none`, and does not try.
 
 Every write is audited with the record before and after and the **blast radius** — what the
 change does to anything live. No session exists yet, so that radius is empty; the shape is

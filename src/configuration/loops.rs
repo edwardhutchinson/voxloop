@@ -35,7 +35,7 @@ pub(crate) struct LoopId(String);
 
 impl LoopId {
     /// Take back an id the store already minted.
-    fn known(id: String) -> Self {
+    pub(super) fn known(id: String) -> Self {
         Self(id)
     }
 
@@ -222,7 +222,11 @@ impl Loops for Transaction {
 }
 
 /// A loop, from the row every read of one selects.
-fn a_loop(row: &sqlx::sqlite::SqliteRow) -> Loop {
+///
+/// The grid reads loops too — a role's row is every loop with what the role holds on it —
+/// so this is `pub(super)` rather than copied there: one place turns a row into a loop, and
+/// a column this module adds later cannot be forgotten by half of the reads.
+pub(super) fn a_loop(row: &sqlx::sqlite::SqliteRow) -> Loop {
     Loop {
         id: LoopId::known(row.get("id")),
         name: row.get("name"),

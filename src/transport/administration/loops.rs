@@ -3,7 +3,8 @@
 //!
 //! There is no loop kind, type, category or naming convention here, and there will not be
 //! one ([ADR-0055]). A loop arrives `unreviewed` and says so until an administrator has
-//! ruled on its column, which is the grid's act and arrives with it (#34).
+//! ruled on its column; ruling on one is a grid act and lives in [`super::grid`], because
+//! what it writes is cells.
 //!
 //! The base order is **administered, not derived** ([ADR-0053]): it is set as a complete
 //! ordering, and a new loop lands at the end of it because appending is the only honest
@@ -31,8 +32,12 @@ use crate::telemetry::module;
 use crate::transport::{Api, answers};
 
 /// A loop, as the console reads one. The list is in the base order, which is the order.
+///
+/// `pub(super)` because the grid reads loops too — a role's row is every loop with what the
+/// role holds on it — and one shape for a loop everywhere is what stops the console holding
+/// two.
 #[derive(Serialize)]
-struct LoopAsRead {
+pub(super) struct LoopAsRead {
     id: String,
     name: String,
     /// Whether anybody has ruled on this loop's column yet ([ADR-0015]). The console says so
@@ -44,7 +49,7 @@ struct LoopAsRead {
 }
 
 impl LoopAsRead {
-    fn of(held: &Loop) -> Self {
+    pub(super) fn of(held: &Loop) -> Self {
         Self {
             id: held.id.as_str().to_owned(),
             name: held.name.clone(),
@@ -52,7 +57,7 @@ impl LoopAsRead {
         }
     }
 
-    async fn read_through(
+    pub(super) async fn read_through(
         _transaction: &mut Transaction,
         held: &Loop,
     ) -> Result<Response, StoreError> {

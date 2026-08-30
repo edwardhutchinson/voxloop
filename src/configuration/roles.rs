@@ -24,7 +24,7 @@ pub(crate) struct RoleId(String);
 
 impl RoleId {
     /// Take back an id the store already minted.
-    fn known(id: String) -> Self {
+    pub(super) fn known(id: String) -> Self {
         Self(id)
     }
 
@@ -219,17 +219,25 @@ impl Transaction {
 }
 
 /// A role, from the row every read of one selects.
-fn a_role(row: &sqlx::sqlite::SqliteRow) -> Role {
+///
+/// The grid reads roles too — a loop's column is every role with what it holds on the loop —
+/// so this is `pub(super)` rather than copied there.
+pub(super) fn a_role(row: &sqlx::sqlite::SqliteRow) -> Role {
     Role {
         id: RoleId::known(row.get("id")),
         name: row.get("name"),
-        // A limit too large for a `u32` is one somebody hand-edited into the file, and it
-        // reads back as an absurdly large limit rather than as `None`: `None` is *no limit*,
-        // an administered decision, and a fault must never be answered with one of those.
-        max_occupants: row
-            .get::<Option<i64>, _>("max_occupants")
-            .map(|limit| u32::try_from(limit).unwrap_or(u32::MAX)),
+        max_occupants: a_limit(row),
     }
+}
+
+/// How many may occupy a role at once, from the row that carries the limit.
+///
+/// A limit too large for a `u32` is one somebody hand-edited into the file, and it reads back
+/// as an absurdly large limit rather than as `None`: `None` is *no limit*, an administered
+/// decision, and a fault must never be answered with one of those.
+pub(super) fn a_limit(row: &sqlx::sqlite::SqliteRow) -> Option<u32> {
+    row.get::<Option<i64>, _>("max_occupants")
+        .map(|limit| u32::try_from(limit).unwrap_or(u32::MAX))
 }
 
 /// A role nobody may occupy is not a staffable position, so it is refused rather than stored.

@@ -202,7 +202,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let path = dir.path().join("voxloop.sqlite");
         drop(Store::open(&path).await.expect("the store to open"));
-        stamp_a_future_migration(&path, 20_260_901_000_001).await;
+        // Far enough ahead that adding a migration does not quietly turn this test into one
+        // that stamps a version this binary already knows and asserts nothing.
+        stamp_a_future_migration(&path, 20_990_101_000_000).await;
 
         let Err(refusal) = Store::open(&path).await else {
             panic!("expected a refusal to start against a schema newer than this binary knows");
@@ -212,7 +214,7 @@ mod tests {
             matches!(
                 refusal,
                 StoreError::SchemaNewerThanBinary {
-                    found: 20_260_901_000_001,
+                    found: 20_990_101_000_000,
                     ..
                 }
             ),

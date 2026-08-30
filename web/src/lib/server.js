@@ -142,3 +142,45 @@ export const deleteLoop = (id) =>
  */
 export const setLoopOrder = (order) =>
 	ask('/api/loops/order', { method: 'PUT', ...sending({ order }) });
+
+/**
+ * The grid: one permission per (role, loop) pair, and the only place voice authority is
+ * configured.
+ *
+ * It is read one row or one column at a time (ADR-0015). `roleRow` is a role page — what
+ * this role may reach — and `loopColumn` is a loop page — who may reach this loop. Both are
+ * the same cells read two ways, which is why there is no third thing to keep in step.
+ */
+export const roleRow = (role) => ask(`/api/roles/${encodeURIComponent(role)}/grid`);
+
+export const loopColumn = (held) => ask(`/api/loops/${encodeURIComponent(held)}/grid`);
+
+/**
+ * The whole grid, for the reference view.
+ *
+ * A whole-configuration read is a reviewing act rather than an administering one, so this
+ * answers the axes and the cells and nothing writes back through it.
+ */
+export const theGrid = () => ask('/api/grid');
+
+/**
+ * Set one cell.
+ *
+ * A cell holds exactly one of `none`, `monitor`, `emit` and `control`, so it is replaced
+ * rather than patched, and there is no *clear*: taking a permission away is setting `none`.
+ */
+export const setCell = (role, held, permission) =>
+	ask(`/api/grid/${encodeURIComponent(role)}/${encodeURIComponent(held)}`, {
+		method: 'PUT',
+		...sending({ permission })
+	});
+
+/**
+ * Rule on a loop's column, clearing its unreviewed mark.
+ *
+ * It is per loop, never per cell, and it records a deliberate `none` against every role
+ * nobody has ruled on — which is what makes the mark a prompt that can be answered rather
+ * than one that can only be ignored.
+ */
+export const dismissUnreviewed = (held) =>
+	ask(`/api/loops/${encodeURIComponent(held)}/dismiss-unreviewed`, { method: 'POST' });

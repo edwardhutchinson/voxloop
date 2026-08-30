@@ -19,8 +19,11 @@ use crate::configuration::{
 use crate::transport::{Api, answers};
 
 /// A role, as the console reads one.
+///
+/// `pub(super)` because the grid reads roles too — a loop's column is every role with what
+/// it holds — and one shape for a role everywhere is what stops the console holding two.
 #[derive(Serialize)]
-struct RoleAsRead {
+pub(super) struct RoleAsRead {
     id: String,
     name: String,
     /// Absent is *no limit*, which is how the console renders it: the same concept with the
@@ -29,7 +32,7 @@ struct RoleAsRead {
 }
 
 impl RoleAsRead {
-    fn of(role: &Role) -> Self {
+    pub(super) fn of(role: &Role) -> Self {
         Self {
             id: role.id.as_str().to_owned(),
             name: role.name.clone(),
