@@ -43,10 +43,14 @@ the bootstrap code itself, and prints the URL and a password generated for that 
 `VOXLOOP_DEV_PASSWORD` to keep one across `--fresh` runs, `VOXLOOP_DEV_PORT` to move the
 port.
 
-Open the URL it prints exactly as printed — **`https://127.0.0.1:8443`**. Typing the port on
-its own gets you `http`, which nothing here speaks, and `localhost` resolves to IPv6 first on
-most boxes while the binary listens on one address. Accept the certificate warning before
-signing in: the sign-in cookie is `Secure` and the browser will not keep it otherwise.
+It opens the page for you; `VOXLOOP_DEV_NO_OPEN=1` stops that. If you are typing it instead,
+type it exactly as the banner prints it — **`https://127.0.0.1:8443`**. A host and a port on
+their own get you `http`, which nothing in a VoxLoop deployment speaks, and `localhost`
+resolves to IPv6 first on most boxes while the binary listens on one address; either mistake
+reads as the site refusing the connection.
+
+Accept the certificate warning before signing in: the sign-in cookie is `Secure` and the
+browser will not keep it otherwise. You should land on a sign-in form.
 
 It is a development launcher and not a way to provision anything: nothing it writes belongs
 on a machine anybody else can reach, which is why `.dev/` is ignored by git.

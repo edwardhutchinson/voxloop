@@ -131,6 +131,7 @@ administer() {
 
 	if [ -z "$code" ]; then
 		banner "$ADMINISTRATOR" "the password you set when this store was made"
+		show
 		return
 	fi
 
@@ -150,6 +151,21 @@ administer() {
 	fi
 
 	banner "$ADMINISTRATOR" "$password"
+	show
+}
+
+# Opened rather than typed. The scheme and the address both matter here and neither is what a
+# browser assumes from a host and a port, so the surest way to get this right is not to ask
+# anybody to get it right. Set VOXLOOP_DEV_NO_OPEN to be left alone.
+show() {
+	[ -z "${VOXLOOP_DEV_NO_OPEN:-}" ] || return 0
+
+	local opener=""
+	command -v xdg-open >/dev/null 2>&1 && opener=xdg-open
+	[ -n "$opener" ] || { command -v open >/dev/null 2>&1 && opener=open; } || true
+	[ -n "$opener" ] || return 0
+
+	"$opener" "$AT" >/dev/null 2>&1 || true
 }
 
 banner() {
