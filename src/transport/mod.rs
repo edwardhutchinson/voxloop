@@ -15,10 +15,10 @@ mod answers;
 mod assets;
 mod bootstrap;
 mod cookies;
-mod entry;
 mod liveness;
 mod rate_limit;
 mod routes;
+mod sign_in;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -32,7 +32,7 @@ use crate::authorisation::Requirement;
 use crate::configuration::{Deployment, Store};
 use crate::identity::{Bootstrap, Identity};
 use crate::telemetry::module;
-use rate_limit::RateLimits;
+use rate_limit::{Admission, RateLimits};
 use routes::RouteTable;
 
 /// Everything a handler is given, and nothing it is not.
@@ -43,7 +43,7 @@ use routes::RouteTable;
 ///
 /// [`docs/spec/modules.md`]: ../../../docs/spec/modules.md
 #[derive(Clone)]
-pub(super) struct Api {
+struct Api {
     store: Arc<Store>,
     identity: Identity,
     limits: Arc<RateLimits>,
@@ -51,6 +51,18 @@ pub(super) struct Api {
     /// yet. `None` is the ordinary state, and it is what leaves the redemption route
     /// unregistered rather than merely refusing.
     bootstrap: Option<Arc<Bootstrap>>,
+}
+
+impl Api {
+    /// Whether this source may attempt something that presents a credential.
+    ///
+    /// Keyed on the source and never on the name submitted, so no number of failures can
+    /// lock anybody out ([ADR-0025]).
+    ///
+    /// [ADR-0025]: ../../../docs/adr/0025-credentials-are-administered-because-there-is-no-email.md
+    fn admits(&self, source: &SocketAddr) -> bool {
+        self.limits.admit(source.ip()) == Admission::Permitted
+    }
 }
 
 /// How long a connection has to finish what it was doing once the server is asked to stop.
@@ -158,8 +170,8 @@ impl Serving {
 fn routes(api: &Api) -> RouteTable<Api> {
     let mut table = RouteTable::new(Arc::clone(&api.store))
         .get("/api/liveness", Requirement::Public, liveness::liveness)
-        .post("/api/sign-in", Requirement::Public, entry::sign_in)
-        .post("/api/sign-out", Requirement::SignedIn, entry::sign_out);
+        .post("/api/sign-in", Requirement::Public, sign_in::sign_in)
+        .post("/api/sign-out", Requirement::SignedIn, sign_in::sign_out);
 
     // Registered only while no system administrator exists, and genuinely absent otherwise:
     // the one operation VoxLoop hides rather than refuses (v1 §3).
@@ -174,6 +186,8 @@ fn routes(api: &Api) -> RouteTable<Api> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    use std::net::IpAddr;
 
     use axum::body::Body;
     use axum::extract::ConnectInfo;
@@ -321,7 +335,7 @@ mod tests {
         }
 
         /// Everything the audit log holds, newest first.
-        async fn audited(&self) -> Vec<(AuditEvent, String, Option<String>)> {
+        async fn audited(&self) -> Vec<(AuditEvent, String, Option<IpAddr>)> {
             let mut transaction = self.api.store.begin().await.expect("a transaction");
             let entries = transaction
                 .recent_entries(20)
@@ -520,6 +534,73 @@ mod tests {
         assert_eq!(redeemed.status, StatusCode::NO_CONTENT);
     }
 
+    /// A wrong code learns nothing. Whether a username is taken is not something an
+    /// unauthenticated caller is entitled to find out, which is the same rule the decoy hash
+    /// keeps on the sign-in route.
+    #[tokio::test]
+    async fn a_wrong_code_answers_a_taken_name_exactly_as_it_answers_a_free_one() {
+        let box_of = ABox::with_nobody_on_it().await;
+        let mut transaction = box_of.api.store.begin().await.expect("a transaction");
+        transaction
+            .create_user(NewUser {
+                username: "taken".to_owned(),
+                password_hash: None,
+                is_system_administrator: false,
+            })
+            .await
+            .expect("an ordinary user");
+        transaction.commit().await.expect("the user to land");
+
+        let against_a_taken_name = box_of
+            .post(
+                "/api/bootstrap",
+                &redeeming("not the code", "taken", "a long enough password"),
+            )
+            .await;
+        let against_a_free_name = box_of
+            .post(
+                "/api/bootstrap",
+                &redeeming("not the code", "free", "a long enough password"),
+            )
+            .await;
+
+        assert_eq!(against_a_taken_name.status, against_a_free_name.status);
+        assert_eq!(against_a_taken_name.body, against_a_free_name.body);
+
+        // The code is what entitles the caller to the difference.
+        let code = box_of.bootstrap_code();
+        let told = box_of
+            .post(
+                "/api/bootstrap",
+                &redeeming(&code, "taken", "a long enough password"),
+            )
+            .await;
+        assert_eq!(told.status, StatusCode::BAD_REQUEST);
+        assert!(told.body.contains("taken"), "{:?}", told.body);
+    }
+
+    #[tokio::test]
+    async fn a_refused_code_is_audited() {
+        let box_of = ABox::with_nobody_on_it().await;
+
+        box_of
+            .post_from(
+                "198.51.100.9",
+                "/api/bootstrap",
+                &redeeming("not the code", "hopeful", "a long enough password"),
+            )
+            .await;
+
+        assert_eq!(
+            box_of.audited().await,
+            [(
+                AuditEvent::BootstrapRefused,
+                "hopeful".to_owned(),
+                Some(IpAddr::from([198, 51, 100, 9]))
+            )]
+        );
+    }
+
     #[tokio::test]
     async fn a_password_under_the_floor_is_refused_and_does_not_spend_the_code() {
         let box_of = ABox::with_nobody_on_it().await;
@@ -557,7 +638,7 @@ mod tests {
             [(
                 AuditEvent::BootstrapRedeemed,
                 "flight".to_owned(),
-                Some("192.0.2.1".to_owned())
+                Some(IpAddr::from([192, 0, 2, 1]))
             )]
         );
     }
@@ -654,7 +735,7 @@ mod tests {
             (
                 AuditEvent::SignInSucceeded,
                 "flight".to_owned(),
-                Some("192.0.2.1".to_owned())
+                Some(IpAddr::from([192, 0, 2, 1]))
             )
         );
     }
@@ -685,7 +766,7 @@ mod tests {
             (
                 AuditEvent::SignInFailed,
                 "flight".to_owned(),
-                Some("198.51.100.9".to_owned())
+                Some(IpAddr::from([198, 51, 100, 9]))
             )
         );
     }

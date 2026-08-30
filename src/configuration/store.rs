@@ -25,10 +25,6 @@ pub(crate) enum StoreError {
          written by a newer VoxLoop"
     )]
     SchemaNewerThanBinary { found: i64, known: i64 },
-
-    /// Not a failure of the store: a refusal the caller can act on and a human can read.
-    #[error("the username {username:?} is already taken")]
-    UsernameTaken { username: String },
 }
 
 /// Anything the store itself could not do, said without naming what is behind it.

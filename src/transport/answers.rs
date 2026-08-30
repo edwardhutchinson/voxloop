@@ -51,6 +51,17 @@ pub(super) fn cannot(reason: &str) -> Response {
     (StatusCode::BAD_REQUEST, format!("{reason}\n")).into_response()
 }
 
+/// Answer, unless the store could not answer at all.
+///
+/// Every handler ends this way, so the one path that turns a store fault into a status
+/// exists once rather than per route.
+pub(super) fn or_unavailable(answer: Result<Response, StoreError>) -> Response {
+    match answer {
+        Ok(answer) => answer,
+        Err(error) => unavailable(&error),
+    }
+}
+
 /// Something VoxLoop needed was not there. Said without naming what it was.
 pub(super) fn unavailable(error: &StoreError) -> Response {
     tracing::error!(target: module::TRANSPORT, %error, "the request could not be answered");

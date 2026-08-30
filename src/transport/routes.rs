@@ -219,8 +219,8 @@ where
 /// human reads is Transport's job, and this is where it happens.
 fn unmet(requirement: &Requirement) -> &'static str {
     match requirement {
-        // Nothing public is ever refused for want of a principal, so this is the answer to a
-        // question nobody asked — and saying so is better than inventing a reason.
+        // Nothing public is refused for want of a principal, so this arm answers a question
+        // nobody asked — and saying so is better than inventing a reason.
         Requirement::Public => "That operation is not available.",
         Requirement::SignedIn => "That operation is for a signed-in user.",
         Requirement::Session => "That operation is for a user who has assumed a role.",
@@ -249,7 +249,7 @@ async fn refuse_the_unruled(request: Request, next: Next) -> Response {
     }
 
     tracing::error!(target: module::TRANSPORT, "an unruled route answered; refusing it");
-    answers::refusal(unmet(&Requirement::Public))
+    answers::refusal("That operation is not available.")
 }
 
 #[cfg(test)]

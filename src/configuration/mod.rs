@@ -34,4 +34,4 @@ pub(crate) use sign_ins::{SignInToken, SignIns};
 #[cfg(test)]
 pub(crate) use store::a_temporary_store;
 pub(crate) use store::{Store, StoreError, Transaction};
-pub(crate) use users::{NewUser, PasswordHash, UserId, Users};
+pub(crate) use users::{NameRefused, NewUser, PasswordHash, UserId, Users};

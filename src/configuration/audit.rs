@@ -17,6 +17,8 @@
 //! [ADR-0038]: ../../../docs/adr/0038-sqlite-behind-domain-shaped-repositories.md
 //! [ADR-0060]: ../../../docs/adr/0060-a-seam-names-domain-operations.md
 
+use std::net::IpAddr;
+
 use async_trait::async_trait;
 use sqlx::Row;
 
@@ -37,6 +39,11 @@ pub(crate) enum AuditEvent {
     SignedOut,
     /// The first system administrator, made by whoever could read the server's own log.
     BootstrapRedeemed,
+    /// A bootstrap code presented and not accepted. Refused administration writes are
+    /// audited ([ADR-0054]), and this is the one write that makes an administrator.
+    ///
+    /// [ADR-0054]: ../../../docs/adr/0054-every-operation-declares-its-authorisation.md
+    BootstrapRefused,
 }
 
 impl AuditEvent {
@@ -48,6 +55,7 @@ impl AuditEvent {
             Self::SignInFailed => "sign_in_failed",
             Self::SignedOut => "signed_out",
             Self::BootstrapRedeemed => "bootstrap_redeemed",
+            Self::BootstrapRefused => "bootstrap_refused",
         }
     }
 
@@ -58,15 +66,27 @@ impl AuditEvent {
             "sign_in_failed" => Some(Self::SignInFailed),
             "signed_out" => Some(Self::SignedOut),
             "bootstrap_redeemed" => Some(Self::BootstrapRedeemed),
+            "bootstrap_refused" => Some(Self::BootstrapRefused),
             _ => None,
         }
     }
 }
 
+/// A row the log holds that this binary cannot read back.
+///
+/// Only a newer VoxLoop or a hand-edited file can produce one, and the binary refuses to
+/// start against a newer schema — so this is a fault to report rather than a value to guess
+/// at. An audit read that quietly dropped what it could not parse would be the worst of the
+/// available behaviours.
 #[derive(Debug, thiserror::Error)]
-#[error("the audit log holds an event this binary does not know: {0:?}")]
 #[allow(dead_code)] // Constructed on the read path, which #31's console is the first to use.
-struct UnknownEvent(String);
+enum Unreadable {
+    #[error("the audit log holds an event this binary does not know: {0:?}")]
+    Event(String),
+
+    #[error("the audit log holds a source that is not an address: {0:?}")]
+    Source(String),
+}
 
 /// A decision about to be recorded.
 pub(crate) struct AuditEntry {
@@ -82,7 +102,7 @@ pub(crate) struct AuditEntry {
     /// auto-locking ([ADR-0025]).
     ///
     /// [ADR-0025]: ../../../docs/adr/0025-credentials-are-administered-because-there-is-no-email.md
-    pub(crate) source: Option<String>,
+    pub(crate) source: Option<IpAddr>,
 }
 
 /// A decision as the log holds it.
@@ -92,7 +112,7 @@ pub(crate) struct RecordedEntry {
     pub(crate) event: AuditEvent,
     pub(crate) actor: Option<UserId>,
     pub(crate) actor_name: String,
-    pub(crate) source: Option<String>,
+    pub(crate) source: Option<IpAddr>,
     /// Milliseconds since the Unix epoch.
     pub(crate) recorded_at: i64,
 }
@@ -123,7 +143,7 @@ impl AuditLog for Transaction {
         .bind(entry.event.stored())
         .bind(entry.actor.as_ref().map(UserId::as_str))
         .bind(&entry.actor_name)
-        .bind(&entry.source)
+        .bind(entry.source.map(|source| source.to_string()))
         .execute(self.connection())
         .await
         .map_err(unavailable)?;
@@ -145,13 +165,22 @@ impl AuditLog for Transaction {
             .map(|row| {
                 let stored: String = row.get("event");
                 let event = AuditEvent::from_stored(&stored)
-                    .ok_or_else(|| unavailable(UnknownEvent(stored)))?;
+                    .ok_or_else(|| unavailable(Unreadable::Event(stored)))?;
+
+                let source = match row.get::<Option<String>, _>("source") {
+                    None => None,
+                    Some(stored) => Some(
+                        stored
+                            .parse()
+                            .map_err(|_| unavailable(Unreadable::Source(stored)))?,
+                    ),
+                };
 
                 Ok(RecordedEntry {
                     event,
                     actor: row.get::<Option<String>, _>("actor_id").map(UserId::known),
                     actor_name: row.get("actor_name"),
-                    source: row.get("source"),
+                    source,
                     recorded_at: row.get("recorded_at"),
                 })
             })
@@ -170,7 +199,7 @@ mod tests {
             event: AuditEvent::SignInSucceeded,
             actor: actor.cloned(),
             actor_name: name.to_owned(),
-            source: Some("192.0.2.7".to_owned()),
+            source: Some(IpAddr::from([192, 0, 2, 7])),
         }
     }
 
@@ -204,7 +233,7 @@ mod tests {
         assert_eq!(entries[0].event, AuditEvent::SignInSucceeded);
         assert_eq!(entries[0].actor.as_ref(), Some(&user));
         assert_eq!(entries[0].actor_name, "flight");
-        assert_eq!(entries[0].source.as_deref(), Some("192.0.2.7"));
+        assert_eq!(entries[0].source, Some(IpAddr::from([192, 0, 2, 7])));
         assert!(entries[0].recorded_at > 0);
     }
 
@@ -241,7 +270,7 @@ mod tests {
                 event: AuditEvent::SignInFailed,
                 actor: None,
                 actor_name: "nobody-by-that-name".to_owned(),
-                source: Some("192.0.2.7".to_owned()),
+                source: Some(IpAddr::from([192, 0, 2, 7])),
             })
             .await
             .expect("the entry to be recorded");

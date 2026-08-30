@@ -51,7 +51,7 @@ impl std::fmt::Debug for Presented {
 /// returned would be something a replacement had to match, and the point of this seam is
 /// that there is nothing to match.
 #[async_trait]
-pub(crate) trait FrontDoor: Send + Sync {
+trait FrontDoor: Send + Sync {
     /// Resolve a presented credential to the user it names, or to nobody.
     ///
     /// Nobody is `Ok(None)` rather than an error: a wrong password is an ordinary answer,
@@ -64,6 +64,14 @@ pub(crate) trait FrontDoor: Send + Sync {
 }
 
 /// VoxLoop's identity, with whichever front door this deployment was built with.
+///
+/// The two fields are not one field twice. `front_door` is the replaceable part, and an
+/// identity provider takes its place without anything above noticing. `passwords` is local
+/// password administration, which stays whatever the front door becomes, because a local
+/// break-glass administrator is permanent ([ADR-0024]). Today one type happens to serve
+/// both; the day an identity provider arrives, only the first changes.
+///
+/// [ADR-0024]: ../../../docs/adr/0024-identity-is-a-replaceable-front-door.md
 #[derive(Clone)]
 pub(crate) struct Identity {
     front_door: Arc<dyn FrontDoor>,

@@ -1,4 +1,4 @@
-//! Sign in and sign out: v1 §2's outermost act, and the end of it.
+//! Sign in, and the act that ends it: v1 §2's outermost pair.
 //!
 //! **Sign in authenticates a principal to the application. It confers no role, no reach and
 //! no audio** ([ADR-0023]). Assuming a role is a separate act over the signalling channel,
@@ -20,11 +20,10 @@ use axum::{Extension, Json};
 use axum_extra::extract::CookieJar;
 use serde::Deserialize;
 
-use super::rate_limit::Admission;
 use super::{Api, answers, cookies};
 use crate::authorisation::Caller;
 use crate::configuration::{
-    AuditEntry, AuditEvent, AuditLog, SignIns, StoreError, Transaction, UserId, Users,
+    AuditEntry, AuditEvent, AuditLog, SignInToken, SignIns, StoreError, Transaction, UserId, Users,
 };
 use crate::identity::Presented;
 use crate::telemetry::module;
@@ -43,14 +42,11 @@ pub(super) async fn sign_in(
     jar: CookieJar,
     Json(presented): Json<Credentials>,
 ) -> Response {
-    if api.limits.admit(source.ip()) == Admission::Throttled {
+    if !api.admits(&source) {
         return answers::too_many_attempts();
     }
 
-    match attempt(&api, &source, jar, presented).await {
-        Ok(answer) => answer,
-        Err(error) => answers::unavailable(&error),
-    }
+    answers::or_unavailable(attempt(&api, &source, jar, presented).await)
 }
 
 async fn attempt(
@@ -65,6 +61,10 @@ async fn attempt(
         password: presented.password,
     };
 
+    // The password check runs with this transaction open, which holds a pooled connection
+    // for as long as Argon2id takes. The alternative is a seam that hands the stored hash
+    // out for somebody else to check, and that is the seam ADR-0024 exists to prevent. The
+    // rate limits are what bound the cost instead.
     let mut transaction = api.store.begin().await?;
     let resolved = api.identity.resolve(&mut transaction, &credential).await?;
 
@@ -78,7 +78,7 @@ async fn attempt(
                 event: AuditEvent::SignInFailed,
                 actor: None,
                 actor_name: submitted_name,
-                source: Some(source.ip().to_string()),
+                source: Some(source.ip()),
             })
             .await?;
         transaction.commit().await?;
@@ -93,7 +93,7 @@ async fn attempt(
             event: AuditEvent::SignInSucceeded,
             actor: Some(user.clone()),
             actor_name: name,
-            source: Some(source.ip().to_string()),
+            source: Some(source.ip()),
         })
         .await?;
     transaction.commit().await?;
@@ -119,17 +119,14 @@ pub(super) async fn sign_out(
         return answers::refusal("That operation is for a signed-in user.");
     };
 
-    match end(&api, &id, &sign_in).await {
-        Ok(()) => (jar.add(cookies::taken_back()), StatusCode::NO_CONTENT).into_response(),
-        Err(error) => answers::unavailable(&error),
-    }
+    answers::or_unavailable(
+        end(&api, &id, &sign_in)
+            .await
+            .map(|()| (jar.add(cookies::taken_back()), StatusCode::NO_CONTENT).into_response()),
+    )
 }
 
-async fn end(
-    api: &Api,
-    user: &UserId,
-    sign_in: &crate::configuration::SignInToken,
-) -> Result<(), StoreError> {
+async fn end(api: &Api, user: &UserId, sign_in: &SignInToken) -> Result<(), StoreError> {
     let mut transaction = api.store.begin().await?;
     transaction.end_sign_in(sign_in).await?;
     let name = name_as_it_stands(&mut transaction, user).await?;

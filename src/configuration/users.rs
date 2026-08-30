@@ -81,6 +81,21 @@ pub(crate) struct NewUser {
     pub(crate) is_system_administrator: bool,
 }
 
+/// What can stop a user record from being written under a given name.
+///
+/// The two are different in kind, and the type says so rather than leaving it to whoever
+/// writes the next `match`: one is a refusal a human acts on by choosing another name, the
+/// other is a fault. Folding the first into [`StoreError`] would let a caller who forgot the
+/// arm answer "that name is taken" with "VoxLoop could not answer that just now".
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum NameRefused {
+    #[error("the username {username:?} is already taken")]
+    Taken { username: String },
+
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
 /// What a local password check needs, and nothing more.
 pub(crate) struct StoredPassword {
     pub(crate) user: UserId,
@@ -93,7 +108,7 @@ pub(crate) struct StoredPassword {
 #[async_trait]
 pub(crate) trait Users {
     /// Create a user, and answer with the id nothing will ever change.
-    async fn create_user(&mut self, new: NewUser) -> Result<UserId, StoreError>;
+    async fn create_user(&mut self, new: NewUser) -> Result<UserId, NameRefused>;
 
     /// Read a user by the id that identifies them.
     async fn user(&mut self, id: &UserId) -> Result<Option<User>, StoreError>;
@@ -105,7 +120,7 @@ pub(crate) trait Users {
     /// perfectly until the first rename — and a property with nothing to exercise it is not
     /// tested at all.
     #[allow(dead_code)]
-    async fn rename_user(&mut self, id: &UserId, username: &str) -> Result<(), StoreError>;
+    async fn rename_user(&mut self, id: &UserId, username: &str) -> Result<(), NameRefused>;
 
     /// The stored password a name resolves to, for whoever is entitled to check it.
     async fn stored_password(
@@ -121,7 +136,7 @@ pub(crate) trait Users {
 
 #[async_trait]
 impl Users for Transaction {
-    async fn create_user(&mut self, new: NewUser) -> Result<UserId, StoreError> {
+    async fn create_user(&mut self, new: NewUser) -> Result<UserId, NameRefused> {
         let id = UserId(secrets::unguessable());
 
         sqlx::query(
@@ -163,7 +178,7 @@ impl Users for Transaction {
         }))
     }
 
-    async fn rename_user(&mut self, id: &UserId, username: &str) -> Result<(), StoreError> {
+    async fn rename_user(&mut self, id: &UserId, username: &str) -> Result<(), NameRefused> {
         sqlx::query("UPDATE users SET username = ? WHERE id = ?")
             .bind(username)
             .bind(&id.0)
@@ -204,20 +219,17 @@ impl Users for Transaction {
 }
 
 /// Tell a name that is already taken apart from a store that could not answer.
-///
-/// One is a refusal a human can act on; the other is a fault. Reporting the first as the
-/// second is how "that name is taken" becomes "something went wrong".
-fn taken_or_unavailable(error: sqlx::Error, username: &str) -> StoreError {
+fn taken_or_unavailable(error: sqlx::Error, username: &str) -> NameRefused {
     let taken = error
         .as_database_error()
         .is_some_and(sqlx::error::DatabaseError::is_unique_violation);
 
     if taken {
-        StoreError::UsernameTaken {
+        NameRefused::Taken {
             username: username.to_owned(),
         }
     } else {
-        unavailable(error)
+        NameRefused::Store(unavailable(error))
     }
 }
 
@@ -288,7 +300,7 @@ mod tests {
         let refusal = transaction.create_user(a_new_user("FLIGHT")).await;
 
         assert!(
-            matches!(refusal, Err(StoreError::UsernameTaken { .. })),
+            matches!(refusal, Err(NameRefused::Taken { .. })),
             "expected the name to be refused, got {refusal:?}",
         );
     }

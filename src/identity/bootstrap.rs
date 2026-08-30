@@ -78,6 +78,17 @@ impl Bootstrap {
             .clone()
     }
 
+    /// Whether this is the code, without spending it.
+    ///
+    /// This is what lets the caller refuse a wrong code before doing anything else at all,
+    /// so that nothing about the deployment can be learned by presenting one.
+    pub(crate) fn is_the_code(&self, presented: &str) -> bool {
+        let held = self.code.lock().unwrap_or_else(|held| held.into_inner());
+
+        held.as_deref()
+            .is_some_and(|code| secrets::are_the_same(presented, code))
+    }
+
     /// Spend the code, if this is it.
     ///
     /// A wrong guess does not spend it. Otherwise anyone who could reach the box could put
@@ -177,6 +188,26 @@ mod tests {
 
         assert_eq!(bootstrap.redeem(&code), Redemption::Redeemed);
         assert_eq!(bootstrap.redeem(&code), Redemption::Refused);
+    }
+
+    #[tokio::test]
+    async fn says_whether_a_code_is_the_one_without_spending_it() {
+        let (_directory, store) = a_temporary_store().await;
+        let bootstrap = Bootstrap::mint_unless_administered(&store)
+            .await
+            .expect("the store to answer")
+            .expect("a code");
+        let code = code_of(&bootstrap);
+
+        assert!(!bootstrap.is_the_code("not the code"));
+        assert!(bootstrap.is_the_code(&code));
+        assert!(bootstrap.is_the_code(&code), "asking spent the code");
+
+        bootstrap.redeem(&code);
+        assert!(
+            !bootstrap.is_the_code(&code),
+            "a spent code is still the code"
+        );
     }
 
     #[tokio::test]

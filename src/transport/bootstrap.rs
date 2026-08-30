@@ -18,10 +18,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use super::rate_limit::Admission;
 use super::{Api, answers};
 use crate::configuration::{
-    AuditEntry, AuditEvent, AuditLog, NewUser, PasswordHash, StoreError, Users,
+    AuditEntry, AuditEvent, AuditLog, NameRefused, NewUser, PasswordHash, StoreError, Users,
 };
 use crate::identity::{Bootstrap, PasswordRefused, Redemption};
 use crate::telemetry::module;
@@ -40,7 +39,7 @@ pub(super) async fn redeem(
     ConnectInfo(source): ConnectInfo<SocketAddr>,
     Json(presented): Json<FirstAdministrator>,
 ) -> Response {
-    if api.limits.admit(source.ip()) == Admission::Throttled {
+    if !api.admits(&source) {
         return answers::too_many_attempts();
     }
 
@@ -49,24 +48,38 @@ pub(super) async fn redeem(
         return answers::refusal("This deployment already has a system administrator.");
     };
 
-    // Hashing before redeeming, so that a password under the floor does not spend the code
-    // and leave the box unopenable until it is restarted.
-    let hashed = match api.identity.hash_password(&presented.password) {
-        Ok(hashed) => hashed,
-        Err(refusal @ PasswordRefused::TooShort) => return answers::cannot(&refusal.to_string()),
-        Err(PasswordRefused::Unusable) => {
-            tracing::error!(target: module::IDENTITY, "a password could not be hashed");
-            return answers::cannot("That password could not be stored.");
-        }
-    };
-
-    match make_the_first_administrator(&api, bootstrap, presented, hashed, &source).await {
-        Ok(answer) => answer,
-        Err(error) => answers::unavailable(&error),
-    }
+    answers::or_unavailable(make_the_first_administrator(&api, bootstrap, presented, &source).await)
 }
 
 async fn make_the_first_administrator(
+    api: &Api,
+    bootstrap: &Bootstrap,
+    presented: FirstAdministrator,
+    source: &SocketAddr,
+) -> Result<Response, StoreError> {
+    // The code is checked before anything else happens, and checking does not spend it.
+    // Everything after this point can tell the caller something about the deployment — that
+    // a name is taken, that a password is too short — and none of it is anybody's to learn
+    // without the code that was written to the server's own log.
+    if !bootstrap.is_the_code(&presented.code) {
+        return refuse(api, &presented.username, source).await;
+    }
+
+    let hashed = match api.identity.hash_password(&presented.password) {
+        Ok(hashed) => hashed,
+        Err(refusal @ PasswordRefused::TooShort) => {
+            return Ok(answers::cannot(&refusal.to_string()));
+        }
+        Err(PasswordRefused::Unusable) => {
+            tracing::error!(target: module::IDENTITY, "a password could not be hashed");
+            return Ok(answers::cannot("That password could not be stored."));
+        }
+    };
+
+    create(api, bootstrap, presented, hashed, source).await
+}
+
+async fn create(
     api: &Api,
     bootstrap: &Bootstrap,
     presented: FirstAdministrator,
@@ -96,21 +109,15 @@ async fn make_the_first_administrator(
 
     let user = match created {
         Ok(user) => user,
-        Err(taken @ StoreError::UsernameTaken { .. }) => {
-            return Ok(answers::cannot(&taken.to_string()));
-        }
-        Err(error) => return Err(error),
+        Err(taken @ NameRefused::Taken { .. }) => return Ok(answers::cannot(&taken.to_string())),
+        Err(NameRefused::Store(error)) => return Err(error),
     };
 
+    // Between the check at the top and here, another request may have spent the code. It is
+    // the same refusal to whoever sent this one.
     if bootstrap.redeem(&presented.code) == Redemption::Refused {
-        tracing::warn!(
-            target: module::IDENTITY,
-            source = %source.ip(),
-            "a bootstrap code was presented and refused"
-        );
-        return Ok(answers::refusal(
-            "That is not this server's bootstrap code.",
-        ));
+        drop(transaction);
+        return refuse(api, &presented.username, source).await;
     }
 
     transaction
@@ -118,7 +125,7 @@ async fn make_the_first_administrator(
             event: AuditEvent::BootstrapRedeemed,
             actor: Some(user.clone()),
             actor_name: presented.username,
-            source: Some(source.ip().to_string()),
+            source: Some(source.ip()),
         })
         .await?;
     transaction.commit().await?;
@@ -130,4 +137,34 @@ async fn make_the_first_administrator(
     );
 
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Refuse a code, and record that somebody tried.
+///
+/// Refused administration writes are audited ([ADR-0054]), and this is the write that makes
+/// an administrator. It needs a transaction of its own because the refusal has abandoned
+/// whatever the attempt had open.
+///
+/// [ADR-0054]: ../../../docs/adr/0054-every-operation-declares-its-authorisation.md
+async fn refuse(api: &Api, submitted: &str, source: &SocketAddr) -> Result<Response, StoreError> {
+    tracing::warn!(
+        target: module::IDENTITY,
+        source = %source.ip(),
+        "a bootstrap code was presented and refused"
+    );
+
+    let mut transaction = api.store.begin().await?;
+    transaction
+        .record(AuditEntry {
+            event: AuditEvent::BootstrapRefused,
+            actor: None,
+            actor_name: submitted.to_owned(),
+            source: Some(source.ip()),
+        })
+        .await?;
+    transaction.commit().await?;
+
+    Ok(answers::refusal(
+        "That is not this server's bootstrap code.",
+    ))
 }
