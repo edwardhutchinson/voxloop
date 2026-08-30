@@ -41,8 +41,12 @@ scripts/dev --fresh    # the same, from an empty store
 It writes a self-signed certificate, a deployment file and a store under `.dev/`, redeems
 the bootstrap code itself, and prints the URL and a password generated for that store. Set
 `VOXLOOP_DEV_PASSWORD` to keep one across `--fresh` runs, `VOXLOOP_DEV_PORT` to move the
-port. Accept the certificate warning before signing in — the sign-in cookie is `Secure` and
-the browser will not keep it otherwise.
+port.
+
+Open the URL it prints exactly as printed — **`https://127.0.0.1:8443`**. Typing the port on
+its own gets you `http`, which nothing here speaks, and `localhost` resolves to IPv6 first on
+most boxes while the binary listens on one address. Accept the certificate warning before
+signing in: the sign-in cookie is `Secure` and the browser will not keep it otherwise.
 
 It is a development launcher and not a way to provision anything: nothing it writes belongs
 on a machine anybody else can reach, which is why `.dev/` is ignored by git.

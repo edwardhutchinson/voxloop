@@ -21,7 +21,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 DEV=.dev
 PORT="${VOXLOOP_DEV_PORT:-8443}"
 ADMINISTRATOR="${VOXLOOP_DEV_ADMINISTRATOR:-root}"
-AT="https://localhost:$PORT"
+# 127.0.0.1 rather than localhost, deliberately: `localhost` resolves to ::1 first on most
+# boxes, the binary listens on one address, and a browser that tries IPv6 loopback against an
+# IPv4 listener reports the site as refusing the connection. The address is unambiguous.
+AT="https://127.0.0.1:$PORT"
 LOG="$DEV/server.log"
 
 needs() {
@@ -46,25 +49,42 @@ mkdir -p "$DEV"
 
 # TLS terminates in the binary and there is no reverse proxy anywhere in a VoxLoop
 # deployment, so it will not start without a certificate — on a LAN or on a laptop alike.
-if [ ! -f "$DEV/certificate.pem" ]; then
-	echo "voxloop: making a self-signed certificate for localhost"
+#
+# It covers the address as well as the name, because the address is what gets typed: a
+# certificate good only for `localhost` adds a name mismatch on top of the self-signed
+# warning. A certificate made before that was true is replaced rather than kept.
+covers_the_address() {
+	[ -f "$DEV/certificate.pem" ] &&
+		openssl x509 -noout -text -in "$DEV/certificate.pem" 2>/dev/null |
+		grep -q 'IP Address:127.0.0.1'
+}
+
+if ! covers_the_address; then
+	echo "voxloop: making a self-signed certificate for localhost and 127.0.0.1"
 	openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-		-subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" \
+		-subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
 		-keyout "$DEV/private-key.pem" -out "$DEV/certificate.pem" 2>/dev/null
 fi
 
 # Written every run, so changing VOXLOOP_DEV_PORT is enough to move the port.
+#
+# Absolute paths, because a deployment file says where things are and the binary resolves
+# what it says against its own working directory rather than against the file. Relative ones
+# here would put the store and the certificate wherever the script happened to be started
+# from, which is a deployment reading somebody else's data and looking like it worked.
+HERE=$(cd "$DEV" && pwd)
+
 cat > "$DEV/voxloop.toml" <<TOML
 # Written by scripts/dev. Edit that, not this.
 [listen]
 address = "127.0.0.1:$PORT"
 
 [tls]
-certificate = "certificate.pem"
-private_key = "private-key.pem"
+certificate = "$HERE/certificate.pem"
+private_key = "$HERE/private-key.pem"
 
 [store]
-path = "voxloop.sqlite"
+path = "$HERE/voxloop.sqlite"
 
 [log]
 level = "info"
@@ -135,14 +155,19 @@ administer() {
 banner() {
 	cat <<BANNER
 
-    ┌────────────────────────────────────────────────────────
+    ┌──────────────────────────────────────────────────────────
     │ VoxLoop is at  $AT
     │ Sign in as     $1
     │ Password       $2
     │
+    │ Open that URL as it is written, https and all. Typing the
+    │ port on its own gets you http, which nothing here speaks,
+    │ and typing localhost may get you IPv6, which nothing here
+    │ is listening on.
+    │
     │ Accept the certificate warning before signing in: the
     │ sign-in cookie is Secure and will not be kept otherwise.
-    └────────────────────────────────────────────────────────
+    └──────────────────────────────────────────────────────────
 
 BANNER
 }
