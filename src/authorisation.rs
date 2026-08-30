@@ -53,6 +53,11 @@ pub(crate) enum Requirement {
     /// rule — each of those would be a second lookup that could disagree with the first, and
     /// then a loop's column would never be the whole answer to *who may hear this*.
     ///
+    /// `rung` is one of `monitor`, `emit` and `control` — the three the operations in
+    /// `docs/spec/api-surface.md` ask for. `none` is expressible because a rung is a
+    /// permission and a permission is the four, and it demands nothing of anybody: an
+    /// operation wanting that is `Session`, and there is none carrying this.
+    ///
     /// [ADR-0011]: ../../docs/adr/0011-a-permission-is-one-cell-on-the-grid.md
     Grid { rung: Permission, on: LoopId },
 }
@@ -169,25 +174,33 @@ async fn carries(
     rung: Permission,
     on: &LoopId,
 ) -> Result<Outcome, StoreError> {
-    let Some(role) = presented.acting_role else {
+    let (Some(role), Some(token)) = (presented.acting_role, presented.sign_in) else {
         return Ok(Outcome::Refused);
     };
 
-    // Resolved the way every other requirement resolves a caller: from the store, this
-    // request. A service principal is the other principal this requirement will answer for,
-    // and it arrives with the token that names it (#57).
-    let Outcome::Permitted(caller) = signed_in(presented.sign_in, store, |_| true).await? else {
-        return Ok(Outcome::Refused);
-    };
-
+    // One transaction for both reads: who is calling, and what their role holds. A second one
+    // would let the two answers come from two different moments, on the requirement that runs
+    // per socket message.
     let mut transaction = store.begin().await?;
-    let held = transaction.held_by(&role, on).await;
+    let read = async {
+        // Resolving the principal from a sign-in is *how a user acts*, not what this
+        // requirement is about. The other principal it answers for is a service one, which
+        // resolves from the token that names it and reaches this same lookup unchanged (#57).
+        let Some(user) = whoever_holds(&mut transaction, &token).await? else {
+            return Ok(None);
+        };
+
+        Ok(Some((user, transaction.held_by(&role, on).await?)))
+    }
+    .await;
     transaction.roll_back().await?;
 
-    Ok(if held?.carries(rung) {
-        Outcome::Permitted(caller)
-    } else {
-        Outcome::Refused
+    Ok(match read? {
+        Some((user, held)) if held.carries(rung) => Outcome::Permitted(Caller::User {
+            id: user.id,
+            sign_in: token,
+        }),
+        _ => Outcome::Refused,
     })
 }
 
@@ -205,14 +218,7 @@ async fn signed_in(
     };
 
     let mut transaction = store.begin().await?;
-    let resolved = async {
-        let Some(id) = transaction.holder_of(&token).await? else {
-            return Ok(None);
-        };
-
-        transaction.user(&id).await
-    }
-    .await;
+    let resolved = whoever_holds(&mut transaction, &token).await;
     transaction.roll_back().await?;
 
     Ok(match resolved? {
@@ -222,6 +228,18 @@ async fn signed_in(
         }),
         _ => Outcome::Refused,
     })
+}
+
+/// The user this sign-in names, as the store has them now.
+async fn whoever_holds(
+    transaction: &mut crate::configuration::Transaction,
+    token: &SignInToken,
+) -> Result<Option<crate::configuration::User>, StoreError> {
+    let Some(id) = transaction.holder_of(token).await? else {
+        return Ok(None);
+    };
+
+    transaction.user(&id).await
 }
 
 #[cfg(test)]

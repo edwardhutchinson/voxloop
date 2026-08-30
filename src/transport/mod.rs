@@ -2725,6 +2725,17 @@ mod tests {
         );
     }
 
+    /// The id of the record a body names, where the body lists several of them.
+    fn id_of(name: &str, body: &str) -> String {
+        let before = body
+            .split(&format!(r#""name":"{name}""#))
+            .next()
+            .expect("the record");
+        let at = before.rfind("\"id\":\"").expect("an id in the answer") + 6;
+
+        before[at..].split('"').next().expect("the id").to_owned()
+    }
+
     /// Every permission in a body the console answered with, in the order it answered them.
     fn permissions_in(body: &str) -> Vec<String> {
         body.split("\"permission\":\"")
@@ -2845,11 +2856,11 @@ mod tests {
         assert_eq!(write.target_name, "Flight Director on FLIGHT");
         assert_eq!(
             write.before.as_ref().map(Snapshot::as_str),
-            Some("role=Flight Director loop=FLIGHT permission=emit")
+            Some("role=Flight Director loop=FLIGHT permission=emit enforced=yes")
         );
         assert_eq!(
             write.after.as_ref().map(Snapshot::as_str),
-            Some("role=Flight Director loop=FLIGHT permission=control")
+            Some("role=Flight Director loop=FLIGHT permission=control enforced=yes")
         );
         assert_eq!(
             write.blast_radius,
@@ -2910,6 +2921,42 @@ mod tests {
         assert_eq!(
             write.after.as_ref().map(Snapshot::as_str),
             Some("loop=FLIGHT reviewed=yes")
+        );
+    }
+
+    /// The other half of v1 §9's *set or explicitly dismissed each role's cell*: an
+    /// administrator who worked down a loop's column and ruled on every role has ruled on
+    /// the loop, and does not have to find a second act to make what they set take effect.
+    #[tokio::test]
+    async fn ruling_on_every_role_of_a_column_rules_on_the_loop() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        let flight = box_of.a_loop_called(&held, "FLIGHT").await;
+        let column = box_of
+            .get_holding(&held, &format!("/api/loops/{flight}/grid"))
+            .await;
+        let observer = id_of("Observer", &column.body);
+
+        box_of.sets(&held, &role, &flight, "control").await;
+        assert!(
+            box_of
+                .get_holding(&held, &format!("/api/loops/{flight}"))
+                .await
+                .body
+                .contains(r#""unreviewed":true"#),
+            "one cell ruled on a column another role was still unruled on"
+        );
+
+        box_of.sets(&held, &observer, &flight, "monitor").await;
+
+        assert!(
+            box_of
+                .get_holding(&held, &format!("/api/loops/{flight}"))
+                .await
+                .body
+                .contains(r#""unreviewed":false"#),
+            "a column with every role ruled on was still unreviewed"
         );
     }
 

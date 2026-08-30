@@ -388,13 +388,20 @@ impl Record for Cell {
         format!("{} on {}", self.role.name, self.held_on.name)
     }
 
-    /// A cell as it stood: the pair, and the one value it holds.
+    /// A cell as it stood: the pair, the one value it holds, and whether it is being
+    /// enforced.
+    ///
+    /// The review state is a fact about the loop rather than about the cell, and it is here
+    /// anyway, because without it a `control` granted on an unreviewed loop and the same
+    /// `control` on a ruled-on one are the same line saying two different things — and the
+    /// cell write that rules on the last of a column would record no sign that it had.
     fn snapshot(&self) -> Snapshot {
         Snapshot(format!(
-            "role={} loop={} permission={}",
+            "role={} loop={} permission={} enforced={}",
             self.role.name,
             self.held_on.name,
             self.permission.as_str(),
+            yes_or_no(!self.held_on.is_unreviewed),
         ))
     }
 }

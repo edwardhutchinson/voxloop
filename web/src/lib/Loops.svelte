@@ -96,6 +96,14 @@
 		await read();
 	}
 
+	// Read again on the way back: ruling on a loop's column clears its unreviewed mark, and
+	// this list is where that mark is shown. Nothing on a role's page changes the role list,
+	// which is why that one comes back without a read.
+	function back() {
+		showing = null;
+		read();
+	}
+
 	async function commit() {
 		const { act } = confirming;
 		confirming = null;
@@ -105,7 +113,7 @@
 </script>
 
 {#if showing}
-	<LoopPage held={showing} onback={() => ((showing = null), read())} />
+	<LoopPage held={showing} onback={back} />
 {:else}
 	<section>
 		<header>

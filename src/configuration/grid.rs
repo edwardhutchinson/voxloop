@@ -15,9 +15,9 @@
 //!   difference exists so that an administrator can be prompted about a loop nobody has
 //!   ruled on ([ADR-0015]), and a prompt is not an input to a permission decision.
 //! - **An unreviewed loop is enforced as `none` on every rung**, whatever its cells say
-//!   (v1 §3). [`Grid::cell`] — the evaluator's lookup — applies that; the reads the console
-//!   works from do not, because an administrator ruling on a column has to see what they
-//!   have set so far.
+//!   (v1 §3). [`Grid::held_by`] — the evaluator's lookup — applies that; the reads the
+//!   console works from do not, because an administrator ruling on a column has to see what
+//!   they have set so far.
 //!
 //! The console reads this one row or one column at a time ([ADR-0015]): a role page is the
 //! row and a loop page is the column. Both are the same list of cells in a different order,
@@ -147,6 +147,11 @@ pub(crate) trait Grid {
     /// is deliberately the same write as granting one — a cell always holds exactly one of
     /// the four, and the row's presence carries no meaning of its own.
     ///
+    /// Where it leaves no role unruled on that loop, the loop's `unreviewed` mark is cleared
+    /// with it: an administrator who has ruled on every cell of a column has ruled on the
+    /// column (v1 §9), and a mark left standing there would enforce `none` on permissions
+    /// somebody had deliberately set.
+    ///
     /// A pair naming a role or a loop that is not there is no change rather than a refusal,
     /// exactly as a write against any other id nobody holds is.
     async fn set_cell(
@@ -156,19 +161,23 @@ pub(crate) trait Grid {
         permission: Permission,
     ) -> Result<Option<Change<Cell>>, StoreError>;
 
-    /// A role's row: every loop in the base order, with what this role holds on it.
+    /// A role's row: the role, and every loop in the base order with what it holds on each.
     ///
     /// This is a role page ([ADR-0015]), and it answers *what can this role reach*. It is
     /// every loop rather than the ones with cells, because a row read as a list has to show
-    /// the loops this role cannot reach for the list to mean anything.
+    /// the loops this role cannot reach for the list to mean anything — and the role comes
+    /// back with them, because a deployment with no loops still has a row to render.
     ///
     /// [ADR-0015]: ../../../docs/adr/0015-the-admin-console-reads-one-row-at-a-time.md
-    async fn the_row_of(&mut self, role: &RoleId) -> Result<Option<Vec<Cell>>, StoreError>;
+    async fn the_row_of(&mut self, role: &RoleId) -> Result<Option<(Role, Vec<Cell>)>, StoreError>;
 
-    /// A loop's column: every role by name, with what it holds on this loop.
+    /// A loop's column: the loop, and every role by name with what it holds on it.
     ///
     /// This is a loop page, and it answers *who may hear this loop*.
-    async fn the_column_of(&mut self, held_on: &LoopId) -> Result<Option<Vec<Cell>>, StoreError>;
+    async fn the_column_of(
+        &mut self,
+        held_on: &LoopId,
+    ) -> Result<Option<(Loop, Vec<Cell>)>, StoreError>;
 
     /// Every cell on the deployment, by role and then by the base loop order.
     ///
@@ -241,6 +250,8 @@ impl Grid for Transaction {
         .await
         .map_err(unavailable)?;
 
+        self.rule_on_a_complete_column(held_on).await?;
+
         Ok(Some(Change {
             before,
             // Read back through the same transaction, so the entry records what the store
@@ -249,7 +260,7 @@ impl Grid for Transaction {
         }))
     }
 
-    async fn the_row_of(&mut self, role: &RoleId) -> Result<Option<Vec<Cell>>, StoreError> {
+    async fn the_row_of(&mut self, role: &RoleId) -> Result<Option<(Role, Vec<Cell>)>, StoreError> {
         let Some(role) = self.role(role).await? else {
             return Ok(None);
         };
@@ -267,7 +278,8 @@ impl Grid for Transaction {
         .await
         .map_err(unavailable)?;
 
-        rows.iter()
+        let cells: Vec<Cell> = rows
+            .iter()
             .map(|row| {
                 Ok(Cell {
                     role: role.clone(),
@@ -275,11 +287,15 @@ impl Grid for Transaction {
                     permission: a_permission(row, "permission")?,
                 })
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some)
+            .collect::<Result<_, StoreError>>()?;
+
+        Ok(Some((role, cells)))
     }
 
-    async fn the_column_of(&mut self, held_on: &LoopId) -> Result<Option<Vec<Cell>>, StoreError> {
+    async fn the_column_of(
+        &mut self,
+        held_on: &LoopId,
+    ) -> Result<Option<(Loop, Vec<Cell>)>, StoreError> {
         let Some(held_on) = self.a_loop(held_on).await? else {
             return Ok(None);
         };
@@ -297,7 +313,8 @@ impl Grid for Transaction {
         .await
         .map_err(unavailable)?;
 
-        rows.iter()
+        let cells: Vec<Cell> = rows
+            .iter()
             .map(|row| {
                 Ok(Cell {
                     role: a_role(row),
@@ -305,44 +322,39 @@ impl Grid for Transaction {
                     permission: a_permission(row, "permission")?,
                 })
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some)
+            .collect::<Result<_, StoreError>>()?;
+
+        Ok(Some((held_on, cells)))
     }
 
+    /// Composed from the two record reads and the cells that are set, rather than from a
+    /// join of its own.
+    ///
+    /// A join would have to name both records' columns in one row and so could not use the
+    /// one function that turns a row into a loop or into a role — and a second place that
+    /// builds a record is the one a later column is forgotten in. The cross product is small
+    /// by construction: the grid is roughly fifteen roles against twenty loops.
     async fn the_whole_grid(&mut self) -> Result<Vec<Cell>, StoreError> {
-        let rows = sqlx::query(
-            "SELECT roles.id AS role_id, roles.name AS role_name, \
-                    roles.max_occupants AS max_occupants, \
-                    loops.id AS loop_id, loops.name AS loop_name, \
-                    loops.is_unreviewed AS is_unreviewed, \
-                    COALESCE(grid_cells.permission, 'none') AS permission \
-             FROM roles \
-             CROSS JOIN loops \
-             LEFT JOIN grid_cells \
-               ON grid_cells.role_id = roles.id AND grid_cells.loop_id = loops.id \
-             ORDER BY roles.name, loops.position, loops.created_at, loops.id",
-        )
-        .fetch_all(self.connection())
-        .await
-        .map_err(unavailable)?;
+        let roles = self.roles().await?;
+        let loops = self.loops().await?;
+        let set = self.the_cells_that_are_set().await?;
 
-        rows.iter()
-            .map(|row| {
-                Ok(Cell {
-                    role: Role {
-                        id: RoleId::known(row.get("role_id")),
-                        name: row.get("role_name"),
-                        max_occupants: super::roles::a_limit(row),
-                    },
-                    held_on: Loop {
-                        id: LoopId::known(row.get("loop_id")),
-                        name: row.get("loop_name"),
-                        is_unreviewed: row.get::<i64, _>("is_unreviewed") != 0,
-                    },
-                    permission: a_permission(row, "permission")?,
-                })
-            })
-            .collect()
+        let mut grid = Vec::with_capacity(roles.len() * loops.len());
+        for role in &roles {
+            for held_on in &loops {
+                grid.push(Cell {
+                    role: role.clone(),
+                    held_on: held_on.clone(),
+                    // An absent cell is `none`, here as everywhere.
+                    permission: set
+                        .get(&(role.id.clone(), held_on.id.clone()))
+                        .copied()
+                        .unwrap_or_default(),
+                });
+            }
+        }
+
+        Ok(grid)
     }
 
     async fn dismiss_unreviewed(
@@ -370,11 +382,9 @@ impl Grid for Transaction {
         .await
         .map_err(unavailable)?;
 
-        sqlx::query("UPDATE loops SET is_unreviewed = 0 WHERE id = ?")
-            .bind(held_on.as_str())
-            .execute(self.connection())
-            .await
-            .map_err(unavailable)?;
+        // Nothing is left unruled now, so this clears the mark — the same statement a cell
+        // write ends with, because the two acts leave the column in the same state.
+        self.rule_on_a_complete_column(held_on).await?;
 
         Ok(Some(Change {
             before,
@@ -414,9 +424,66 @@ impl Grid for Transaction {
     }
 }
 
-/// The permission a column of a row holds.
-fn a_permission(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Permission, StoreError> {
-    let word: String = row.get(column);
+impl Transaction {
+    /// Clear a loop's `unreviewed` mark, where no role is left unruled on it.
+    ///
+    /// A loop is unreviewed until an administrator has **set or explicitly dismissed each
+    /// role's cell** (v1 §9), so this is the first half of that sentence: an administrator
+    /// who ruled on every role has ruled on the column, and the mark is an answered prompt
+    /// rather than a standing one.
+    ///
+    /// It is still cleared **per loop, never per cell** ([ADR-0015]): setting one cell does
+    /// nothing to it while any other role is unruled, and what clears it is the state of the
+    /// whole column rather than the write that happened to complete it.
+    ///
+    /// [ADR-0015]: ../../../docs/adr/0015-the-admin-console-reads-one-row-at-a-time.md
+    async fn rule_on_a_complete_column(&mut self, held_on: &LoopId) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE loops SET is_unreviewed = 0 WHERE id = ? AND NOT EXISTS ( \
+                 SELECT 1 FROM roles WHERE NOT EXISTS ( \
+                     SELECT 1 FROM grid_cells \
+                     WHERE grid_cells.role_id = roles.id AND grid_cells.loop_id = ? \
+                 ) \
+             )",
+        )
+        .bind(held_on.as_str())
+        .bind(held_on.as_str())
+        .execute(self.connection())
+        .await
+        .map_err(unavailable)?;
+
+        Ok(())
+    }
+
+    /// Every cell somebody has ruled on, by the pair that identifies it.
+    ///
+    /// Only the cells that are *set*: what an absent one means is a rule rather than a row,
+    /// and it is applied where the grid is assembled.
+    async fn the_cells_that_are_set(
+        &mut self,
+    ) -> Result<std::collections::HashMap<(RoleId, LoopId), Permission>, StoreError> {
+        let rows = sqlx::query("SELECT role_id, loop_id, permission FROM grid_cells")
+            .fetch_all(self.connection())
+            .await
+            .map_err(unavailable)?;
+
+        rows.iter()
+            .map(|row| {
+                Ok((
+                    (
+                        RoleId::known(row.get("role_id")),
+                        LoopId::known(row.get("loop_id")),
+                    ),
+                    a_permission(row, "permission")?,
+                ))
+            })
+            .collect()
+    }
+}
+
+/// The permission a row holds, from the column it is held in.
+fn a_permission(row: &sqlx::sqlite::SqliteRow, held_as: &str) -> Result<Permission, StoreError> {
+    let word: String = row.get(held_as);
 
     Permission::named(&word).ok_or_else(|| unavailable(Unreadable(word)))
 }
@@ -619,6 +686,69 @@ mod tests {
         );
     }
 
+    /// A loop is unreviewed until an administrator has **set or explicitly dismissed each
+    /// role's cell** (v1 §9), so ruling on every role rules on the column. It is still per
+    /// loop: nothing happens to the mark while any role is left unruled.
+    #[tokio::test]
+    async fn setting_the_last_unruled_cell_rules_on_the_column() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let flight_director = transaction
+            .create_role(NewRole {
+                name: "Flight Director".to_owned(),
+                max_occupants: Some(1),
+            })
+            .await
+            .expect("the role");
+        let observer = transaction
+            .roles()
+            .await
+            .expect("a read")
+            .into_iter()
+            .find(|role| role.name == "Observer")
+            .expect("the seeded role")
+            .id;
+        let held_on = transaction.create_loop("FLIGHT").await.expect("the loop");
+
+        transaction
+            .set_cell(&flight_director, &held_on, Permission::Control)
+            .await
+            .expect("the cell to be set");
+
+        assert!(
+            transaction
+                .a_loop(&held_on)
+                .await
+                .expect("a read")
+                .expect("the loop")
+                .is_unreviewed,
+            "one cell ruled on a column another role is still unruled on"
+        );
+
+        transaction
+            .set_cell(&observer, &held_on, Permission::Monitor)
+            .await
+            .expect("the cell to be set");
+
+        assert!(
+            !transaction
+                .a_loop(&held_on)
+                .await
+                .expect("a read")
+                .expect("the loop")
+                .is_unreviewed,
+            "a column with every role ruled on was still unreviewed"
+        );
+        assert_eq!(
+            transaction
+                .held_by(&flight_director, &held_on)
+                .await
+                .expect("the lookup to answer"),
+            Permission::Control,
+            "permissions somebody set were still being enforced as none"
+        );
+    }
+
     /// Dismissing is **per loop**: it clears that loop's mark and records a deliberate
     /// `none` for every role nobody ruled on, leaving the cells that were set alone.
     #[tokio::test]
@@ -657,7 +787,7 @@ mod tests {
             "dismissing one loop's mark cleared another's"
         );
 
-        let column = transaction
+        let (_, column) = transaction
             .the_column_of(&flight)
             .await
             .expect("the column to be read")
@@ -692,12 +822,13 @@ mod tests {
             .await
             .expect("the cell to be set");
 
-        let row = transaction
+        let (read, row) = transaction
             .the_row_of(&role)
             .await
             .expect("the row to be read")
             .expect("a row");
 
+        assert_eq!(read.name, "GNC Officer");
         let held: Vec<(&str, Permission)> = row
             .iter()
             .map(|cell| (cell.held_on.name.as_str(), cell.permission))
@@ -722,12 +853,13 @@ mod tests {
             .await
             .expect("the cell to be set");
 
-        let column = transaction
+        let (read, column) = transaction
             .the_column_of(&held_on)
             .await
             .expect("the column to be read")
             .expect("a column");
 
+        assert_eq!(read.name, "FLIGHT");
         let held: Vec<(&str, Permission)> = column
             .iter()
             .map(|cell| (cell.role.name.as_str(), cell.permission))
@@ -798,16 +930,12 @@ mod tests {
             .await
             .expect("the role to be deleted");
 
-        assert_eq!(
-            transaction
-                .the_column_of(&held_on)
-                .await
-                .expect("the column to be read")
-                .expect("a column")
-                .len(),
-            1,
-            "a deleted role left its cells behind"
-        );
+        let (_, column) = transaction
+            .the_column_of(&held_on)
+            .await
+            .expect("the column to be read")
+            .expect("a column");
+        assert_eq!(column.len(), 1, "a deleted role left its cells behind");
     }
 
     #[tokio::test]

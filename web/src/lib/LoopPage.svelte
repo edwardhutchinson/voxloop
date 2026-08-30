@@ -74,7 +74,8 @@
 	{#if column?.loop.unreviewed}
 		<p class="unreviewed" role="status">
 			Nobody has ruled on this loop. Every cell below is enforced as <strong>none</strong>
-			until somebody does, whatever it is set to.
+			until somebody does, whatever it is set to — either by setting every role's
+			permission here, or by dismissing the mark in one act.
 			<button
 				onclick={() =>
 					(confirming = {

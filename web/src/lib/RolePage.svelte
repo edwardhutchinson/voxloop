@@ -83,13 +83,14 @@
 						<td>
 							{cell.loop.name}
 							<!-- An unreviewed loop is enforced as `none` on every rung whatever
-							     its cells say, so a value set here confers nothing until
-							     somebody rules on that loop — which is done per loop, from the
-							     loop's own page. -->
+							     its cells say, so a value set here confers nothing until that
+							     loop is ruled on — which happens when every role's cell on it
+							     has been set, or when somebody dismisses the mark from the
+							     loop's own page. Either way it is per loop, never per cell. -->
 							{#if cell.loop.unreviewed}
 								<span class="note">
-									unreviewed — enforced as none until this loop is ruled on, from its
-									loop page
+									unreviewed — enforced as none until every role's cell on this loop
+									is set, or the mark is dismissed from its loop page
 								</span>
 							{/if}
 						</td>

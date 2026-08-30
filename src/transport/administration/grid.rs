@@ -133,12 +133,11 @@ pub(in crate::transport) async fn row(State(api): State<Api>, Path(id): Path<Str
 
 async fn read_the_row(api: &Api, role: &RoleId) -> Result<Response, StoreError> {
     let mut transaction = api.store.begin().await?;
-    let read = async {
-        let Some(cells) = transaction.the_row_of(role).await? else {
-            return Ok(None);
-        };
+    let read = transaction.the_row_of(role).await;
+    transaction.roll_back().await?;
 
-        Ok(transaction.role(role).await?.map(|role| RowAsRead {
+    let read = read.map(|found| {
+        found.map(|(role, cells)| RowAsRead {
             role: RoleAsRead::of(&role),
             cells: cells
                 .iter()
@@ -147,10 +146,8 @@ async fn read_the_row(api: &Api, role: &RoleId) -> Result<Response, StoreError> 
                     permission: cell.permission.as_str(),
                 })
                 .collect(),
-        }))
-    }
-    .await;
-    transaction.roll_back().await?;
+        })
+    });
 
     Ok(match read? {
         None => answers::no_such("role"),
@@ -168,27 +165,21 @@ pub(in crate::transport) async fn column(
 
 async fn read_the_column(api: &Api, held_on: &LoopId) -> Result<Response, StoreError> {
     let mut transaction = api.store.begin().await?;
-    let read = async {
-        let Some(cells) = transaction.the_column_of(held_on).await? else {
-            return Ok(None);
-        };
-
-        Ok(transaction
-            .a_loop(held_on)
-            .await?
-            .map(|held_on| ColumnAsRead {
-                held_on: LoopAsRead::of(&held_on),
-                cells: cells
-                    .iter()
-                    .map(|cell| ByARole {
-                        role: RoleAsRead::of(&cell.role),
-                        permission: cell.permission.as_str(),
-                    })
-                    .collect(),
-            }))
-    }
-    .await;
+    let read = transaction.the_column_of(held_on).await;
     transaction.roll_back().await?;
+
+    let read = read.map(|found| {
+        found.map(|(held_on, cells)| ColumnAsRead {
+            held_on: LoopAsRead::of(&held_on),
+            cells: cells
+                .iter()
+                .map(|cell| ByARole {
+                    role: RoleAsRead::of(&cell.role),
+                    permission: cell.permission.as_str(),
+                })
+                .collect(),
+        })
+    });
 
     Ok(match read? {
         None => answers::no_such("loop"),

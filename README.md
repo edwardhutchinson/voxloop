@@ -233,10 +233,12 @@ whole-configuration read is possible, which is a reviewing act rather than an ad
 one. Nothing is edited there.
 
 A loop nobody has ruled on shows as `unreviewed`, and its cells are **enforced as `none` on
-every rung whatever they are set to**. The mark is cleared from the loop's own page, per loop
-and never per cell, and clearing it records a deliberate `none` against every role left
-alone. It is a display state and an administrator's prompt throughout: the evaluator cannot
-tell an unreviewed loop's cell from a deliberate `none`, and does not try.
+every rung whatever they are set to**. It is ruled on when every role's cell has been set, or
+by dismissing the mark from the loop's own page — which records a deliberate `none` against
+every role left alone. Either way the mark is cleared **per loop and never per cell**:
+setting one cell does nothing to it while another role is unruled. It is a display state and
+an administrator's prompt throughout: the evaluator cannot tell an unreviewed loop's cell
+from a deliberate `none`, and does not try.
 
 Every write is audited with the record before and after and the **blast radius** — what the
 change does to anything live. No session exists yet, so that radius is empty; the shape is
