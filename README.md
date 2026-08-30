@@ -33,8 +33,24 @@ the one failure nothing here can catch, which is why the two commands belong tog
 
 ## Running it
 
-VoxLoop terminates TLS itself, so it needs a certificate before it will start. For local
-work, any self-signed one will do:
+```sh
+scripts/dev            # build the console, start the server, make an administrator
+scripts/dev --fresh    # the same, from an empty store
+```
+
+It writes a self-signed certificate, a deployment file and a store under `.dev/`, redeems
+the bootstrap code itself, and prints the URL and a password generated for that store. Set
+`VOXLOOP_DEV_PASSWORD` to keep one across `--fresh` runs, `VOXLOOP_DEV_PORT` to move the
+port. Accept the certificate warning before signing in — the sign-in cookie is `Secure` and
+the browser will not keep it otherwise.
+
+It is a development launcher and not a way to provision anything: nothing it writes belongs
+on a machine anybody else can reach, which is why `.dev/` is ignored by git.
+
+### By hand
+
+A deployment does the same thing deliberately. VoxLoop terminates TLS itself, so it needs a
+certificate before it will start; for local work any self-signed one will do:
 
 ```sh
 openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
@@ -96,13 +112,18 @@ value the write is handed rather than a field it may omit
 
 ## Working on the console
 
-Development is two processes; release is one artefact. Run the binary as above, then:
+`scripts/dev` rebuilds the console and embeds it, which is the release path and always
+truthful. For hot reload, development is two processes instead — run the binary as above,
+then:
 
 ```sh
 cd web && npm run dev
 ```
 
-Vite serves the console with hot reload and proxies `/api` to the binary on port 8443.
+Vite serves the console on port 5173 with hot reload and proxies `/api` to the binary on
+8443. Whether the `Secure` sign-in cookie survives that depends on your browser treating
+`http://localhost` as a trustworthy origin; if signing in bounces you straight back to the
+form, that is what happened, and `scripts/dev` is the way round it.
 
 ## Tests
 

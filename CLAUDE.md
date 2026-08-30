@@ -16,6 +16,11 @@ The five canonical triage roles, used verbatim as label strings. See `docs/agent
 
 Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
+### Running it
+
+`scripts/dev` builds the console, starts the server and makes an administrator, printing the
+URL and password. See the README.
+
 ### Rules
 
 Before generating any final prose for us conversing, you MUST invoke the `unslop` skill.

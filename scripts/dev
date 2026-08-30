@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Launch VoxLoop on this box, for development and for checking a change by hand.
+#
+#   scripts/dev           build the console, start the server, make an administrator
+#   scripts/dev --fresh   the same, from an empty store
+#
+# It is deliberately **not** a way to provision anything. It writes a self-signed
+# certificate, a deployment file and a store under `.dev/`, and it redeems the bootstrap code
+# itself with a password generated here and printed to this terminal. None of that belongs on
+# a machine anybody else can reach, which is why nothing here is installed and `.dev/` is
+# ignored by git.
+#
+# There is still no default credential: the password is random per store. Set
+# VOXLOOP_DEV_PASSWORD in your shell to keep one across `--fresh` runs. VOXLOOP_DEV_PORT
+# moves the port; VOXLOOP_DEV_ADMINISTRATOR names the administrator.
+
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+DEV=.dev
+PORT="${VOXLOOP_DEV_PORT:-8443}"
+ADMINISTRATOR="${VOXLOOP_DEV_ADMINISTRATOR:-root}"
+AT="https://localhost:$PORT"
+LOG="$DEV/server.log"
+
+needs() {
+	command -v "$1" >/dev/null 2>&1 ||
+		{ echo "voxloop: this needs $1, which is not on the PATH" >&2; exit 1; }
+}
+
+needs openssl
+needs npm
+needs cargo
+needs curl
+
+if [ "${1:-}" = "--fresh" ]; then
+	rm -f "$DEV"/voxloop.sqlite*
+	echo "voxloop: starting from an empty store"
+elif [ -n "${1:-}" ]; then
+	echo "voxloop: $0 takes --fresh or nothing" >&2
+	exit 1
+fi
+
+mkdir -p "$DEV"
+
+# TLS terminates in the binary and there is no reverse proxy anywhere in a VoxLoop
+# deployment, so it will not start without a certificate — on a LAN or on a laptop alike.
+if [ ! -f "$DEV/certificate.pem" ]; then
+	echo "voxloop: making a self-signed certificate for localhost"
+	openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+		-subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" \
+		-keyout "$DEV/private-key.pem" -out "$DEV/certificate.pem" 2>/dev/null
+fi
+
+# Written every run, so changing VOXLOOP_DEV_PORT is enough to move the port.
+cat > "$DEV/voxloop.toml" <<TOML
+# Written by scripts/dev. Edit that, not this.
+[listen]
+address = "127.0.0.1:$PORT"
+
+[tls]
+certificate = "certificate.pem"
+private_key = "private-key.pem"
+
+[store]
+path = "voxloop.sqlite"
+
+[log]
+level = "info"
+TOML
+
+# ADR-0037's ordering requirement: the console is built first and the binary embeds the
+# result. Building over a stale `web/dist` is the one failure nothing in the build can catch,
+# so this rebuilds every time rather than checking whether it looks current.
+[ -d web/node_modules ] || (cd web && npm install)
+(cd web && npm run build >/dev/null)
+
+cargo build --features embed-web
+
+# The bootstrap code goes to the server's own log and is good until the process stops, so
+# this reads it back out of the log the same way a person would.
+administer() {
+	local code="" password="" said="" waited=0
+
+	# Every test below is written so a false one is never the last command in the body: this
+	# runs under `set -e`, and a loop whose body ends false takes the whole shell with it.
+	while [ "$waited" -lt 300 ]; do
+		sleep 0.1
+		waited=$((waited + 1))
+
+		if [ -f "$LOG" ]; then
+			code=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG" |
+				grep -o 'code=[0-9a-f]\{16,\}' | tail -1 | cut -d= -f2 || true)
+
+			if [ -n "$code" ]; then
+				break
+			fi
+
+			# No code, and the server is already up: somebody administers this store.
+			if grep -q 'serving' "$LOG"; then
+				break
+			fi
+		fi
+	done
+
+	while [ "$waited" -lt 400 ] && ! curl -sk "$AT/api/liveness" >/dev/null 2>&1; do
+		sleep 0.1
+		waited=$((waited + 1))
+	done
+
+	if [ -z "$code" ]; then
+		banner "$ADMINISTRATOR" "the password you set when this store was made"
+		return
+	fi
+
+	# 24 hex characters, well over the twelve-character floor, and random per store: there
+	# are no default credentials here either.
+	password="${VOXLOOP_DEV_PASSWORD:-$(openssl rand -hex 12)}"
+
+	# Redemption answers no content, so anything it does say is why it would not.
+	said=$(curl -sk -X POST "$AT/api/bootstrap" \
+		-H 'content-type: application/json' \
+		-d "{\"code\":\"$code\",\"username\":\"$ADMINISTRATOR\",\"password\":\"$password\"}" \
+		|| true)
+
+	if [ -n "$said" ]; then
+		echo "voxloop: no administrator was made: $said" >&2
+		return
+	fi
+
+	banner "$ADMINISTRATOR" "$password"
+}
+
+banner() {
+	cat <<BANNER
+
+    ┌────────────────────────────────────────────────────────
+    │ VoxLoop is at  $AT
+    │ Sign in as     $1
+    │ Password       $2
+    │
+    │ Accept the certificate warning before signing in: the
+    │ sign-in cookie is Secure and will not be kept otherwise.
+    └────────────────────────────────────────────────────────
+
+BANNER
+}
+
+administer &
+
+# In the foreground, so Ctrl-C stops it the way systemd would: gracefully, ending every
+# session, because a restart is indistinguishable from total network loss to every client.
+cargo run --features embed-web "$DEV/voxloop.toml" 2>&1 | tee "$LOG"
