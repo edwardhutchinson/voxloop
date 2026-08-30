@@ -115,8 +115,12 @@ async fn create(
 
     // Between the check at the top and here, another request may have spent the code. It is
     // the same refusal to whoever sent this one.
+    //
+    // The rollback is awaited rather than left to the handle being dropped, because the
+    // refusal opens a transaction of its own to record itself, and the user this one just
+    // wrote is holding the store's write lock until it lets go.
     if bootstrap.redeem(&presented.code) == Redemption::Refused {
-        drop(transaction);
+        transaction.roll_back().await?;
         return refuse(api, &presented.username, source).await;
     }
 
