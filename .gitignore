@@ -10,7 +10,12 @@ web/dist/
 web/node_modules/
 web/.svelte-kit/
 
-# The deployment file and its certificate are per-box. `voxloop.example.toml` is the one
-# that is committed.
+# The deployment file, its certificate and the store it opens are per-box.
+# `voxloop.example.toml` is the one that is committed.
 /voxloop.toml
+/voxloop.sqlite*
 *.pem
+
+# Written by scripts/dev: a certificate, a deployment file, a store and a log, none of
+# which belongs anywhere but the box it was made on.
+/.dev/

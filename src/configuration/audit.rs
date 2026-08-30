@@ -23,13 +23,17 @@ use async_trait::async_trait;
 use sqlx::Row;
 
 use super::store::{StoreError, Transaction, now, unavailable};
-use super::users::UserId;
+use super::users::{User, UserId};
 
 /// A decision worth recording.
 ///
-/// The classes are fixed by [ADR-0028] and grow one ticket at a time: these four are the
-/// authentication events #30 can produce. Configuration changes and authority acts join them
+/// The classes are fixed by [ADR-0028] and grow one ticket at a time: five authentication
+/// events and, from #31, the user administration writes. Roles, loops and the grid join them
 /// with the writes that make them.
+///
+/// An event says what was attempted, not whether it succeeded: a refused write is the same
+/// event carrying [`ConfigurationWrite::refusal`], so a log filtered to *deletions of this
+/// user* shows the one that was refused alongside the one that was not.
 ///
 /// [ADR-0028]: ../../../docs/adr/0028-the-audit-log-records-decisions-not-traffic.md
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +48,19 @@ pub(crate) enum AuditEvent {
     ///
     /// [ADR-0054]: ../../../docs/adr/0054-every-operation-declares-its-authorisation.md
     BootstrapRefused,
+    UserCreated,
+    /// A rename, or the system-administration flag given or taken away.
+    UserEdited,
+    UserDeleted,
+    AccountLocked,
+    AccountUnlocked,
+    /// The password taken away, ending the sign-in and the session immediately (v1 §2).
+    PasswordResetForced,
+    /// An administration write somebody was turned away from before it reached the record
+    /// it was about. Refused administration writes are audited; refused reads are not
+    /// (v1 §3), and an unauthorised attempt to make an administrator is the case this is
+    /// here for.
+    AdministrationRefused,
 }
 
 impl AuditEvent {
@@ -56,10 +73,16 @@ impl AuditEvent {
             Self::SignedOut => "signed_out",
             Self::BootstrapRedeemed => "bootstrap_redeemed",
             Self::BootstrapRefused => "bootstrap_refused",
+            Self::UserCreated => "user_created",
+            Self::UserEdited => "user_edited",
+            Self::UserDeleted => "user_deleted",
+            Self::AccountLocked => "account_locked",
+            Self::AccountUnlocked => "account_unlocked",
+            Self::PasswordResetForced => "password_reset_forced",
+            Self::AdministrationRefused => "administration_refused",
         }
     }
 
-    #[allow(dead_code)] // Half of a pair: the other half is on every write.
     fn from_stored(stored: &str) -> Option<Self> {
         match stored {
             "sign_in_succeeded" => Some(Self::SignInSucceeded),
@@ -67,6 +90,13 @@ impl AuditEvent {
             "signed_out" => Some(Self::SignedOut),
             "bootstrap_redeemed" => Some(Self::BootstrapRedeemed),
             "bootstrap_refused" => Some(Self::BootstrapRefused),
+            "user_created" => Some(Self::UserCreated),
+            "user_edited" => Some(Self::UserEdited),
+            "user_deleted" => Some(Self::UserDeleted),
+            "account_locked" => Some(Self::AccountLocked),
+            "account_unlocked" => Some(Self::AccountUnlocked),
+            "password_reset_forced" => Some(Self::PasswordResetForced),
+            "administration_refused" => Some(Self::AdministrationRefused),
             _ => None,
         }
     }
@@ -79,7 +109,6 @@ impl AuditEvent {
 /// at. An audit read that quietly dropped what it could not parse would be the worst of the
 /// available behaviours.
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)] // Constructed on the read path, which #31's console is the first to use.
 enum Unreadable {
     #[error("the audit log holds an event this binary does not know: {0:?}")]
     Event(String),
@@ -103,16 +132,135 @@ pub(crate) struct AuditEntry {
     ///
     /// [ADR-0025]: ../../../docs/adr/0025-credentials-are-administered-because-there-is-no-email.md
     pub(crate) source: Option<IpAddr>,
+    /// What the write did to configuration, where the decision was one.
+    ///
+    /// Absent on an authentication event, which changes no record — and the type is what
+    /// makes that the only way to record one without a blast radius.
+    pub(crate) write: Option<ConfigurationWrite>,
+    /// The operation somebody was turned away from, where the entry is about an attempt
+    /// rather than about a record.
+    ///
+    /// A write refused before it reached the record it was about touched nothing, so it has
+    /// no before, no after and no radius to record — and which operation it was is the whole
+    /// of what makes the entry worth keeping.
+    pub(crate) operation: Option<String>,
+}
+
+/// What a configuration change did: to which record, from what, to what, and to anything
+/// live at the time.
+///
+/// The four travel together because v1 §12 asks for all four of every configuration change,
+/// and a struct that can be built without one is a struct somebody builds without one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConfigurationWrite {
+    /// The record the write was about. Absent where there is none to name — a creation
+    /// refused because the name was taken never got an id.
+    pub(crate) target: Option<UserId>,
+    /// The target's name as it stood, which is what keeps the entry readable once the
+    /// record it refers to is gone.
+    pub(crate) target_name: String,
+    /// The record before the write. Absent on a creation, which had nothing before it.
+    pub(crate) before: Option<Snapshot>,
+    /// The record after it. Absent on a deletion, and on any write that was refused.
+    pub(crate) after: Option<Snapshot>,
+    pub(crate) blast_radius: BlastRadius,
+    /// Why the write did not happen, where it did not. Refused administration writes are
+    /// audited; refused reads are not (v1 §3).
+    pub(crate) refusal: Option<String>,
+}
+
+/// A configuration record as it stood, in the form the log holds it.
+///
+/// One line of `field=value`, so that a before and an after can be read side by side by
+/// somebody who was not there. These strings are on disk in customer deployments, so their
+/// shape is changed only deliberately.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Snapshot(String);
+
+impl Snapshot {
+    /// A user as they stood.
+    ///
+    /// Whether a password is set is in here and what it is never could be: without it, a
+    /// forced password reset — a write whose entire effect is on the credential — would
+    /// record two identical lines and say nothing.
+    pub(crate) fn of(user: &User) -> Self {
+        Self(format!(
+            "username={} system_administration={} locked={} password={}",
+            user.username,
+            yes_or_no(user.is_system_administrator),
+            yes_or_no(user.is_locked),
+            if user.has_password { "set" } else { "none" },
+        ))
+    }
+
+    /// Take back a snapshot the log already holds.
+    fn known(rendered: String) -> Self {
+        Self(rendered)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn yes_or_no(held: bool) -> &'static str {
+    if held { "yes" } else { "no" }
+}
+
+/// What a configuration write does to anything live at the moment it lands.
+///
+/// It is **computed on the live side and handed to this transaction as a value**, which is
+/// the only place the two state seams meet: the state authority works it out from sessions,
+/// subscriptions and arms, and Configuration writes down what it was told ([ADR-0039]).
+/// Neither knows about the other.
+///
+/// An empty radius is a real answer — *nothing live was touched* — and is distinct from an
+/// entry that carries none, which is an authentication event that changed no record at all.
+///
+/// [ADR-0039]: ../../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BlastRadius {
+    /// One consequence per line, in the words the administrator was shown before committing
+    /// ([ADR-0015]) — who is cut mid-word, whose subscriptions drop, which loop goes vacant.
+    ///
+    /// [ADR-0015]: ../../../docs/adr/0015-the-admin-console-reads-one-row-at-a-time.md
+    consequences: Vec<String>,
+}
+
+impl BlastRadius {
+    /// Nothing live is touched by this write.
+    pub(crate) fn nothing_live() -> Self {
+        Self::default()
+    }
+
+    /// The consequences the state authority computed.
+    pub(crate) fn of(consequences: Vec<String>) -> Self {
+        Self { consequences }
+    }
+
+    fn stored(&self) -> String {
+        self.consequences.join("\n")
+    }
+
+    fn known(stored: &str) -> Self {
+        if stored.is_empty() {
+            return Self::nothing_live();
+        }
+
+        Self::of(stored.split('\n').map(str::to_owned).collect())
+    }
 }
 
 /// A decision as the log holds it.
-#[allow(dead_code)] // Read by the tests that hold the log to its promises, and by #31.
+#[allow(dead_code)] // Read by the tests that hold the log to its promises, and by #59.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RecordedEntry {
     pub(crate) event: AuditEvent,
     pub(crate) actor: Option<UserId>,
     pub(crate) actor_name: String,
     pub(crate) source: Option<IpAddr>,
+    pub(crate) write: Option<ConfigurationWrite>,
+    pub(crate) operation: Option<String>,
     /// Milliseconds since the Unix epoch.
     pub(crate) recorded_at: i64,
 }
@@ -125,9 +273,9 @@ pub(crate) trait AuditLog {
 
     /// The most recent entries, newest first.
     ///
-    /// The console's filtered query — by actor and by target — is system administration and
-    /// arrives with the console (#31). Until it does, this is what the log is written
-    /// against: an append-only log nothing can read is a promise rather than a record.
+    /// The console's filtered query — by actor and by target — is its own read surface and
+    /// arrives with #59. Until it does, this is what the log is written against: an
+    /// append-only log nothing can read is a promise rather than a record.
     #[allow(dead_code)]
     async fn recent_entries(&mut self, at_most: u32) -> Result<Vec<RecordedEntry>, StoreError>;
 }
@@ -135,15 +283,27 @@ pub(crate) trait AuditLog {
 #[async_trait]
 impl AuditLog for Transaction {
     async fn record(&mut self, entry: AuditEntry) -> Result<(), StoreError> {
+        let write = entry.write.as_ref();
+
         sqlx::query(
-            "INSERT INTO audit_entries (recorded_at, event, actor_id, actor_name, source) \
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO audit_entries \
+             (recorded_at, event, actor_id, actor_name, source, \
+              target_id, target_name, state_before, state_after, blast_radius, refusal, \
+              operation) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(now())
         .bind(entry.event.stored())
         .bind(entry.actor.as_ref().map(UserId::as_str))
         .bind(&entry.actor_name)
         .bind(entry.source.map(|source| source.to_string()))
+        .bind(write.and_then(|write| write.target.as_ref().map(UserId::as_str)))
+        .bind(write.map(|write| write.target_name.as_str()))
+        .bind(write.and_then(|write| write.before.as_ref().map(Snapshot::as_str)))
+        .bind(write.and_then(|write| write.after.as_ref().map(Snapshot::as_str)))
+        .bind(write.map(|write| write.blast_radius.stored()))
+        .bind(write.and_then(|write| write.refusal.as_deref()))
+        .bind(entry.operation.as_deref())
         .execute(self.connection())
         .await
         .map_err(unavailable)?;
@@ -153,8 +313,9 @@ impl AuditLog for Transaction {
 
     async fn recent_entries(&mut self, at_most: u32) -> Result<Vec<RecordedEntry>, StoreError> {
         let rows = sqlx::query(
-            "SELECT recorded_at, event, actor_id, actor_name, source FROM audit_entries \
-             ORDER BY id DESC LIMIT ?",
+            "SELECT recorded_at, event, actor_id, actor_name, source, \
+             target_id, target_name, state_before, state_after, blast_radius, refusal, \
+             operation FROM audit_entries ORDER BY id DESC LIMIT ?",
         )
         .bind(at_most)
         .fetch_all(self.connection())
@@ -176,11 +337,30 @@ impl AuditLog for Transaction {
                     ),
                 };
 
+                // The blast radius is the discriminator: a configuration write always
+                // carries one, and an authentication event changed no record so it has none.
+                let write =
+                    row.get::<Option<String>, _>("blast_radius")
+                        .map(|radius| ConfigurationWrite {
+                            target: row.get::<Option<String>, _>("target_id").map(UserId::known),
+                            target_name: row.get("target_name"),
+                            before: row
+                                .get::<Option<String>, _>("state_before")
+                                .map(Snapshot::known),
+                            after: row
+                                .get::<Option<String>, _>("state_after")
+                                .map(Snapshot::known),
+                            blast_radius: BlastRadius::known(&radius),
+                            refusal: row.get("refusal"),
+                        });
+
                 Ok(RecordedEntry {
                     event,
                     actor: row.get::<Option<String>, _>("actor_id").map(UserId::known),
                     actor_name: row.get("actor_name"),
                     source,
+                    write,
+                    operation: row.get("operation"),
                     recorded_at: row.get("recorded_at"),
                 })
             })
@@ -192,7 +372,7 @@ impl AuditLog for Transaction {
 mod tests {
     use super::*;
     use crate::configuration::store::a_temporary_store;
-    use crate::configuration::users::{NewUser, Users};
+    use crate::configuration::users::{NewUser, User, Users};
 
     fn a_sign_in_by(actor: Option<&UserId>, name: &str) -> AuditEntry {
         AuditEntry {
@@ -200,6 +380,8 @@ mod tests {
             actor: actor.cloned(),
             actor_name: name.to_owned(),
             source: Some(IpAddr::from([192, 0, 2, 7])),
+            write: None,
+            operation: None,
         }
     }
 
@@ -271,6 +453,8 @@ mod tests {
                 actor: None,
                 actor_name: "nobody-by-that-name".to_owned(),
                 source: Some(IpAddr::from([192, 0, 2, 7])),
+                write: None,
+                operation: None,
             })
             .await
             .expect("the entry to be recorded");
@@ -362,5 +546,215 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    fn a_user_named(username: &str) -> User {
+        User {
+            id: UserId::known("an-id".to_owned()),
+            username: username.to_owned(),
+            is_system_administrator: false,
+            is_locked: false,
+            has_password: true,
+            external_identity: None,
+        }
+    }
+
+    /// Every configuration write is audited with before and after **plus the blast radius**
+    /// (v1 §12). The radius is computed on the live side and arrives here as a value, so the
+    /// transaction that writes it knows nothing about where it came from ([ADR-0039]).
+    ///
+    /// [ADR-0039]: ../../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+    #[tokio::test]
+    async fn records_a_configuration_write_with_before_and_after_and_the_blast_radius() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let administrator = a_user(&mut transaction, "root").await;
+        let target = a_user(&mut transaction, "flight").await;
+        let radius = BlastRadius::of(vec!["flight loses their session on Capcom".to_owned()]);
+
+        transaction
+            .record(AuditEntry {
+                event: AuditEvent::AccountLocked,
+                actor: Some(administrator),
+                actor_name: "root".to_owned(),
+                source: None,
+                operation: None,
+                write: Some(ConfigurationWrite {
+                    target: Some(target.clone()),
+                    target_name: "flight".to_owned(),
+                    before: Some(Snapshot::of(&a_user_named("flight"))),
+                    after: Some(Snapshot::of(&User {
+                        is_locked: true,
+                        ..a_user_named("flight")
+                    })),
+                    blast_radius: radius.clone(),
+                    refusal: None,
+                }),
+            })
+            .await
+            .expect("the entry to be recorded");
+
+        let entries = transaction
+            .recent_entries(1)
+            .await
+            .expect("the log to be readable");
+        let write = entries[0].write.as_ref().expect("a configuration write");
+        assert_eq!(write.target.as_ref(), Some(&target));
+        assert_eq!(write.target_name, "flight");
+        assert_ne!(write.before, write.after, "the write recorded no change");
+        assert_eq!(write.blast_radius, radius);
+        assert_eq!(write.refusal, None);
+    }
+
+    /// Refused administration writes are audited; refused reads are not (v1 §3). A refusal
+    /// has a before and no after, because nothing happened.
+    #[tokio::test]
+    async fn records_a_refused_write_with_the_reason_and_nothing_after_it() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+
+        transaction
+            .record(AuditEntry {
+                event: AuditEvent::UserDeleted,
+                actor: None,
+                actor_name: "root".to_owned(),
+                source: None,
+                operation: None,
+                write: Some(ConfigurationWrite {
+                    target: None,
+                    target_name: "root".to_owned(),
+                    before: Some(Snapshot::of(&a_user_named("root"))),
+                    after: None,
+                    blast_radius: BlastRadius::nothing_live(),
+                    refusal: Some("that is the last system administrator".to_owned()),
+                }),
+            })
+            .await
+            .expect("the entry to be recorded");
+
+        let entries = transaction
+            .recent_entries(1)
+            .await
+            .expect("the log to be readable");
+        let write = entries[0].write.as_ref().expect("a configuration write");
+        assert_eq!(write.after, None);
+        assert_eq!(
+            write.refusal.as_deref(),
+            Some("that is the last system administrator")
+        );
+    }
+
+    /// The blast radius is the discriminator: an entry carrying one is a configuration
+    /// write, and an authentication event changed no record so it carries none.
+    #[tokio::test]
+    async fn an_authentication_event_records_no_configuration_write() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+
+        transaction
+            .record(a_sign_in_by(None, "flight"))
+            .await
+            .expect("the entry to be recorded");
+
+        let entries = transaction
+            .recent_entries(1)
+            .await
+            .expect("the log to be readable");
+        assert!(entries[0].write.is_none());
+    }
+
+    /// The log outlives the records it references on both sides of the entry ([ADR-0028]).
+    ///
+    /// [ADR-0028]: ../../../docs/adr/0028-the-audit-log-records-decisions-not-traffic.md
+    #[tokio::test]
+    async fn deleting_a_user_leaves_the_entries_naming_them_as_a_target_attributed() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let target = a_user(&mut transaction, "flight").await;
+        transaction
+            .record(AuditEntry {
+                event: AuditEvent::UserDeleted,
+                actor: None,
+                actor_name: "root".to_owned(),
+                source: None,
+                operation: None,
+                write: Some(ConfigurationWrite {
+                    target: Some(target.clone()),
+                    target_name: "flight".to_owned(),
+                    before: Some(Snapshot::of(&a_user_named("flight"))),
+                    after: None,
+                    blast_radius: BlastRadius::nothing_live(),
+                    refusal: None,
+                }),
+            })
+            .await
+            .expect("the entry to be recorded");
+
+        sqlx::query("DELETE FROM users WHERE id = ?")
+            .bind(target.as_str())
+            .execute(transaction.connection())
+            .await
+            .expect("the user to be deleted");
+
+        let entries = transaction
+            .recent_entries(10)
+            .await
+            .expect("the log to be readable");
+        let write = entries[0].write.as_ref().expect("a configuration write");
+        assert_eq!(write.target.as_ref(), Some(&target));
+        assert_eq!(write.target_name, "flight");
+    }
+
+    /// A forced password reset changes nothing a reader can see except the credential, so
+    /// the snapshot has to say whether one is set or the entry records two identical lines.
+    #[tokio::test]
+    async fn a_snapshot_says_whether_a_password_is_set_and_never_what_it_is() {
+        let enrolled = Snapshot::of(&a_user_named("flight"));
+        let reset = Snapshot::of(&User {
+            has_password: false,
+            ..a_user_named("flight")
+        });
+
+        assert_ne!(enrolled, reset);
+        assert!(reset.as_str().contains("password=none"), "{reset:?}");
+    }
+
+    /// A write turned away before it reached a record touched nothing, so it records the
+    /// operation instead of a before, an after and a radius there are none of.
+    #[tokio::test]
+    async fn records_an_attempt_that_never_reached_a_record_by_the_operation_it_named() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+
+        transaction
+            .record(AuditEntry {
+                event: AuditEvent::AdministrationRefused,
+                actor: None,
+                actor_name: "flight".to_owned(),
+                source: Some(IpAddr::from([198, 51, 100, 9])),
+                write: None,
+                operation: Some("POST /api/users".to_owned()),
+            })
+            .await
+            .expect("the entry to be recorded");
+
+        let entries = transaction
+            .recent_entries(1)
+            .await
+            .expect("the log to be readable");
+        assert_eq!(entries[0].operation.as_deref(), Some("POST /api/users"));
+        assert!(entries[0].write.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_says_everything_a_later_reader_needs_to_see_what_changed() {
+        let held = Snapshot::of(&User {
+            is_system_administrator: true,
+            ..a_user_named("root")
+        });
+        let taken_away = Snapshot::of(&a_user_named("root"));
+
+        assert_ne!(held, taken_away);
+        assert!(held.as_str().contains("root"), "{held:?}");
     }
 }

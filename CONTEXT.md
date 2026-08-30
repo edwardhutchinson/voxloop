@@ -44,6 +44,10 @@ _Avoid_: invite, invitation link, reset link, activation token
 The one-time code a deployment with no system administrator mints to its own log on every start, by which the first one is created. It is minted afresh each start, invalidating the one before it, and the route that redeems it is not registered at all once an administrator exists. It is not an enrolment code: it is issued by nobody, and being able to read the server's log is what entitles you to it.
 _Avoid_: setup token, first-run password, default credentials, admin code
 
+**Account lock**:
+A deliberate administrative act ending a user's sign-in and session and refusing them the next one, until an administrator unlocks the account. It is never a consequence of failed attempts — auto-lock is a denial of service aimed at whoever is starting a shift — and it is system administration rather than operational authority, which is what puts it on the other side of the split from forced relinquish. Locking the last system administrator is refused.
+_Avoid_: suspend, disable, ban, deactivate, lockout (which is what rate limiting deliberately does not do)
+
 **External identity**:
 The durable pair of issuer and subject naming a user in a customer's identity provider, stored against the user record and linked only by an explicit administrative act. An email address is never one, and never stands in for one.
 _Avoid_: SSO identity, federated id, email, subject
@@ -51,6 +55,10 @@ _Avoid_: SSO identity, federated id, email, subject
 **Audit log**:
 The append-only record of authentication events, configuration changes, operational authority acts and console announcements — decisions about the system, never the traffic through it. Who talked, and when, is not in it; an announcement an administrator composed by hand is, because composing it was the decision.
 _Avoid_: activity log, event log, history, journal
+
+**Blast radius**:
+What a configuration change does to anything live at the moment it lands — who is cut mid-word, whose subscriptions drop, which loop loses its last staffing role, which occupants lose operational authority. It is shown to the administrator before they commit and recorded with the change, and it is computed on the live side and handed to the write as a value, so the two never have to know about each other. An empty one means *nothing live was touched*, which is an answer rather than an absence.
+_Avoid_: impact, side effects, consequences, affected users, preview
 
 ### Occupancy
 

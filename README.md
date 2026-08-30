@@ -33,8 +33,32 @@ the one failure nothing here can catch, which is why the two commands belong tog
 
 ## Running it
 
-VoxLoop terminates TLS itself, so it needs a certificate before it will start. For local
-work, any self-signed one will do:
+```sh
+scripts/dev            # build the console, start the server, make an administrator
+scripts/dev --fresh    # the same, from an empty store
+```
+
+It writes a self-signed certificate, a deployment file and a store under `.dev/`, redeems
+the bootstrap code itself, and prints the URL and a password generated for that store. Set
+`VOXLOOP_DEV_PASSWORD` to keep one across `--fresh` runs, `VOXLOOP_DEV_PORT` to move the
+port.
+
+It opens the page for you; `VOXLOOP_DEV_NO_OPEN=1` stops that. If you are typing it instead,
+type it exactly as the banner prints it — **`https://127.0.0.1:8443`**. A host and a port on
+their own get you `http`, which nothing in a VoxLoop deployment speaks, and `localhost`
+resolves to IPv6 first on most boxes while the binary listens on one address; either mistake
+reads as the site refusing the connection.
+
+Accept the certificate warning before signing in: the sign-in cookie is `Secure` and the
+browser will not keep it otherwise. You should land on a sign-in form.
+
+It is a development launcher and not a way to provision anything: nothing it writes belongs
+on a machine anybody else can reach, which is why `.dev/` is ignored by git.
+
+### By hand
+
+A deployment does the same thing deliberately. VoxLoop terminates TLS itself, so it needs a
+certificate before it will start; for local work any self-signed one will do:
 
 ```sh
 openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
@@ -68,15 +92,46 @@ operation VoxLoop hides rather than refuses. From then on it is `/api/sign-in` a
 `/api/sign-out`, and **the root of trust is being on the box**: whoever can read the server's
 log at first start is the administrator.
 
+## The admin console
+
+Signing in as a system administrator opens the console. It is gated on the user's
+system-administration flag and **never on a role**, so an operator who is also a sysadmin
+reaches it without dropping off the air
+([v1 §9](docs/spec/v1.md#9-the-admin-console)). The flag is read from the store on every
+request rather than carried in the cookie, so taking it away closes the console at once.
+
+Users are created here and set their own password from an enrolment code, because VoxLoop
+has no mail path — so a user created today cannot sign in until enrolment lands. Locking an
+account and forcing a password reset both end every sign-in the user holds, immediately.
+
+**The last system administrator cannot be locked, deleted or stripped of the flag.** *Last*
+counts flag holders and nothing else, deliberately: narrowing it to the ones who could sign
+in today would let a box be emptied of administrators one permitted act at a time. Forcing a
+password reset is not one of the three — the record and the flag both survive it — so
+forcing one on a sole administrator leaves a deployment nobody can sign into to administer.
+The bootstrap code is not re-minted, because somebody still holds the flag. Recovering from
+that is shell access to the box, which is what the on-box CLI is for.
+
+Every write is audited with the record before and after and the **blast radius** — what the
+change does to anything live. No session exists yet, so that radius is empty; the shape is
+there because the write and its audit entry commit in one transaction, and the radius is a
+value the write is handed rather than a field it may omit
+([ADR-0039](docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md)).
+
 ## Working on the console
 
-Development is two processes; release is one artefact. Run the binary as above, then:
+`scripts/dev` rebuilds the console and embeds it, which is the release path and always
+truthful. For hot reload, development is two processes instead — run the binary as above,
+then:
 
 ```sh
 cd web && npm run dev
 ```
 
-Vite serves the console with hot reload and proxies `/api` to the binary on port 8443.
+Vite serves the console on port 5173 with hot reload and proxies `/api` to the binary on
+8443. Whether the `Secure` sign-in cookie survives that depends on your browser treating
+`http://localhost` as a trustworthy origin; if signing in bounces you straight back to the
+form, that is what happened, and `scripts/dev` is the way round it.
 
 ## Tests
 

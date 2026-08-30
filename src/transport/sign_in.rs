@@ -20,10 +20,10 @@ use axum::{Extension, Json};
 use axum_extra::extract::CookieJar;
 use serde::Deserialize;
 
-use super::{Api, answers, cookies};
+use super::{Api, answers, cookies, name_as_it_stands};
 use crate::authorisation::Caller;
 use crate::configuration::{
-    AuditEntry, AuditEvent, AuditLog, SignInToken, SignIns, StoreError, Transaction, UserId, Users,
+    AuditEntry, AuditEvent, AuditLog, SignInToken, SignIns, StoreError, UserId,
 };
 use crate::identity::Presented;
 use crate::telemetry::module;
@@ -79,6 +79,8 @@ async fn attempt(
                 actor: None,
                 actor_name: submitted_name,
                 source: Some(source.ip()),
+                write: None,
+                operation: None,
             })
             .await?;
         transaction.commit().await?;
@@ -94,6 +96,8 @@ async fn attempt(
             actor: Some(user.clone()),
             actor_name: name,
             source: Some(source.ip()),
+            write: None,
+            operation: None,
         })
         .await?;
     transaction.commit().await?;
@@ -138,6 +142,8 @@ async fn end(api: &Api, user: &UserId, sign_in: &SignInToken) -> Result<(), Stor
             // A sign-out is an act by somebody the store already recognises, so where it came
             // from adds nothing the actor does not already say.
             source: None,
+            write: None,
+            operation: None,
         })
         .await?;
     transaction.commit().await?;
@@ -145,15 +151,4 @@ async fn end(api: &Api, user: &UserId, sign_in: &SignInToken) -> Result<(), Stor
     tracing::info!(target: module::IDENTITY, user = %user.as_str(), "signed out");
 
     Ok(())
-}
-
-/// The name to snapshot into an audit entry: the one the store holds, not the one submitted.
-async fn name_as_it_stands(
-    transaction: &mut Transaction,
-    user: &UserId,
-) -> Result<String, StoreError> {
-    Ok(transaction
-        .user(user)
-        .await?
-        .map_or_else(String::new, |user| user.username))
 }

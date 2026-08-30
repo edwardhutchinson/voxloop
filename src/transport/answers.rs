@@ -51,6 +51,14 @@ pub(super) fn cannot(reason: &str) -> Response {
     (StatusCode::BAD_REQUEST, format!("{reason}\n")).into_response()
 }
 
+/// There is no such record.
+///
+/// Not a refusal, and not a hidden operation: the caller may read users, and this is VoxLoop
+/// saying it holds no user by that id.
+pub(super) fn no_such(what: &str) -> Response {
+    (StatusCode::NOT_FOUND, format!("There is no such {what}.\n")).into_response()
+}
+
 /// Answer, unless the store could not answer at all.
 ///
 /// Every handler ends this way, so the one path that turns a store fault into a status
