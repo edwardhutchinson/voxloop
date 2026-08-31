@@ -172,7 +172,8 @@ has no mail path — so a user created today cannot sign in until somebody issue
 The account list says which users are awaiting enrolment and which already have a code
 outstanding. Locking an account and forcing a password reset both end every sign-in the user
 holds, immediately; issuing a code does neither, which is why forcing a reset is the separate
-act it is.
+act it is. A user's **Roles** page is which positions they may assume, which is the only
+authority a user carries — see [Eligibility](#eligibility).
 
 **The last system administrator cannot be locked, deleted or stripped of the flag.** *Last*
 counts flag holders and nothing else, deliberately: narrowing it to the ones who could sign
@@ -208,7 +209,7 @@ half-applied. A new loop lands at the end, because appending is the only honest 
 for something VoxLoop has been told nothing about.
 
 Nothing on those two pages says which role may hear or say what on which loop. That is the
-grid, below.
+grid, below; who may assume a role is eligibility, below that.
 
 ### The grid
 
@@ -245,6 +246,38 @@ change does to anything live. No session exists yet, so that radius is empty; th
 there because the write and its audit entry commit in one transaction, and the radius is a
 value the write is handed rather than a field it may omit
 ([ADR-0039](docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md)).
+
+### Eligibility
+
+**Eligibility is the unconditional grant permitting a user to assume a role**, and it carries
+no permissions of its own. It says somebody may sit in a seat; what the seat can hear, say
+and command is the grid, and nothing about a grant widens a cell. Revoking it from somebody
+occupying the role ends their occupancy immediately, with the reason shown to them — the
+configuration write is here, and the half that ends a live occupancy arrives with sessions.
+
+**It is deliberately not a second matrix.** Rendered as one, 190 users against 15 roles was
+the least legible object the console prototype produced
+([ADR-0015](docs/adr/0015-the-admin-console-reads-one-row-at-a-time.md)), so it is
+administered from **two directions and no third**: a role's **Eligible** page answers *who
+may assume this*, and a user's **Roles** page answers *which roles may this person assume*.
+Each lists the grants and nobody else — whoever is not on it is picked from a box, which is a
+list to search rather than a wall to read. There is no whole-eligibility read anywhere in the
+API, which is the difference between this and the grid: a matrix is a reviewing act at
+fifteen roles by twenty loops, and it is not one at a hundred and ninety users.
+
+**Every user record starts eligible for `Observer`**, seeded as part of creating it — by the
+console, by the on-box CLI and by the bootstrap route alike. A deployment that renamed or
+deleted `Observer` has decided what its listen-only position is, and nothing is seeded rather
+than VoxLoop guessing which role replaced it.
+
+**Reach is never composed across the roles somebody may assume.** A session is bound to one
+role, so a person's reach is only ever one row's worth at a time, and a page that added them
+up would display authority nobody can hold. Answering *what can this person do* is their
+Roles page and then that role's Reach — one extra hop, taken knowingly.
+
+Granting and revoking are separate audit events, unlike a grid cell's one: a cell always
+holds one of four values and granting is setting it, but an eligibility is present or absent,
+and revoking has a consequence granting cannot have.
 
 ## Working on the console
 

@@ -221,7 +221,7 @@ impl Serving {
 /// be the same experience as reading `docs/spec/api-surface.md`.
 fn routes(api: &Api) -> RouteTable<Api> {
     use Requirement::{Public, SignedIn, SystemAdministration};
-    use administration::{grid, loops, roles, users};
+    use administration::{eligibility, grid, loops, roles, users};
 
     let mut table = RouteTable::new(Arc::clone(&api.store))
         .get("/api/liveness", Public, liveness::liveness)
@@ -258,6 +258,16 @@ fn routes(api: &Api) -> RouteTable<Api> {
             SystemAdministration,
             users::issue_enrolment_code,
         )
+        // Eligibility, from the user's side: *which roles may this person assume*. Its other
+        // half hangs off the role, below, and there is deliberately no third read — no
+        // `/api/eligibility`, no whole-eligibility document, nothing to render a wall from
+        // ([ADR-0015]). The grid has a matrix route because a matrix is a reviewing act at
+        // fifteen roles by twenty loops; at a hundred and ninety users it is not.
+        .get(
+            "/api/users/{id}/eligibility",
+            SystemAdministration,
+            eligibility::which_roles,
+        )
         // Roles and loops: the two configuration objects voice authority is expressed over.
         // Which role may hear or say what on which loop is the grid, and it is not here.
         .get("/api/roles", SystemAdministration, roles::list)
@@ -265,6 +275,12 @@ fn routes(api: &Api) -> RouteTable<Api> {
         .get("/api/roles/{id}", SystemAdministration, roles::read)
         .patch("/api/roles/{id}", SystemAdministration, roles::edit)
         .delete("/api/roles/{id}", SystemAdministration, roles::delete)
+        // Eligibility, from the role's side: *who may assume this*.
+        .get(
+            "/api/roles/{id}/eligibility",
+            SystemAdministration,
+            eligibility::who_may_assume,
+        )
         // The base order is registered before `{id}`, because it is the one path under
         // `/api/loops/` that names something other than a loop.
         .put("/api/loops/order", SystemAdministration, loops::set_order)
@@ -284,6 +300,19 @@ fn routes(api: &Api) -> RouteTable<Api> {
         // rather than patched. There is no route that clears one: setting `none` is how a
         // permission is taken away.
         .put("/api/grid/{role}/{loop}", SystemAdministration, grid::set)
+        // A grant is addressed by its pair and holds no value, so it is made and unmade
+        // rather than set: an eligibility is present or absent, and there is no rung for a
+        // body to carry. The user comes first because that is what the audit entry names.
+        .put(
+            "/api/eligibility/{user}/{role}",
+            SystemAdministration,
+            eligibility::grant,
+        )
+        .delete(
+            "/api/eligibility/{user}/{role}",
+            SystemAdministration,
+            eligibility::revoke,
+        )
         // Ruling on a loop's column, which writes cells rather than the loop.
         .post(
             "/api/loops/{id}/dismiss-unreviewed",
@@ -3110,6 +3139,346 @@ mod tests {
             ),
             ["none"],
             "a refused write landed anyway"
+        );
+    }
+
+    // ---- #35: eligibility ---------------------------------------------------------------
+
+    /// Every username in a list the console answered with, in the order it answered them.
+    fn usernames_in(body: &str) -> Vec<String> {
+        body.split("\"username\":\"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().expect("the username").to_owned())
+            .collect()
+    }
+
+    impl ABox {
+        /// Make a user through the console, and answer with their id.
+        async fn a_user_called(&self, held: &str, username: &str) -> String {
+            let made = self
+                .post_holding(held, "/api/users", &an_account(username, false))
+                .await;
+            assert_eq!(made.status, StatusCode::CREATED, "{:?}", made.body);
+
+            id_in(&made.body)
+        }
+
+        /// Grant eligibility, the way a role page or a user page does.
+        async fn grants(&self, held: &str, user: &str, role: &str) -> Answer {
+            self.holding(held, "PUT", &format!("/api/eligibility/{user}/{role}"), "")
+                .await
+        }
+
+        /// Revoke it, from either page.
+        async fn revokes(&self, held: &str, user: &str, role: &str) -> Answer {
+            self.holding(
+                held,
+                "DELETE",
+                &format!("/api/eligibility/{user}/{role}"),
+                "",
+            )
+            .await
+        }
+    }
+
+    /// Eligibility is administered from **two directions** ([ADR-0015]): from the role page,
+    /// answering *who may assume this*, and from the user page, answering *which roles may
+    /// this person assume*. Both are the same grants read two ways.
+    ///
+    /// [ADR-0015]: ../../../docs/adr/0015-the-admin-console-reads-one-row-at-a-time.md
+    #[tokio::test]
+    async fn eligibility_is_granted_and_read_back_from_the_role_and_from_the_user() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let capcom = box_of.a_user_called(&held, "capcom").await;
+        box_of.a_user_called(&held, "booster").await;
+        let director = box_of.a_role_called(&held, "Flight Director").await;
+        box_of.a_role_called(&held, "Thermal Engineer").await;
+
+        let granted = box_of.grants(&held, &capcom, &director).await;
+        assert_eq!(granted.status, StatusCode::CREATED, "{:?}", granted.body);
+
+        // From the role: who may assume this, and nobody else. A page listing every user on
+        // the deployment with a mark against some of them is the wall, one slice at a time.
+        let role_page = box_of
+            .get_holding(&held, &format!("/api/roles/{director}/eligibility"))
+            .await;
+        assert_eq!(role_page.status, StatusCode::OK, "{:?}", role_page.body);
+        assert_eq!(names_in(&role_page.body), ["Flight Director"]);
+        assert_eq!(
+            usernames_in(&role_page.body),
+            ["capcom"],
+            "the role page named somebody who may not assume it: {:?}",
+            role_page.body
+        );
+
+        // From the user: which roles may this person assume. `Observer` is there because
+        // every user record starts eligible for it.
+        let user_page = box_of
+            .get_holding(&held, &format!("/api/users/{capcom}/eligibility"))
+            .await;
+        assert_eq!(user_page.status, StatusCode::OK, "{:?}", user_page.body);
+        assert_eq!(usernames_in(&user_page.body), ["capcom"]);
+        assert_eq!(
+            names_in(&user_page.body),
+            ["Flight Director", "Observer"],
+            "the user page named a role they may not assume: {:?}",
+            user_page.body
+        );
+    }
+
+    /// **Eligibility is never rendered as a matrix** ([ADR-0015]). There is no whole read to
+    /// render one from — no route, and so nothing a console could ask for — which is the
+    /// difference between this and the grid, whose matrix survives as a reference view.
+    #[tokio::test]
+    async fn there_is_no_whole_eligibility_read_to_render_a_matrix_from() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let user = box_of.a_user_called(&held, "capcom").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        box_of.grants(&held, &user, &role).await;
+
+        for path in ["/api/eligibility", "/api/eligibility/"] {
+            let answer = box_of.get_holding(&held, path).await;
+
+            assert_eq!(
+                answer.status,
+                StatusCode::NOT_FOUND,
+                "something answered a whole-eligibility read at {path}: {:?}",
+                answer.body
+            );
+        }
+    }
+
+    /// Revoking is a deletion: the grant is gone rather than reduced, and there is no lesser
+    /// value for it to fall back to.
+    #[tokio::test]
+    async fn revoking_eligibility_takes_the_grant_away_from_both_pages() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let user = box_of.a_user_called(&held, "capcom").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        box_of.grants(&held, &user, &role).await;
+
+        let revoked = box_of.revokes(&held, &user, &role).await;
+
+        assert_eq!(revoked.status, StatusCode::NO_CONTENT, "{:?}", revoked.body);
+        assert!(
+            usernames_in(
+                &box_of
+                    .get_holding(&held, &format!("/api/roles/{role}/eligibility"))
+                    .await
+                    .body
+            )
+            .is_empty(),
+            "somebody was left eligible on the role page"
+        );
+        assert_eq!(
+            names_in(
+                &box_of
+                    .get_holding(&held, &format!("/api/users/{user}/eligibility"))
+                    .await
+                    .body
+            ),
+            ["Observer"],
+            "the revoked role was left on the user page"
+        );
+    }
+
+    /// Revoking one nobody holds is a not-found rather than a quiet success, so an
+    /// administrator working from a stale page is told their page is stale.
+    #[tokio::test]
+    async fn a_grant_or_a_revocation_naming_nothing_is_a_not_found() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let user = box_of.a_user_called(&held, "capcom").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+
+        for (who, which) in [
+            ("no-such-user", role.as_str()),
+            (user.as_str(), "no-such-role"),
+        ] {
+            let answer = box_of.grants(&held, who, which).await;
+
+            assert_eq!(answer.status, StatusCode::NOT_FOUND, "{:?}", answer.body);
+        }
+        assert_eq!(
+            box_of.revokes(&held, &user, &role).await.status,
+            StatusCode::NOT_FOUND,
+            "revoking a grant nobody holds answered as though it had happened"
+        );
+        assert_eq!(
+            box_of
+                .get_holding(&held, "/api/roles/no-such-role/eligibility")
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            box_of
+                .get_holding(&held, "/api/users/no-such-user/eligibility")
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// Grants and revocations are audited with before and after, like every other
+    /// configuration write (v1 §12) — a grant with nothing before it, a revocation with
+    /// nothing after it, and the pair named in both.
+    #[tokio::test]
+    async fn grants_and_revocations_are_audited_with_before_and_after() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let user = box_of.a_user_called(&held, "capcom").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+
+        box_of.grants(&held, &user, &role).await;
+        box_of.revokes(&held, &user, &role).await;
+
+        let entries = box_of.entries().await;
+        let granted = entries
+            .iter()
+            .find(|entry| entry.event == AuditEvent::EligibilityGranted)
+            .expect("the grant to be audited");
+        let revoked = entries
+            .iter()
+            .find(|entry| entry.event == AuditEvent::EligibilityRevoked)
+            .expect("the revocation to be audited");
+
+        for (entry, before, after) in [
+            (granted, None, Some("user=capcom role=Flight Director")),
+            (revoked, Some("user=capcom role=Flight Director"), None),
+        ] {
+            let write = entry.write.as_ref().expect("a configuration write");
+            assert_eq!(entry.actor_name, "root");
+            // The entry names the **user**: eligibility is the one grant held by a person,
+            // so filtering the log to one is how *what was this person given* is answered.
+            assert_eq!(
+                write.target.as_ref().map(|target| target.as_str()),
+                Some(user.as_str())
+            );
+            assert_eq!(write.target_name, "capcom as Flight Director");
+            assert_eq!(write.before.as_ref().map(Snapshot::as_str), before);
+            assert_eq!(write.after.as_ref().map(Snapshot::as_str), after);
+        }
+    }
+
+    /// **Eligibility confers no permissions of its own** (v1 §1). It permits somebody to take
+    /// up a role; what the role can hear or say is the grid, and a grant moves no cell.
+    #[tokio::test]
+    async fn eligibility_confers_nothing_and_reach_comes_only_from_the_grid() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let user = box_of.a_user_called(&held, "capcom").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        box_of.a_ruled_on_loop_called(&held, "FLIGHT").await;
+
+        box_of.grants(&held, &user, &role).await;
+
+        assert_eq!(
+            permissions_in(
+                &box_of
+                    .get_holding(&held, &format!("/api/roles/{role}/grid"))
+                    .await
+                    .body
+            ),
+            ["none"],
+            "eligibility moved a cell on the grid"
+        );
+    }
+
+    /// Every user record is created with seeded `Observer` eligibility (v1 §2), whichever of
+    /// the callers that create users made it.
+    #[tokio::test]
+    async fn creating_a_user_seeds_observer_eligibility() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+
+        let user = box_of.a_user_called(&held, "capcom").await;
+
+        assert_eq!(
+            names_in(
+                &box_of
+                    .get_holding(&held, &format!("/api/users/{user}/eligibility"))
+                    .await
+                    .body
+            ),
+            ["Observer"],
+            "a user created through the console was not seeded with Observer eligibility"
+        );
+    }
+
+    /// The roles a signed-in user may assume are what the lobby is a list of, so the console
+    /// frame is told them when it opens (`docs/spec/api-surface.md`).
+    #[tokio::test]
+    async fn the_signed_in_user_is_told_which_roles_they_may_assume() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let user = box_of.a_user_who_can_sign_in("flight", false).await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        box_of.grants(&held, &user, &role).await;
+
+        let own = box_of
+            .get_holding(&box_of.signed_in_as("flight").await, "/api/principal")
+            .await;
+
+        assert_eq!(own.status, StatusCode::OK, "{:?}", own.body);
+        assert_eq!(
+            names_in(&own.body),
+            ["Flight Director", "Observer"],
+            "the frame was not told which roles this person may assume: {:?}",
+            own.body
+        );
+    }
+
+    /// Eligibility is `SystemAdministration` like every other configuration surface, and a
+    /// refused write is audited while a refused read is not (v1 §3).
+    #[tokio::test]
+    async fn nobody_but_a_system_administrator_may_read_or_write_eligibility() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        let user = box_of.a_user_who_can_sign_in("flight", false).await;
+        let theirs = box_of.signed_in_as("flight").await;
+
+        assert_eq!(
+            box_of.grants(&theirs, &user, &role).await.status,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            box_of.revokes(&theirs, &user, &role).await.status,
+            StatusCode::FORBIDDEN
+        );
+        for path in [
+            format!("/api/roles/{role}/eligibility"),
+            format!("/api/users/{user}/eligibility"),
+        ] {
+            assert_eq!(
+                box_of.get_holding(&theirs, &path).await.status,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        let refused = box_of
+            .entries()
+            .await
+            .into_iter()
+            .filter(|entry| entry.event == AuditEvent::AdministrationRefused)
+            .count();
+        assert_eq!(
+            refused, 2,
+            "a refused write was not audited, or a refused read was"
+        );
+        assert!(
+            usernames_in(
+                &box_of
+                    .get_holding(&held, &format!("/api/roles/{role}/eligibility"))
+                    .await
+                    .body
+            )
+            .is_empty(),
+            "a refused grant landed anyway"
         );
     }
 }

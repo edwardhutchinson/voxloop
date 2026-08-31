@@ -3,17 +3,21 @@
 	// users (v1 §1). Single-occupant and multi-occupant roles are one concept under different
 	// limits, so there is one list here and no kinds.
 	//
-	// Who may assume a role is eligibility, and it is not here. What a role may hear or say is
-	// the grid, and that **is** here — one page deeper, as the role's row read as a list
-	// (ADR-0015).
+	// A role has two pages under it, one for each question asked about it: **Reach** is the
+	// role's row on the grid — what it may hear and say — and **Eligible** is who may assume
+	// it. The second is one of eligibility's two directions (ADR-0015); the other hangs off
+	// the user, and there is no view of the whole.
 	import Confirm from './Confirm.svelte';
 	import RolePage from './RolePage.svelte';
+	import WhoMayAssume from './WhoMayAssume.svelte';
 	import { createRole, deleteRole, editRole, roles, whatWentWrong } from './server.js';
 
 	let allRoles = $state([]);
 	// The role whose row is being read, where one is. The list is the way in to it, so a
 	// reach edit always starts from the position it belongs to.
 	let reaching = $state(null);
+	// The role whose eligibility is being administered, on the same footing.
+	let admitting = $state(null);
 	let refusal = $state(null);
 	let reading = $state(true);
 	let confirming = $state(null);
@@ -87,14 +91,17 @@
 
 {#if reaching}
 	<RolePage role={reaching} onback={() => (reaching = null)} />
+{:else if admitting}
+	<WhoMayAssume role={admitting} onback={() => (admitting = null)} />
 {:else}
 	<section>
 		<header>
 			<h2>Roles</h2>
 			<p>
 				A role is a position somebody assumes, with a limit on how many may hold it at once.
-				Leave the limit empty for no limit. Install seeds <strong>Observer</strong>, which a
-				site renames like any other role.
+				Leave the limit empty for no limit. <strong>Reach</strong> is what the role may hear
+				and say; <strong>Eligible</strong> is who may assume it. Install seeds
+				<strong>Observer</strong>, which a site renames like any other role.
 			</p>
 		</header>
 
@@ -152,6 +159,9 @@
 								<td class="acts">
 									<button onclick={() => (reaching = { id: role.id, name: role.name })}>
 										Reach
+									</button>
+									<button onclick={() => (admitting = { id: role.id, name: role.name })}>
+										Eligible
 									</button>
 									<button onclick={() => open(role)}>Edit</button>
 									<button

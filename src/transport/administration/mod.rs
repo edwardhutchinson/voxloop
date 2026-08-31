@@ -1,9 +1,10 @@
 //! System administration: the audited write path, and the pages that write through it.
 //!
 //! Users are the console's first page ([`users`]); roles and loops are the two configuration
-//! objects voice authority is expressed over ([`roles`], [`loops`]), and the [`grid`] is the
-//! one value each (role, loop) pair holds. All of them are administered the same way, and
-//! three things about that way are settled here rather than per operation:
+//! objects voice authority is expressed over ([`roles`], [`loops`]), the [`grid`] is the one
+//! value each (role, loop) pair holds, and [`eligibility`] is who may assume which role. All
+//! of them are administered the same way, and three things about that way are settled here
+//! rather than per operation:
 //!
 //! - **The write and its audit entry commit together.** One transaction opened by the
 //!   handler, both written through it, one commit ([ADR-0038]) — which is why Audit is not a
@@ -23,6 +24,7 @@
 //! [ADR-0039]: ../../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
 //! [ADR-0060]: ../../../docs/adr/0060-a-seam-names-domain-operations.md
 
+pub(super) mod eligibility;
 pub(super) mod grid;
 pub(super) mod loops;
 pub(super) mod roles;
