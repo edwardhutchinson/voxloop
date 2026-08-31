@@ -25,6 +25,11 @@
 	// The lobby, or the admin console. Two surfaces one person may hold at once, never a
 	// role and never a mode: an administrator is in the lobby the whole time they are in
 	// here.
+	//
+	// **It belongs to a sign-in and never outlives one.** Every sign-in starts in the lobby,
+	// whoever the last one was: the admin console is where an administrator went, not where
+	// the browser is, and a tab that came back to it for the next person would be showing a
+	// surface that person may have no business on.
 	let administering = $state(false);
 	// What the server said on its way out, where it said anything: a sign-in that ended
 	// somewhere else is a different fact from a tab that was closed, and the person in front
@@ -43,6 +48,12 @@
 	// server again hands back a new answer object each time, and an effect watching *that*
 	// would tear the socket down and open another one for a sign-in that never changed.
 	const signedIn = $derived(who !== null);
+	// Which surface is on screen, decided by the flag **as the server last reported it** and
+	// not by the choice on its own. The console opens on the system-administration flag and
+	// never on a role (v1 §9), and the flag is read from the store per request rather than
+	// carried in the cookie — so the frame reads the same way, and a flag that has gone takes
+	// the surface with it rather than leaving it up until something is clicked.
+	const onTheAdminConsole = $derived(administering && who?.system_administration === true);
 
 	$effect(() => {
 		ask();
@@ -90,6 +101,7 @@
 			await signOut();
 		} finally {
 			who = null;
+			administering = false;
 			lobby = null;
 			refused = null;
 			ended = null;
@@ -124,14 +136,14 @@
 				Signed in as <strong>{who.username}</strong>
 				{#if who.system_administration}
 					<button onclick={() => (administering = !administering)}>
-						{administering ? 'Lobby' : 'Admin console'}
+						{onTheAdminConsole ? 'Lobby' : 'Admin console'}
 					</button>
 				{/if}
 				<button onclick={leave}>Sign out</button>
 			</p>
 		</header>
 
-		{#if administering}
+		{#if onTheAdminConsole}
 			<AdminConsole />
 		{:else}
 			<Lobby {lobby} {lost} {refused} />
