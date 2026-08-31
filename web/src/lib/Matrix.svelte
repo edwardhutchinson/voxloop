@@ -95,6 +95,9 @@
 		overflow-x: auto;
 	}
 
+	/* A cell holds one word out of four and a heading holds a name, and neither wraps: the
+	   grid is read by its shape, and one wrapped cell would set the height of its whole row.
+	   Sideways is where it gives, which is what the rule above is about. */
 	td,
 	th {
 		white-space: nowrap;

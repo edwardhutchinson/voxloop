@@ -25,7 +25,11 @@
 
 <nav>
 	{#each pages as page (page.name)}
-		<button class:showing={page === showing} onclick={() => (showing = page)}>
+		<button
+			class:showing={page === showing}
+			aria-current={page === showing ? 'page' : undefined}
+			onclick={() => (showing = page)}
+		>
 			{page.name}
 		</button>
 	{/each}
@@ -40,7 +44,11 @@
 		margin-bottom: var(--space-6);
 	}
 
+	/* The page being read is marked twice over: the border brightens and the name is
+	   underlined. A brighter border on its own would be a state carried by colour, which is
+	   the one thing the standard will not have. */
 	.showing {
 		border-color: var(--ink);
+		text-decoration: underline;
 	}
 </style>

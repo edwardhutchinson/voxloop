@@ -55,8 +55,8 @@
 		/>
 	{:else}
 		<SignIn onSignedIn={ask} note={enrolled ? 'Password set. Sign in with it.' : null} />
-		<p class="aside">
-			<button class="plain" onclick={() => ((enrolling = true), (enrolled = false))}>
+		<p class="otherway">
+			<button class="lesser" onclick={() => ((enrolling = true), (enrolled = false))}>
 				I have an enrolment code
 			</button>
 		</p>
@@ -86,6 +86,8 @@
 
 <style>
 	main {
+		/* A measure for the tables rather than for prose: the widest of them is the user list,
+		   and past this the acts column ends up an eye's travel from the name it acts on. */
 		max-width: 60rem;
 		margin: 0 auto;
 		padding: var(--space-6) var(--space-5) var(--space-page-bottom);
@@ -99,12 +101,6 @@
 		padding-bottom: var(--space-4);
 		margin-bottom: var(--space-6);
 		border-bottom: 1px solid var(--rule);
-	}
-
-	h1 {
-		margin: 0;
-		font-size: var(--type-5);
-		letter-spacing: 0.02em;
 	}
 
 	header p {
@@ -121,18 +117,11 @@
 	}
 
 	/* The way in for somebody holding an enrolment code, under the sign-in form rather than
-	   beside it: it is the rarer of the two acts and reads as the afterthought it is. */
-	.aside {
+	   beside it: it is the rarer of the two acts and reads as the afterthought it is. The
+	   measure is the form's own, so the two line up. */
+	.otherway {
 		max-width: 22rem;
 		margin: var(--space-3) auto 0;
 		font-size: var(--type-2);
-	}
-
-	.plain {
-		background: none;
-		border: 0;
-		padding: 0;
-		color: var(--quiet);
-		text-decoration: underline dotted;
 	}
 </style>

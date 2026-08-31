@@ -8,6 +8,7 @@
 	// it. The second is one of eligibility's two directions (ADR-0015); the other hangs off
 	// the user, and there is no view of the whole.
 	import Confirm from './Confirm.svelte';
+	import Icon from './Icon.svelte';
 	import RolePage from './RolePage.svelte';
 	import WhoMayAssume from './WhoMayAssume.svelte';
 	import { createRole, deleteRole, editRole, roles, whatWentWrong } from './server.js';
@@ -119,7 +120,7 @@
 				bind:value={creating.maxOccupants}
 				placeholder="Max occupants"
 			/>
-			<button type="submit">Create</button>
+			<button type="submit"><Icon name="plus" /> Create</button>
 		</form>
 
 		{#if reading}
@@ -164,14 +165,14 @@
 									<button onclick={() => (admitting = { id: role.id, name: role.name })}>
 										Eligible
 									</button>
-									<button onclick={() => open(role)}>Edit</button>
+									<button onclick={() => open(role)}><Icon name="pencil" /> Edit</button>
 									<button
 										class="destructive"
 										onclick={() =>
 											(confirming = {
 												act: () => deleteRole(role.id),
 												consequence: `${role.name} is deleted, and every grant of eligibility for it goes with it. Nobody can assume it again, and its audit entries stay, attributed.`
-											})}>Delete</button
+											})}><Icon name="trash-2" /> Delete</button
 									>
 								</td>
 							{/if}
@@ -192,6 +193,9 @@
 {/if}
 
 <style>
+	/* Wide enough for the `Max occupants` placeholder, which is the widest thing the box ever
+	   holds: what it takes is a small number, and a field the width of the name beside it
+	   would suggest otherwise. */
 	.limit {
 		width: 9rem;
 	}

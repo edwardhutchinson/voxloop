@@ -100,7 +100,9 @@
 				<option value={account.id}>{account.username}</option>
 			{/each}
 		</select>
-		<button type="submit" disabled={granting === ''}>Make eligible</button>
+		<button type="submit" disabled={granting === ''}>
+			<Icon name="plus" /> Make eligible
+		</button>
 	</form>
 
 	{#if reading}
@@ -126,7 +128,7 @@
 									(confirming = {
 										act: () => revokeEligibility(user.id, role.id),
 										consequence: `${user.username} can no longer assume ${page.role.name}. If they are occupying it, their occupancy ends immediately and they are told why.`
-									})}>Revoke</button
+									})}><Icon name="trash-2" /> Revoke</button
 							>
 						</td>
 					</tr>
@@ -143,9 +145,3 @@
 		/>
 	{/if}
 </section>
-
-<style>
-	.back {
-		margin: 0 0 var(--space-5);
-	}
-</style>

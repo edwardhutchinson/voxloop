@@ -26,15 +26,15 @@
 	}
 </script>
 
-<form onsubmit={attempt}>
+<form class="wayin" onsubmit={attempt}>
 	<h1>VoxLoop</h1>
 
-	<label>
+	<label class="field">
 		Username
 		<input bind:value={username} autocomplete="username" required />
 	</label>
 
-	<label>
+	<label class="field">
 		Password
 		<input type="password" bind:value={password} autocomplete="current-password" required />
 	</label>
@@ -47,33 +47,3 @@
 		<p class="quiet" role="status">{note}</p>
 	{/if}
 </form>
-
-<style>
-	form {
-		display: grid;
-		gap: var(--space-4);
-		max-width: 22rem;
-		margin: var(--space-6) auto 0;
-	}
-
-	h1 {
-		margin: 0;
-		font-size: var(--type-5);
-		letter-spacing: 0.02em;
-	}
-
-	label {
-		display: grid;
-		gap: var(--space-1);
-		font-size: var(--type-2);
-		color: var(--quiet);
-	}
-
-	.refusal {
-		margin: 0;
-	}
-
-	.quiet {
-		margin: 0;
-	}
-</style>

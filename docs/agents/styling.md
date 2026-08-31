@@ -19,16 +19,20 @@ are spacing under another name and go by the same rule, and so does a size hidde
 example: *past roughly 26 to 30 loops this scrolls sideways*. If the next author would undo
 the rule without knowing something, write the something down.
 
-**Shared furniture is a bare element selector in `app.css`.** `button`, `input`, `table`,
-`th`, `td`, `h2`, plus the utility classes `.quiet`, `.refusal`, `.destructive`, `.acts`,
-`.new`, `.name` and `.awaiting`. Styling the bare element means an unstyled `<button>` is
-already correct. **A component never declares `:global()`** — if a rule has to escape the
-component, it is furniture and it belongs in `app.css`. **And never an inline `style`
-attribute**: it is out of reach of every rule here, which is the whole of the case against it.
+**Shared furniture is a bare element selector in `app.css`.** `button`, `input`, `select`,
+`table`, `th`, `td`, `h1`, `h2`, plus the utility classes `.quiet`, `.refusal`,
+`.destructive`, `.acts`, `.new`, `.name`, `.lesser`, `.wayin`, `.field`, `.back`, `.meaning`
+and `.awaiting`. Styling the bare element means an unstyled `<button>` is already correct.
+**A component never declares `:global()`** — if a rule has to escape the component, it is
+furniture and it belongs in `app.css`. **And never an inline `style` attribute**: it is out
+of reach of every rule here, which is the whole of the case against it.
 
 The second time a block is written out identically in two components, it is furniture and it
 moves. `.awaiting` — the panel in the corner holding something out to the administrator — got
-here that way, from `Confirm.svelte` and the enrolment code in `Users.svelte`.
+here that way, from `Confirm.svelte` and the enrolment code in `Users.svelte`, and #71 moved
+`h1`, `.wayin`, `.field`, `.back`, `.meaning` and `.lesser` the same way. `SignIn.svelte`,
+`Enrol.svelte`, `WhichRoles.svelte`, `WhoMayAssume.svelte` and `RolePage.svelte` were left
+with no `<style>` block at all, which is what the rule looks like when it is working.
 
 **A component exists where there is behaviour, not where there is appearance.** `Confirm.svelte`
 is a component because it holds a decision. A wrapper that only sets classes is not.

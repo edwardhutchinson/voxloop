@@ -45,15 +45,15 @@
 	</p>
 
 	<form onsubmit={attempt}>
-		<label>
+		<label class="field">
 			Current
 			<input type="password" bind:value={current} autocomplete="current-password" required />
 		</label>
-		<label>
+		<label class="field">
 			New
 			<input type="password" bind:value={next} autocomplete="new-password" required />
 		</label>
-		<label>
+		<label class="field">
 			New again
 			<input type="password" bind:value={again} autocomplete="new-password" required />
 		</label>
@@ -77,16 +77,11 @@
 	form {
 		display: flex;
 		gap: var(--space-3);
+		/* Each field is a label stacked over its input, so the row is aligned on its bottom
+		   edge: the button then sits on the inputs' line rather than halfway up the labels. */
 		align-items: end;
 		margin-top: var(--space-5);
 		flex-wrap: wrap;
-	}
-
-	label {
-		display: grid;
-		gap: var(--space-1);
-		font-size: var(--type-2);
-		color: var(--quiet);
 	}
 
 	.refusal {

@@ -6,6 +6,8 @@
 	//
 	// There is nothing else on a cell. No per-user exception, no deny, no override — if this
 	// control ever grows a fifth thing, the model has grown a second layer.
+	import Icon from './Icon.svelte';
+
 	let { held, of, onset, busy = false } = $props();
 
 	const rungs = ['none', 'monitor', 'emit', 'control'];
@@ -19,6 +21,11 @@
 			disabled={busy}
 			onclick={() => onset(rung)}
 		>
+			<!-- The mark, and not only the brighter ink: which rung a cell holds is a state, and
+			     a state is never carried by colour alone. -->
+			<span class="mark"
+				>{#if rung === held}<Icon name="check" />{/if}</span
+			>
 			{rung}
 		</button>
 	{/each}
@@ -34,6 +41,14 @@
 		font-size: var(--type-1);
 		padding: var(--space-1) var(--space-2);
 		color: var(--quiet);
+	}
+
+	/* One em wide whether or not it holds the mark, which is the width of the icon that goes
+	   in it: setting a permission must not shuffle the other three rungs sideways under the
+	   pointer that has just pressed one. */
+	.mark {
+		display: inline-block;
+		width: 1em;
 	}
 
 	.held {
