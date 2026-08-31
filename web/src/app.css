@@ -1,0 +1,164 @@
+/* The console's whole styling standard: one scale, one palette, and the furniture every
+   page shares. Everything else is a scoped `<style>` block in the component it belongs to
+   (ADR-0069), and `docs/agents/styling.md` is the rules without the reasoning.
+
+   Nothing here is new. Every value is one the console already used, or the snapping
+   together of two that were doing one value's work. */
+
+:root {
+	/* Six steps. The console reached for twelve distinct spacing values before this file
+	   existed, and they resolved to about six once laid side by side. */
+	--space-1: 0.25rem;
+	--space-2: 0.5rem;
+	--space-3: 0.75rem;
+	--space-4: 1rem;
+	--space-5: 1.5rem;
+	--space-6: 2rem;
+
+	/* Named for what it does rather than where it sits on the scale: it clears the transmit
+	   bar, which is never scrolled away (v1 §8). */
+	--space-page-bottom: 6rem;
+
+	/* Five steps over the 15px root below. */
+	--type-1: 0.75rem;
+	--type-2: 0.85rem;
+	--type-3: 1rem;
+	--type-4: 1.1rem;
+	--type-5: 1.25rem;
+
+	--radius: 0.2rem;
+
+	/* Seven colours, and a new one has to cite the spec line demanding it. Dark only: v1 §10
+	   lists every personalisation item and no theme is among them, and control rooms are
+	   dark. The names are semantic anyway, so a light theme stays possible at no cost today. */
+	--ground: #14161a;
+	--raised: #1d2026;
+	--ink: #e8eaed;
+	--quiet: #9aa1ad;
+	--rule: #2f343d;
+	--refusal: #e8a0a0;
+
+	/* v1 §8: `0 hearing` renders in the warning colour, and the operator keys anyway if they
+	   mean to. Never the only thing carrying a state — the words are always there too. */
+	--warning: #e8c07a;
+
+	color-scheme: dark;
+	background: var(--ground);
+	color: var(--ink);
+	font:
+		15px/1.5 system-ui,
+		sans-serif;
+}
+
+body {
+	margin: 0;
+}
+
+/* The furniture. Bare element selectors, so an unstyled `<button>` is already right and
+   nobody can forget an import. A component exists where there is behaviour rather than
+   appearance, which is what `Confirm.svelte` is. */
+
+button {
+	font: inherit;
+	color: var(--ink);
+	background: var(--raised);
+	border: 1px solid var(--rule);
+	border-radius: var(--radius);
+	padding: var(--space-1) var(--space-3);
+	cursor: pointer;
+}
+
+input {
+	font: inherit;
+	color: var(--ink);
+	background: var(--ground);
+	border: 1px solid var(--rule);
+	border-radius: var(--radius);
+	padding: var(--space-1) var(--space-2);
+}
+
+/* Three readings of one console, so a table that looked different per page would be saying
+   the pages were different kinds of thing. */
+
+h2 {
+	margin: 0;
+	font-size: var(--type-4);
+}
+
+table {
+	width: 100%;
+	border-collapse: collapse;
+}
+
+th,
+td {
+	text-align: left;
+	padding: var(--space-2) var(--space-3) var(--space-2) 0;
+	border-bottom: 1px solid var(--rule);
+	vertical-align: top;
+}
+
+th {
+	font-size: var(--type-1);
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--quiet);
+}
+
+/* The utility classes. Each says what a thing is in the domain, never how it looks. */
+
+.quiet {
+	margin: var(--space-1) 0 0;
+	color: var(--quiet);
+	font-size: var(--type-2);
+}
+
+/* Two names for one rendering, deliberately. A refusal is the server declining something and
+   a destructive act is one about to be taken; they read alike and they are not the same
+   thing, so a rule that later tells them apart has somewhere to go. */
+.refusal,
+.destructive {
+	color: var(--refusal);
+}
+
+.acts {
+	text-align: right;
+	white-space: nowrap;
+}
+
+.new {
+	display: flex;
+	gap: var(--space-3);
+	align-items: center;
+	margin: var(--space-5) 0;
+	flex-wrap: wrap;
+}
+
+/* Something the console is holding out to the administrator, and which does not go away by
+   being looked at: a consequence waiting to be committed, or an enrolment code that is shown
+   exactly once. It sits in the corner rather than over the page, because neither of them is
+   an interruption of the work — they are the result of it. */
+.awaiting {
+	position: fixed;
+	inset: auto var(--space-5) var(--space-5) auto;
+	max-width: 28rem;
+	padding: var(--space-4);
+	background: var(--raised);
+	border: 1px solid var(--rule);
+	border-radius: var(--radius);
+}
+
+.awaiting p {
+	margin: 0 0 var(--space-3);
+}
+
+/* A name is edited by clicking it, so it is a button that reads as text. */
+.name {
+	background: none;
+	border: 0;
+	padding: 0;
+	color: inherit;
+	font: inherit;
+	text-decoration: underline dotted;
+	cursor: pointer;
+}

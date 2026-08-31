@@ -27,12 +27,12 @@
 <style>
 	.rungs {
 		display: flex;
-		gap: 0.25rem;
+		gap: var(--space-1);
 	}
 
 	.rungs button {
-		font-size: 0.8rem;
-		padding: 0.2rem 0.55rem;
+		font-size: var(--type-1);
+		padding: var(--space-1) var(--space-2);
 		color: var(--quiet);
 	}
 

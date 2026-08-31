@@ -315,12 +315,26 @@ wrapper may only ever *add a source* to it, so
 failing build rather than something review has to catch. Import `$lib/input`; nothing
 beneath it.
 
+### Styling
+
+There is no CSS framework and no component library. Svelte scopes CSS per component, so the
+usual case for a utility framework — escaping the cascade — does not apply; what a framework
+would have bought is a fixed scale, and `web/src/app.css` is that scale, plus the palette and
+the furniture every page shares. The console is dark only
+([ADR-0069](docs/adr/0069-styling-is-scoped-css-over-one-token-file.md)).
+
+The rules for writing a component — and for adding an icon to `icons.js`, which holds
+hand-picked Lucide path data rather than a dependency — are in
+[`docs/agents/styling.md`](docs/agents/styling.md). The ones a machine can read are enforced
+by `npm test`: no literal spacing, type or radius values, no colour outside `app.css`, and no
+`:global()` in a component.
+
 ## Tests
 
 ```sh
 cargo test                      # the binary, without the console embedded
 cargo test --features embed-web # the same, plus the embedded bundle (needs npm run build)
-cd web && npm test              # the console: that the seam rule still refuses what it must
+cd web && npm test              # the console: the seam rule, the styling standard, the icons
 ```
 
 Tests run against the real store: each one opens a temporary SQLite file, migrates it and

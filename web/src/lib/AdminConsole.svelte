@@ -36,8 +36,8 @@
 <style>
 	nav {
 		display: flex;
-		gap: 0.5rem;
-		margin-bottom: 2rem;
+		gap: var(--space-2);
+		margin-bottom: var(--space-6);
 	}
 
 	.showing {

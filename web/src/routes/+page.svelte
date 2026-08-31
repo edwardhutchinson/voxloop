@@ -85,156 +85,47 @@
 {/if}
 
 <style>
-	:global(:root) {
-		--ground: #14161a;
-		--raised: #1d2026;
-		--ink: #e8eaed;
-		--quiet: #9aa1ad;
-		--rule: #2f343d;
-		--refusal: #e8a0a0;
-
-		color-scheme: dark;
-		background: var(--ground);
-		color: var(--ink);
-		font:
-			15px/1.5 system-ui,
-			sans-serif;
-	}
-
-	:global(body) {
-		margin: 0;
-	}
-
-	:global(button) {
-		font: inherit;
-		color: var(--ink);
-		background: var(--raised);
-		border: 1px solid var(--rule);
-		border-radius: 0.2rem;
-		padding: 0.3rem 0.7rem;
-		cursor: pointer;
-	}
-
-	:global(input) {
-		font: inherit;
-		color: var(--ink);
-		background: var(--ground);
-		border: 1px solid var(--rule);
-		border-radius: 0.2rem;
-		padding: 0.35rem 0.5rem;
-	}
-
-	/* The furniture every admin console page shares. It is here rather than repeated in each
-	   of them because they are three readings of one console, and a table that looked
-	   different per page would say the pages were different kinds of thing. */
-	:global(h2) {
-		margin: 0;
-		font-size: 1.1rem;
-	}
-
-	:global(header p),
-	:global(.quiet) {
-		margin: 0.25rem 0 0;
-		color: var(--quiet);
-		font-size: 0.85rem;
-	}
-
-	:global(.refusal) {
-		color: var(--refusal);
-	}
-
-	:global(.new) {
-		display: flex;
-		gap: 0.75rem;
-		align-items: center;
-		margin: 1.5rem 0;
-		flex-wrap: wrap;
-	}
-
-	:global(table) {
-		width: 100%;
-		border-collapse: collapse;
-	}
-
-	:global(th),
-	:global(td) {
-		text-align: left;
-		padding: 0.5rem 0.75rem 0.5rem 0;
-		border-bottom: 1px solid var(--rule);
-		vertical-align: top;
-	}
-
-	:global(th) {
-		font-size: 0.75rem;
-		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		color: var(--quiet);
-	}
-
-	:global(.acts) {
-		text-align: right;
-		white-space: nowrap;
-	}
-
-	/* A name is edited by clicking it, so it is a button that reads as text. */
-	:global(.name) {
-		background: none;
-		border: 0;
-		padding: 0;
-		color: inherit;
-		font: inherit;
-		text-decoration: underline dotted;
-		cursor: pointer;
-	}
-
-	:global(.destructive) {
-		color: var(--refusal);
-	}
-
 	main {
 		max-width: 60rem;
 		margin: 0 auto;
-		padding: 2rem 1.5rem 6rem;
+		padding: var(--space-6) var(--space-5) var(--space-page-bottom);
 	}
 
 	header {
 		display: flex;
 		align-items: baseline;
 		justify-content: space-between;
-		gap: 1rem;
-		padding-bottom: 1rem;
-		margin-bottom: 2rem;
+		gap: var(--space-4);
+		padding-bottom: var(--space-4);
+		margin-bottom: var(--space-6);
 		border-bottom: 1px solid var(--rule);
 	}
 
 	h1 {
 		margin: 0;
-		font-size: 1.25rem;
+		font-size: var(--type-5);
 		letter-spacing: 0.02em;
 	}
 
 	header p {
 		margin: 0;
 		color: var(--quiet);
-		font-size: 0.85rem;
+		font-size: var(--type-2);
 		display: flex;
 		align-items: center;
-		gap: 0.75rem;
+		gap: var(--space-3);
 	}
 
 	.quiet {
-		color: var(--quiet);
-		padding: 2rem;
+		padding: var(--space-6);
 	}
 
-	.refusal {
-		color: var(--refusal);
-	}
-
+	/* The way in for somebody holding an enrolment code, under the sign-in form rather than
+	   beside it: it is the rarer of the two acts and reads as the afterthought it is. */
 	.aside {
 		max-width: 22rem;
-		margin: -2.5rem auto 0;
-		font-size: 0.85rem;
+		margin: var(--space-3) auto 0;
+		font-size: var(--type-2);
 	}
 
 	.plain {

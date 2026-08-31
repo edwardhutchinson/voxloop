@@ -238,14 +238,14 @@
 	.note {
 		display: block;
 		color: var(--quiet);
-		font-size: 0.75rem;
+		font-size: var(--type-1);
 	}
 
 	.unsaved {
 		display: flex;
 		align-items: center;
-		gap: 0.75rem;
-		margin-top: 1rem;
-		font-size: 0.85rem;
+		gap: var(--space-3);
+		margin-top: var(--space-4);
+		font-size: var(--type-2);
 	}
 </style>

@@ -9,6 +9,7 @@
 	// authority nobody can hold. Answering *what can this person do* is this page and then
 	// that role's reach — one extra hop, taken knowingly.
 	import Confirm from './Confirm.svelte';
+	import Icon from './Icon.svelte';
 	import {
 		grantEligibility,
 		revokeEligibility,
@@ -81,7 +82,7 @@
 		</p>
 	</header>
 
-	<p class="back"><button onclick={onback}>← All users</button></p>
+	<p class="back"><button onclick={onback}><Icon name="arrow-left" /> All users</button></p>
 
 	{#if refusal}
 		<p class="refusal" role="alert">{refusal}</p>
@@ -142,6 +143,6 @@
 
 <style>
 	.back {
-		margin: 0 0 1.5rem;
+		margin: 0 0 var(--space-5);
 	}
 </style>

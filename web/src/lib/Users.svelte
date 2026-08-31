@@ -251,7 +251,7 @@
 		{/if}
 
 		{#if issued}
-			<div class="issued" role="status">
+			<div class="awaiting" role="status">
 				<p>
 					An enrolment code for <strong>{issued.username}</strong>, good once, until
 					{until(issued.expires_at)}.
@@ -283,31 +283,17 @@
 	.outstanding {
 		display: block;
 		color: var(--quiet);
-		font-size: 0.75rem;
+		font-size: var(--type-1);
 	}
 
-	.issued {
-		position: fixed;
-		inset: auto 1.5rem 1.5rem auto;
-		max-width: 28rem;
-		padding: 1rem;
-		background: var(--raised);
-		border: 1px solid var(--rule);
-		border-radius: 0.25rem;
-	}
-
-	.issued p {
-		margin: 0 0 0.75rem;
-	}
-
-	.issued code {
+	.awaiting code {
 		display: block;
-		margin-bottom: 0.75rem;
-		padding: 0.5rem;
+		margin-bottom: var(--space-3);
+		padding: var(--space-2);
 		background: var(--ground);
 		border: 1px solid var(--rule);
-		border-radius: 0.2rem;
-		font-size: 0.95rem;
+		border-radius: var(--radius);
+		font-size: var(--type-3);
 		word-break: break-all;
 		user-select: all;
 	}

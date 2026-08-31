@@ -11,6 +11,7 @@
 	// Nothing granted here confers anything. Eligibility permits somebody to take up the
 	// position; what the position can hear or say is the grid, one page across.
 	import Confirm from './Confirm.svelte';
+	import Icon from './Icon.svelte';
 	import {
 		grantEligibility,
 		revokeEligibility,
@@ -86,7 +87,7 @@
 		</p>
 	</header>
 
-	<p class="back"><button onclick={onback}>← All roles</button></p>
+	<p class="back"><button onclick={onback}><Icon name="arrow-left" /> All roles</button></p>
 
 	{#if refusal}
 		<p class="refusal" role="alert">{refusal}</p>
@@ -145,6 +146,6 @@
 
 <style>
 	.back {
-		margin: 0 0 1.5rem;
+		margin: 0 0 var(--space-5);
 	}
 </style>

@@ -9,6 +9,7 @@
 	// from that moment the column says what somebody decided rather than what nobody has
 	// looked at.
 	import Confirm from './Confirm.svelte';
+	import Icon from './Icon.svelte';
 	import Rungs from './Rungs.svelte';
 	import { dismissUnreviewed, loopColumn, setCell, whatWentWrong } from './server.js';
 
@@ -65,7 +66,7 @@
 		</p>
 	</header>
 
-	<p class="back"><button onclick={onback}>← All loops</button></p>
+	<p class="back"><button onclick={onback}><Icon name="arrow-left" /> All loops</button></p>
 
 	{#if refusal}
 		<p class="refusal" role="alert">{refusal}</p>
@@ -126,15 +127,15 @@
 
 <style>
 	.back {
-		margin: 0 0 1.5rem;
+		margin: 0 0 var(--space-5);
 	}
 
 	.unreviewed {
 		display: flex;
 		align-items: center;
-		gap: 0.75rem;
+		gap: var(--space-3);
 		flex-wrap: wrap;
-		margin: 0 0 1.5rem;
-		font-size: 0.85rem;
+		margin: 0 0 var(--space-5);
+		font-size: var(--type-2);
 	}
 </style>
