@@ -69,39 +69,27 @@
 
 <style>
 	section {
-		margin-top: 3rem;
-		padding-top: 2rem;
+		margin-top: var(--space-6);
+		padding-top: var(--space-6);
 		border-top: 1px solid var(--rule);
-	}
-
-	h2 {
-		margin: 0;
-		font-size: 1.1rem;
-	}
-
-	.quiet {
-		margin: 0.25rem 0 0;
-		color: var(--quiet);
-		font-size: 0.85rem;
 	}
 
 	form {
 		display: flex;
-		gap: 0.75rem;
+		gap: var(--space-3);
 		align-items: end;
-		margin-top: 1.5rem;
+		margin-top: var(--space-5);
 		flex-wrap: wrap;
 	}
 
 	label {
 		display: grid;
-		gap: 0.35rem;
-		font-size: 0.85rem;
+		gap: var(--space-1);
+		font-size: var(--type-2);
 		color: var(--quiet);
 	}
 
 	.refusal {
-		margin: 0.75rem 0 0;
-		color: var(--refusal);
+		margin: var(--space-3) 0 0;
 	}
 </style>

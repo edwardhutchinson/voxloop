@@ -6,6 +6,7 @@
 	//
 	// This page answers *what can this role reach*. Who may assume the role is eligibility,
 	// and it is not here.
+	import Icon from './Icon.svelte';
 	import Rungs from './Rungs.svelte';
 	import { roleRow, setCell, whatWentWrong } from './server.js';
 
@@ -59,7 +60,7 @@
 		</p>
 	</header>
 
-	<p class="back"><button onclick={onback}>← All roles</button></p>
+	<p class="back"><button onclick={onback}><Icon name="arrow-left" /> All roles</button></p>
 
 	{#if refusal}
 		<p class="refusal" role="alert">{refusal}</p>
@@ -111,12 +112,12 @@
 
 <style>
 	.back {
-		margin: 0 0 1.5rem;
+		margin: 0 0 var(--space-5);
 	}
 
 	.note {
 		display: block;
 		color: var(--quiet);
-		font-size: 0.75rem;
+		font-size: var(--type-1);
 	}
 </style>

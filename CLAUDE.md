@@ -16,6 +16,11 @@ The five canonical triage roles, used verbatim as label strings. See `docs/agent
 
 Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
+### Styling
+
+The console's scale, palette and icon set, and the rules for writing a component. See
+`docs/agents/styling.md`.
+
 ### Running it
 
 `scripts/dev` builds the console, starts the server and makes an administrator, printing the

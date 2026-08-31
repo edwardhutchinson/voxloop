@@ -7,24 +7,8 @@
 	let { consequence, oncommit, oncancel } = $props();
 </script>
 
-<div class="confirming" role="alertdialog">
+<div class="awaiting" role="alertdialog">
 	<p>{consequence}</p>
 	<button onclick={oncommit}>Commit</button>
 	<button onclick={oncancel}>Cancel</button>
 </div>
-
-<style>
-	.confirming {
-		position: fixed;
-		inset: auto 1.5rem 1.5rem auto;
-		max-width: 28rem;
-		padding: 1rem;
-		background: var(--raised);
-		border: 1px solid var(--rule);
-		border-radius: 0.25rem;
-	}
-
-	.confirming p {
-		margin: 0 0 0.75rem;
-	}
-</style>

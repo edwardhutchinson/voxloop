@@ -73,28 +73,26 @@
 <style>
 	form {
 		display: grid;
-		gap: 1rem;
+		gap: var(--space-4);
 		max-width: 22rem;
-		margin: 4rem auto;
+		margin: var(--space-6) auto 0;
 	}
 
 	h1 {
 		margin: 0;
-		font-size: 1.5rem;
+		font-size: var(--type-5);
 		letter-spacing: 0.02em;
 	}
 
 	label {
 		display: grid;
-		gap: 0.35rem;
-		font-size: 0.85rem;
+		gap: var(--space-1);
+		font-size: var(--type-2);
 		color: var(--quiet);
 	}
 
 	.quiet {
 		margin: 0;
-		color: var(--quiet);
-		font-size: 0.85rem;
 	}
 
 	.plain {
@@ -106,6 +104,5 @@
 
 	.refusal {
 		margin: 0;
-		color: var(--refusal);
 	}
 </style>
