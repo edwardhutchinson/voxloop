@@ -40,9 +40,8 @@
 	<header>
 		<h2>Grid</h2>
 		<p>
-			Every role against every loop, for reading rather than for working in. Set a
-			permission from a role's page or a loop's page, where one cell is one line at full
-			size.
+			Every role against every loop, for reading rather than for working in. Set a permission from a
+			role's page or a loop's page, where one cell is one line at full size.
 		</p>
 	</header>
 
@@ -52,8 +51,8 @@
 		<p class="quiet">Reading…</p>
 	{:else if grid.roles.length === 0 || grid.loops.length === 0}
 		<p class="quiet">
-			There is nothing to lay out yet: a grid is roles against loops, and this deployment
-			has {grid.roles.length} of one and {grid.loops.length} of the other.
+			There is nothing to lay out yet: a grid is roles against loops, and this deployment has {grid
+				.roles.length} of one and {grid.loops.length} of the other.
 		</p>
 	{:else}
 		<div class="scrolls">
@@ -82,8 +81,8 @@
 		</div>
 		<p class="quiet">
 			A loop nobody has ruled on is marked in its heading. Its cells are enforced as
-			<strong>none</strong> whatever they say here, and it stays that way until somebody
-			rules on it from its loop page.
+			<strong>none</strong> whatever they say here, and it stays that way until somebody rules on it from
+			its loop page.
 		</p>
 	{/if}
 </section>

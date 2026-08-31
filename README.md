@@ -294,11 +294,33 @@ Vite serves the console on port 5173 with hot reload and proxies `/api` to the b
 `http://localhost` as a trustworthy origin; if signing in bounces you straight back to the
 form, that is what happened, and `scripts/dev` is the way round it.
 
+Formatting and lint:
+
+```sh
+cd web
+npm run format        # Prettier, writing
+npm run format:check  # Prettier, asking — this is what CI runs
+npm run lint          # ESLint
+```
+
+Prettier is configured to the console as it was already written — tabs, single quotes, 100
+columns — so it reflows nothing and every future diff is the change rather than the
+whitespace around it.
+
+ESLint's rule set is small on purpose, with one exception that is not a style opinion:
+**nothing outside Input may import Input's internals.** Input is the only client seam with
+real variation, and [ADR-0020](docs/adr/0020-the-browser-is-the-client.md) promises the Tauri
+wrapper may only ever *add a source* to it, so
+[ADR-0061](docs/adr/0061-module-privacy-is-the-seam-enforcement.md) makes that promise a
+failing build rather than something review has to catch. Import `$lib/input`; nothing
+beneath it.
+
 ## Tests
 
 ```sh
 cargo test                      # the binary, without the console embedded
 cargo test --features embed-web # the same, plus the embedded bundle (needs npm run build)
+cd web && npm test              # the console: that the seam rule still refuses what it must
 ```
 
 Tests run against the real store: each one opens a temporary SQLite file, migrates it and

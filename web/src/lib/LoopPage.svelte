@@ -59,9 +59,9 @@
 	<header>
 		<h2>{column?.loop.name ?? held.name}</h2>
 		<p>
-			Who may hear this loop, say anything on it, and hold operational authority over it.
-			An absent permission and a <strong>none</strong> are the same thing to the server; the
-			difference is only whether anybody has ruled on it.
+			Who may hear this loop, say anything on it, and hold operational authority over it. An absent
+			permission and a <strong>none</strong> are the same thing to the server; the difference is only
+			whether anybody has ruled on it.
 		</p>
 	</header>
 
@@ -74,8 +74,8 @@
 	{#if column?.loop.unreviewed}
 		<p class="unreviewed" role="status">
 			Nobody has ruled on this loop. Every cell below is enforced as <strong>none</strong>
-			until somebody does, whatever it is set to — either by setting every role's
-			permission here, or by dismissing the mark in one act.
+			until somebody does, whatever it is set to — either by setting every role's permission here, or
+			by dismissing the mark in one act.
 			<button
 				onclick={() =>
 					(confirming = {

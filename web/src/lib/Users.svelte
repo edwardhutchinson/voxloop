@@ -131,10 +131,10 @@
 		<header>
 			<h2>Users</h2>
 			<p>
-				A user is created here and sets their own password from an enrolment code, because
-				VoxLoop has no mail path. A code is single-use, expiring, and handed over out of
-				band; a reset is the same act again. <strong>Roles</strong> is which positions they
-				may assume, which is the only authority a user carries.
+				A user is created here and sets their own password from an enrolment code, because VoxLoop
+				has no mail path. A code is single-use, expiring, and handed over out of band; a reset is
+				the same act again. <strong>Roles</strong> is which positions they may assume, which is the only
+				authority a user carries.
 			</p>
 		</header>
 
@@ -203,9 +203,8 @@
 								{/if}
 							</td>
 							<td class="acts">
-								<button
-									onclick={() =>
-										(admitting = { id: account.id, username: account.username })}>Roles</button
+								<button onclick={() => (admitting = { id: account.id, username: account.username })}
+									>Roles</button
 								>
 								{#if account.locked}
 									<button
@@ -259,8 +258,8 @@
 				</p>
 				<code>{issued.code}</code>
 				<p class="quiet">
-					Hand it over out of band — in person, or over the comms you already have. VoxLoop
-					will not show it again, and issuing another invalidates this one.
+					Hand it over out of band — in person, or over the comms you already have. VoxLoop will not
+					show it again, and issuing another invalidates this one.
 				</p>
 				<button onclick={() => (issued = null)}>Done</button>
 			</div>

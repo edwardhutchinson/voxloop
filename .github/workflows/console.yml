@@ -1,0 +1,45 @@
+# The console's checks: formatting, lint and the Input seam test.
+#
+# There is no CI for the Rust half yet, and this is deliberately not the place it arrives.
+# The two halves ship as one artefact but they break in different ways and on different
+# timescales, and putting a Rust compile in front of a formatting check would make the fast
+# half wait on the slow one.
+name: Console
+
+on:
+  # Pull requests carry the branches; `main` is checked on the way in as well, so a merge
+  # that went in some other way still gets an answer. Scoping the push side keeps a branch
+  # with an open pull request from running everything twice.
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    name: Format, lint and the seam test
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+
+      # Each of these fails the build on its own, and they run whatever the one before did,
+      # so a lint error does not hide behind a stray space.
+      - run: npm run format:check
+
+      - run: npm run lint
+        if: ${{ !cancelled() }}
+
+      - run: npm test
+        if: ${{ !cancelled() }}

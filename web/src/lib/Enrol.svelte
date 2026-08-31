@@ -41,8 +41,8 @@
 <form onsubmit={attempt}>
 	<h1>Set your password</h1>
 	<p class="quiet">
-		An administrator issues an enrolment code and hands it over in person. It is good once.
-		VoxLoop has no mail path, so this is how a password is set and how one is reset.
+		An administrator issues an enrolment code and hands it over in person. It is good once. VoxLoop
+		has no mail path, so this is how a password is set and how one is reset.
 	</p>
 
 	<label>

@@ -11,7 +11,13 @@
 	// Nothing granted here confers anything. Eligibility permits somebody to take up the
 	// position; what the position can hear or say is the grid, one page across.
 	import Confirm from './Confirm.svelte';
-	import { grantEligibility, revokeEligibility, users, whatWentWrong, whoMayAssume } from './server.js';
+	import {
+		grantEligibility,
+		revokeEligibility,
+		users,
+		whatWentWrong,
+		whoMayAssume
+	} from './server.js';
 
 	let { role, onback } = $props();
 
@@ -73,10 +79,10 @@
 	<header>
 		<h2>{page?.role.name ?? role.name}</h2>
 		<p>
-			Who may assume this position. Eligibility is an unconditional grant and it carries
-			no permissions of its own — what this role can hear, say and command is its
-			<strong>reach</strong>, one page across. Revoking it from somebody occupying the role
-			ends their occupancy immediately, and they are told why.
+			Who may assume this position. Eligibility is an unconditional grant and it carries no
+			permissions of its own — what this role can hear, say and command is its
+			<strong>reach</strong>, one page across. Revoking it from somebody occupying the role ends
+			their occupancy immediately, and they are told why.
 		</p>
 	</header>
 
