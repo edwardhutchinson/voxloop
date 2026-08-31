@@ -11,7 +11,7 @@
 	// **Assuming is the act this page is for**, and it is the only one on it. An occupied
 	// single-occupant seat is offered as unavailable and says so in words rather than being
 	// hidden: a role missing from this list would be indistinguishable from one nobody made
-	// this person eligible for, and those are different facts. Asking its incumbent for it is
+	// this person eligible for, and those are different facts. Asking its occupant for it is
 	// a takeover request and arrives with #50.
 	//
 	// The document arrives from the frame rather than from a socket of this page's own,
@@ -95,23 +95,3 @@
 		</table>
 	{/if}
 </section>
-
-<style>
-	/* A session that ended is not a refusal and not a warning: it is the ordinary end of a
-	   shift, or a role taken up on another machine, and it is told once. It reads as the
-	   quiet statement of fact it is, and the words carry it — nothing here is colour alone. */
-	.ended {
-		margin: 0 0 var(--space-4);
-		color: var(--quiet);
-	}
-
-	/* Losing the signalling channel is not a refusal and not a destructive act, so it is not
-	   written like one: what is on screen is frozen and marked rather than blanked, because
-	   an empty page reads as *nothing is happening* when everything may be (ADR-0018). The
-	   sentence carries the state; the colour only makes it hard to walk past. The three-state
-	   ladder this is the first step of arrives with the console's connection state. */
-	.lost {
-		margin: 0 0 var(--space-4);
-		color: var(--warning);
-	}
-</style>

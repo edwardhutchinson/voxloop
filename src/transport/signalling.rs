@@ -278,13 +278,13 @@ struct Presence {
     session: String,
     /// The role this session is bound to. Exactly one, always: reach is never composed
     /// across roles and authority never belongs to the person (v1 §1).
-    role: Assumed,
+    role: AssumedRole,
     loops: Vec<Reachable>,
 }
 
 /// The role a session is bound to, named so a console can say what it is.
 #[derive(Serialize, Debug, Clone, PartialEq)]
-struct Assumed {
+struct AssumedRole {
     id: String,
     name: String,
 }
@@ -403,15 +403,24 @@ impl Conversation {
             return self.presence(Told::WhetherOrNotItMoved).await;
         }
 
+        Ok(vec![self.the_lobby().await?])
+    }
+
+    /// The lobby as it stands, stamped with the version it has earned.
+    ///
+    /// It is always worth sending — every caller of this is answering something the client
+    /// asked for, or putting a console back in the lobby it has just landed in — and the
+    /// version moves only where the document has.
+    async fn the_lobby(&mut self) -> Result<Outgoing, StoreError> {
         let lobby = self.lobby().await?;
 
-        Ok(vec![match self.already_sent(&lobby) {
+        Ok(match self.already_sent(&lobby) {
             true => Outgoing::Lobby {
                 version: self.lobby_version,
                 lobby,
             },
             false => self.versioned(lobby),
-        }])
+        })
     }
 
     /// Take up a role.
@@ -474,9 +483,10 @@ impl Conversation {
         let recorded = async {
             // The displaced session is recorded first, because that is the order the two
             // things happened in: the seat somebody was in was given up before the new one
-            // was taken.
+            // was taken. Its sign-in is back in the lobby, so its clock starts from now.
             if let Some(displaced) = &assumed.displaced {
                 record_the_end_of(&mut transaction, displaced).await?;
+                transaction.the_clock_starts_now(&displaced.sign_in).await?;
             }
 
             let actor_name = super::name_as_it_stands(&mut transaction, &self.user).await?;
@@ -500,10 +510,18 @@ impl Conversation {
                 .await
         }
         .await;
+
+        // **A seat is not taken unless the taking was recorded** (v1 §12). The live change
+        // had to come first, because the limit can only be enforced by making it — so a
+        // store that could not be written to undoes it here rather than leaving it standing.
+        // This socket is about to close, and a role occupied by a session nobody is on is a
+        // position nobody can take and nobody can free.
         match recorded {
             Ok(()) => transaction.commit().await?,
             Err(error) => {
                 transaction.roll_back().await?;
+                self.api.state.ended_by_its_own_holder(&assumed.session);
+
                 return Err(error);
             }
         }
@@ -527,18 +545,22 @@ impl Conversation {
         };
         self.sent_presence = None;
 
-        let Some(ended) = self.api.state.relinquish(&session, Ended::Relinquished) else {
+        // No tombstone: this socket is the one doing it and is answered directly, so a
+        // reason left behind would be a message with no reader.
+        let Some(ended) = self.api.state.ended_by_its_own_holder(&session) else {
             // It ended somewhere else between the requirement and here. Whoever ended it
             // recorded why, and the socket is told on its next tick.
             return self.pushed_presence().await;
         };
 
-        // The reason is taken here rather than left to the tick, so this socket is not told
-        // about an ending it performed itself as though it were news from elsewhere.
-        self.api.state.why_it_ended(&ended.session);
-        self.recorded_the_end_of(&ended).await?;
+        // **The session ends whether or not the log can be written.** Refusing to take
+        // somebody off the air because the store is unavailable is the wrong way round: they
+        // asked to stop, stopping is the safe direction, and an entry that could not be
+        // written is a fault to shout about rather than a reason to keep an operator keyed
+        // up. The socket closes after this, which is what says the deployment is unwell.
+        self.audit_that_it_ended(&ended).await?;
 
-        self.back_to_the_lobby(ended.why).await
+        self.back_to_the_lobby(ended.why.said()).await
     }
 
     /// The presence document, if this socket should be sent one.
@@ -603,7 +625,7 @@ impl Conversation {
             version,
             presence: Presence {
                 session: presence.session.as_str().to_owned(),
-                role: Assumed {
+                role: AssumedRole {
                     id: named.id.as_str().to_owned(),
                     name: named.name,
                 },
@@ -632,38 +654,25 @@ impl Conversation {
             .and_then(|session| self.api.state.why_it_ended(&session));
         self.sent_presence = None;
 
-        match ended {
-            Some(why) => self.back_to_the_lobby(why).await,
-            None => {
-                let mut said = vec![Outgoing::SessionEnded {
-                    reason: "That session has ended.".to_owned(),
-                }];
-                said.extend(self.the_lobby_afresh().await?);
-
-                Ok(said)
-            }
-        }
+        self.back_to_the_lobby(ended.map_or("That session has ended.", Ended::said))
+            .await
     }
 
     /// Say that the session ended and why, then what the lobby holds.
-    async fn back_to_the_lobby(&mut self, why: Ended) -> Result<Vec<Outgoing>, StoreError> {
-        let mut said = vec![Outgoing::SessionEnded {
-            reason: why.said().to_owned(),
-        }];
-        said.extend(self.the_lobby_afresh().await?);
-
-        Ok(said)
-    }
-
-    /// The lobby, sent whether or not it matches what this socket last saw of it.
     ///
-    /// Coming back from a session is a change of what is on screen rather than a change to
-    /// the lobby, and a socket that was shown the same lobby an hour ago still has to be
-    /// given it now.
-    async fn the_lobby_afresh(&mut self) -> Result<Vec<Outgoing>, StoreError> {
-        let lobby = self.lobby().await?;
-
-        Ok(vec![self.versioned(lobby)])
+    /// The lobby goes out **whether or not it has moved** — coming back from a session is a
+    /// change of what is on screen rather than a change to the lobby, and a socket that saw
+    /// this same lobby an hour ago still has to be given it now. Its **version does not move
+    /// for that**, because the version is about the document and not about who is looking at
+    /// it: bumping it here would make the number mean *how often you were sent this* rather
+    /// than *what is true*.
+    async fn back_to_the_lobby(&mut self, why: &str) -> Result<Vec<Outgoing>, StoreError> {
+        Ok(vec![
+            Outgoing::SessionEnded {
+                reason: why.to_owned(),
+            },
+            self.the_lobby().await?,
+        ])
     }
 
     /// The lobby again, if it has moved since the last time this socket saw it.
@@ -797,10 +806,23 @@ impl Conversation {
         Ok(matches!(outcome, Outcome::Permitted(_)))
     }
 
-    /// Record a session ending, in its own transaction.
-    async fn recorded_the_end_of(&self, ended: &Relinquished) -> Result<(), StoreError> {
+    /// Record a session ending in its own transaction, and start that sign-in's clock.
+    ///
+    /// The two belong together: an entry saying somebody left the seat and a window that
+    /// begins the moment they did are the same fact written on both sides (ADR-0023).
+    ///
+    /// For a relinquish the clock has already been refreshed a moment earlier, because the
+    /// message that asked for it was a deliberate act. It is done here anyway because that is
+    /// a coincidence of the one caller: an ending that arrives with no message behind it —
+    /// the reconnection window running out (#50), a forced relinquish (#51) — has nothing
+    /// else to start it.
+    async fn audit_that_it_ended(&self, ended: &Relinquished) -> Result<(), StoreError> {
         let mut transaction = self.api.store.begin().await?;
-        let recorded = record_the_end_of(&mut transaction, ended).await;
+        let recorded = async {
+            record_the_end_of(&mut transaction, ended).await?;
+            transaction.the_clock_starts_now(&ended.sign_in).await
+        }
+        .await;
         match recorded {
             Ok(()) => transaction.commit().await?,
             Err(error) => {
@@ -952,6 +974,20 @@ mod tests {
         /// A second tab, on the same sign-in and the same person.
         fn another_tab(&self) -> Conversation {
             self.a_socket()
+        }
+
+        /// The same person at a second console, signed in there separately. A user may be
+        /// signed in on several machines and still holds at most one session (v1 §2), so the
+        /// two sign-ins are what tell *this tab* apart from *this person*.
+        async fn another_machine(&self) -> Conversation {
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            let elsewhere = transaction
+                .open_sign_in(&self.user)
+                .await
+                .expect("the sign-in to open");
+            transaction.commit().await.expect("the sign-in to land");
+
+            Conversation::opened(self.api.clone(), self.user.clone(), elsewhere)
         }
 
         async fn role_named(&self, name: &str) -> RoleId {
@@ -1873,6 +1909,49 @@ mod tests {
             .expect("the sweep to answer");
         transaction.commit().await.expect("the sweep to land");
         assert_eq!(ended, vec![lobby.user.clone()]);
+    }
+
+    /// **The clock runs only in the lobby** (v1 §2), and this is the half that is easy to
+    /// miss: sparing a sign-in while it holds a session is not enough, because its stamp goes
+    /// on ageing underneath it. The moment the session ends, that sign-in is standing in the
+    /// lobby with a stamp from before the shift — and the next sweep reaps it.
+    ///
+    /// The displaced machine is where it bites, because nobody there did anything: this is
+    /// an operator who held a role for thirty hours, was displaced from another console, and
+    /// must land in the lobby rather than be signed out for it.
+    #[tokio::test]
+    async fn a_displaced_session_leaves_its_sign_in_a_full_window_in_the_lobby() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1)), ("CAPCOM", None)]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let capcom = lobby.role_named("CAPCOM").await;
+        let mut on_the_air = lobby.a_socket();
+        let mut elsewhere = lobby.another_machine().await;
+        said(&mut on_the_air, &assuming(&flight)).await;
+        aged(
+            &lobby.api.store,
+            &lobby.sign_in,
+            Duration::from_secs(30 * 60 * 60),
+        )
+        .await;
+
+        said(&mut elsewhere, &assuming(&capcom)).await;
+
+        assert!(
+            reaped(&lobby.api.store).await.is_empty(),
+            "a displaced console's sign-in was reaped for the time it spent on the air"
+        );
+    }
+
+    /// Whoever the sweep would end right now, for a window of a day.
+    async fn reaped(store: &Store) -> Vec<UserId> {
+        let mut transaction = store.begin().await.expect("a transaction");
+        let ended = transaction
+            .end_sign_ins_idle_for(Duration::from_secs(24 * 60 * 60), &[])
+            .await
+            .expect("the sweep to answer");
+        transaction.commit().await.expect("the sweep to land");
+
+        ended
     }
 
     /// Push a sign-in's clock back, the way a day of nobody touching it would.

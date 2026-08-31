@@ -52,33 +52,26 @@
 				</tr>
 			</thead>
 			<tbody>
-				{#each presence.loops as held_on (held_on.id)}
+				{#each presence.loops as reachable (reachable.id)}
 					<tr>
-						<td>{held_on.name}</td>
-						<td>{held_on.permission}</td>
+						<td>{reachable.name}</td>
+						<td>{reachable.permission}</td>
 					</tr>
 				{/each}
 			</tbody>
 		</table>
 	{/if}
 
-	<p class="giveitup">
+	<p class="relinquish">
 		<button class="destructive" onclick={onRelinquish}>Relinquish {presence.role.name}</button>
 	</p>
 </section>
 
 <style>
-	/* See the note in `Lobby.svelte`: the channel going away freezes what is on screen and
-	   marks it rather than blanking it (ADR-0018). */
-	.lost {
-		margin: 0 0 var(--space-4);
-		color: var(--warning);
-	}
-
 	/* Below the loops rather than beside the heading. Relinquishing is a full stop and the
 	   one act on this page, and putting it in the header would place the way off the air
 	   next to the name of the role somebody just took. */
-	.giveitup {
+	.relinquish {
 		margin: var(--space-5) 0 0;
 	}
 </style>

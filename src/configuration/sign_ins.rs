@@ -85,6 +85,21 @@ pub(crate) trait SignIns {
     /// thing.
     async fn note_a_deliberate_act(&mut self, token: &SignInToken) -> Result<(), StoreError>;
 
+    /// Start the window now, because this sign-in has just landed back in the lobby.
+    ///
+    /// **The clock runs only in the lobby** (ADR-0023), and a session ending is the moment it
+    /// starts running again. Sparing a sign-in while it holds a session is only half of that
+    /// rule: without this half, a sign-in that held a role through a thirty-hour incident
+    /// carries a thirty-hour-old stamp the instant the session ends, and the next sweep reaps
+    /// it — which is the exact failure the rule exists to prevent.
+    ///
+    /// **It is not a deliberate act and is deliberately not called one.** Nobody did anything;
+    /// a clock that was stopped started. It is the same write because *when the window last
+    /// began* is the same fact either way, and it is a separate name because a reader looking
+    /// for what refreshes the window must not find a session ending filed as something the
+    /// operator did.
+    async fn the_clock_starts_now(&mut self, token: &SignInToken) -> Result<(), StoreError>;
+
     /// End every sign-in that has seen no deliberate act for `idle_for`, except `spared`.
     ///
     /// The exceptions are the sign-ins that hold a session, which the state authority
@@ -170,6 +185,10 @@ impl SignIns for Transaction {
         .map_err(unavailable)?;
 
         Ok(())
+    }
+
+    async fn the_clock_starts_now(&mut self, token: &SignInToken) -> Result<(), StoreError> {
+        self.note_a_deliberate_act(token).await
     }
 
     async fn end_sign_ins_idle_for(

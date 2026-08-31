@@ -781,7 +781,7 @@ mod tests {
             })
             .expect("the seat to be free");
         state
-            .relinquish(&assumed.session, crate::state::Ended::Relinquished)
+            .ended_by_its_own_holder(&assumed.session)
             .expect("the session to end");
 
         let outcome = evaluate(

@@ -166,6 +166,25 @@ th {
 	flex-wrap: wrap;
 }
 
+/* What the console last saw, frozen and marked because the signalling channel went away.
+   Not a refusal and not a destructive act, so it is not written like one: what is on screen
+   stays rather than being blanked, because an empty page reads as *nothing is happening* when
+   everything may be (ADR-0018). The sentence carries the state; the colour only makes it hard
+   to walk past. It is furniture because the lobby and the operating console both say it, and
+   the three-state ladder this is the first step of will be said in more places still. */
+.lost {
+	margin: 0 0 var(--space-4);
+	color: var(--warning);
+}
+
+/* A session that has ended, said once in the lobby it landed back in. It is not a refusal
+   and not a warning — it is the ordinary end of a shift, or a role taken up on another
+   machine — so it reads as the quiet statement of fact it is. */
+.ended {
+	margin: 0 0 var(--space-4);
+	color: var(--quiet);
+}
+
 /* Something the console is holding out to the administrator, and which does not go away by
    being looked at: a consequence waiting to be committed, or an enrolment code that is shown
    exactly once. It sits in the corner rather than over the page, because neither of them is

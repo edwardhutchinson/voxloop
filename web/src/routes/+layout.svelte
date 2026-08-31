@@ -155,12 +155,20 @@
 	// it truly is, because the store is the only thing entitled to answer that.
 	async function itEnded(reason) {
 		ended = reason;
+		forgetWhatTheSocketSaid();
+		toTheTop();
+		await ask();
+	}
+
+	// Everything the signalling channel put here, dropped together. It is one function
+	// because it is one moment: the sign-in behind the socket is over, so nothing that
+	// arrived on it is still true, and a field left standing would be the console rendering
+	// somebody else's shift to whoever signs in next.
+	function forgetWhatTheSocketSaid() {
 		frame.lobby = null;
 		frame.presence = null;
 		frame.relinquished = null;
 		frame.refused = null;
-		toTheTop();
-		await ask();
 	}
 
 	async function leave() {
@@ -168,10 +176,7 @@
 			await signOut();
 		} finally {
 			frame.who = null;
-			frame.lobby = null;
-			frame.presence = null;
-			frame.relinquished = null;
-			frame.refused = null;
+			forgetWhatTheSocketSaid();
 			ended = null;
 			toTheTop();
 		}

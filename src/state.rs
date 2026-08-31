@@ -191,6 +191,12 @@ pub(crate) struct Assumed {
 /// process that minted it is gone.
 pub(crate) struct Relinquished {
     pub(crate) session: SessionId,
+    /// The sign-in the role was assumed from. It is here because **the clock runs only in
+    /// the lobby** ([ADR-0023]): a session ending puts that sign-in back in it, and the
+    /// window has to start from then rather than from whenever its tab last did something.
+    ///
+    /// [ADR-0023]: ../../docs/adr/0023-sign-in-is-to-the-application-and-a-role-is-assumed.md
+    pub(crate) sign_in: SignInToken,
     pub(crate) occupant: UserId,
     pub(crate) role: RoleId,
     pub(crate) why: Ended,
@@ -305,13 +311,7 @@ impl StateAuthority {
                 .retain(|tombstone| tombstone.occupant != assuming.occupant);
 
             let displaced = held_already.map(|held| {
-                let session = live.sessions.remove(held);
-                let relinquished = Relinquished {
-                    session: session.id,
-                    occupant: session.occupant,
-                    role: session.role,
-                    why: Ended::AssumedElsewhere,
-                };
+                let relinquished = ended(live.sessions.remove(held), Ended::AssumedElsewhere);
                 live.remember(&relinquished);
 
                 relinquished
@@ -337,21 +337,23 @@ impl StateAuthority {
     /// here pretends otherwise — a session that has been relinquished is gone from every
     /// answer this module gives, including its own presence document.
     ///
-    /// Nothing where the id names no session: a relinquish of something already over is not
-    /// a second ending.
-    pub(crate) fn relinquish(&self, session: &SessionId, why: Ended) -> Option<Relinquished> {
+    /// It leaves **no tombstone**. A tombstone exists to tell somebody what happened to a
+    /// session they were holding, and here the only party with an interest is the caller,
+    /// who is doing it and is answered directly — so one left behind would be a message with
+    /// no reader, sitting until it expired. An ending somebody *else* caused is the other
+    /// case, and [`StateAuthority::assume`] is the only one of those today.
+    ///
+    /// It is also how an assume is taken back where the act it was part of could not be
+    /// completed: the session was minted a moment ago, nobody was told about it, and undoing
+    /// it is not an ending anybody needs to hear about.
+    ///
+    /// Nothing where the id names no session: an ending of something already over is not a
+    /// second ending.
+    pub(crate) fn ended_by_its_own_holder(&self, session: &SessionId) -> Option<Relinquished> {
         self.write(|live| {
             let held = live.sessions.iter().position(|held| &held.id == session)?;
-            let ended = live.sessions.remove(held);
-            let relinquished = Relinquished {
-                session: ended.id,
-                occupant: ended.occupant,
-                role: ended.role,
-                why,
-            };
-            live.remember(&relinquished);
 
-            Some(relinquished)
+            Some(ended(live.sessions.remove(held), Ended::Relinquished))
         })
     }
 
@@ -504,6 +506,17 @@ impl StateAuthority {
             Ok(mut live) => of(&mut live),
             Err(poisoned) => of(&mut poisoned.into_inner()),
         }
+    }
+}
+
+/// A session, as the thing it becomes the moment it is out of the list.
+fn ended(session: Session, why: Ended) -> Relinquished {
+    Relinquished {
+        session: session.id,
+        sign_in: session.sign_in,
+        occupant: session.occupant,
+        role: session.role,
+        why,
     }
 }
 
@@ -666,7 +679,7 @@ mod tests {
             .expect("the seat to be free");
 
         let ended = live
-            .relinquish(&assumed.session, Ended::Relinquished)
+            .ended_by_its_own_holder(&assumed.session)
             .expect("the session to be there to end");
 
         assert_eq!(ended.role, role);
@@ -687,13 +700,10 @@ mod tests {
         let assumed = live
             .assume(taking(&sign_in, &user, &role, Some(1)))
             .expect("the seat to be free");
-        live.relinquish(&assumed.session, Ended::Relinquished)
+        live.ended_by_its_own_holder(&assumed.session)
             .expect("the first ending");
 
-        assert!(
-            live.relinquish(&assumed.session, Ended::Relinquished)
-                .is_none()
-        );
+        assert!(live.ended_by_its_own_holder(&assumed.session).is_none());
     }
 
     /// **A user has at most one session**, though they may be signed in on several machines
@@ -745,18 +755,37 @@ mod tests {
     #[tokio::test]
     async fn the_reason_a_session_ended_is_said_once() {
         let (_directory, store) = a_temporary_store().await;
+        let (laptop, user, flight) = a_seat(&store, "flight", "Flight Director").await;
+        let (console, _capcom, capcom) = a_seat(&store, "gene", "CAPCOM").await;
+        let live = StateAuthority::empty();
+        let displaced = live
+            .assume(taking(&laptop, &user, &flight, Some(1)))
+            .expect("the seat to be free");
+        live.assume(taking(&console, &user, &capcom, Some(1)))
+            .expect("the seat to be free");
+
+        assert_eq!(
+            live.why_it_ended(&displaced.session),
+            Some(Ended::AssumedElsewhere)
+        );
+        assert_eq!(live.why_it_ended(&displaced.session), None);
+    }
+
+    /// **A session its own holder ended leaves nothing behind.** The only party with an
+    /// interest was answered directly, so a reason kept for them would be a message with no
+    /// reader, sitting until it expired.
+    #[tokio::test]
+    async fn an_ending_its_own_holder_performed_leaves_no_reason_to_read() {
+        let (_directory, store) = a_temporary_store().await;
         let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
         let live = StateAuthority::empty();
         let assumed = live
             .assume(taking(&sign_in, &user, &role, Some(1)))
             .expect("the seat to be free");
-        live.relinquish(&assumed.session, Ended::Relinquished)
+
+        live.ended_by_its_own_holder(&assumed.session)
             .expect("the session to end");
 
-        assert_eq!(
-            live.why_it_ended(&assumed.session),
-            Some(Ended::Relinquished)
-        );
         assert_eq!(live.why_it_ended(&assumed.session), None);
     }
 
