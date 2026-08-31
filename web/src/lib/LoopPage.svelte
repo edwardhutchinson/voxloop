@@ -21,7 +21,7 @@
 	import Rungs from './Rungs.svelte';
 	import { dismissUnreviewed, loopColumn, setCell, whatWentWrong } from './server.js';
 
-	let { held } = $props();
+	let { loop } = $props();
 
 	let column = $state(null);
 	let refusal = $state(null);
@@ -30,7 +30,7 @@
 	let confirming = $state(null);
 
 	$effect(() => {
-		read(held);
+		read(loop);
 	});
 
 	async function read(id) {
@@ -52,21 +52,19 @@
 
 	async function set(role, permission) {
 		setting = role.id;
-		await attempt(() => setCell(role.id, held, permission));
+		await attempt(() => setCell(role.id, loop, permission));
 		setting = null;
-		await read(held);
+		await read(loop);
 	}
 
 	async function rule() {
 		confirming = null;
-		await attempt(() => dismissUnreviewed(held));
-		await read(held);
+		await attempt(() => dismissUnreviewed(loop));
+		await read(loop);
 	}
 </script>
 
 <section>
-	<!-- Above the heading, because the heading may never arrive: a link to a loop somebody
-	     deleted has no name to show, and the way back out has to be on screen anyway. -->
 	<p class="back">
 		<a href={resolve('/admin/loops')}><Icon name="arrow-left" /> All loops</a>
 	</p>

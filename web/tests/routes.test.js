@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { components, named, read, src } from './console.js';
+import { components, named, read, src, under } from './console.js';
 
 const routes = join(src, 'routes');
 
@@ -61,20 +61,12 @@ const written = /(['"`])(\/(?!api\/)[^'"`]*)\1/g;
 
 const asRoute = (path) => path.replaceAll(/\$?\{[^}]*\}/g, '[id]').replace(/(.)\/$/, '$1');
 
-// Both halves of the console: the components, and the modules beside them. A `+page.js` that
-// redirects somewhere is naming a page as surely as an `href` is.
-function sources(dir = src) {
-	return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-		const path = join(dir, entry.name);
-		if (entry.isDirectory()) return sources(path);
-		return /\.(svelte|js)$/.test(entry.name) ? [path] : [];
-	});
-}
-
 test('every path the console writes names a page it has', () => {
 	const has = new Set(pages());
 
-	for (const path of sources()) {
+	// Both halves of the console: the components, and the modules beside them. A `+page.js`
+	// that redirects somewhere is naming a page as surely as an `href` is.
+	for (const path of under(/\.(svelte|js)$/)) {
 		for (const [, , wrote] of read(path).matchAll(written)) {
 			assert.ok(
 				has.has(asRoute(wrote)),

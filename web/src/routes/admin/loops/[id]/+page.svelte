@@ -5,4 +5,4 @@
 	import LoopPage from '$lib/LoopPage.svelte';
 </script>
 
-<LoopPage held={page.params.id} />
+<LoopPage loop={page.params.id} />

@@ -83,8 +83,6 @@
 </script>
 
 <section>
-	<!-- Above the heading, because the heading may never arrive: a link to a role somebody
-	     deleted has no name to show, and the way back out has to be on screen anyway. -->
 	<p class="back">
 		<a href={resolve('/admin/roles')}><Icon name="arrow-left" /> All roles</a>
 	</p>
