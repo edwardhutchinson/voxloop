@@ -14,7 +14,7 @@
 	// The document arrives from the frame rather than from a socket of this page's own,
 	// because the socket belongs to the tab and is opened at sign-in — an administrator
 	// reading the admin console has not left the lobby, and their socket has not closed.
-	let { lobby, lost } = $props();
+	let { lobby, lost, refused } = $props();
 
 	// A seat nobody is in is the answer this page exists to give, so it is said in words
 	// rather than left as an empty cell.
@@ -37,6 +37,10 @@
 			The connection to VoxLoop was lost. This is what it last said, and it is not being kept up to
 			date.
 		</p>
+	{/if}
+
+	{#if refused}
+		<p class="refusal" role="alert">{refused}</p>
 	{/if}
 
 	{#if !lobby}

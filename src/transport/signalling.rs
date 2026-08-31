@@ -33,9 +33,11 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
-use super::{Api, answers};
+use super::{Api, answers, unmet};
 use crate::authorisation::{self, Caller, Outcome, Presented, Requirement};
-use crate::configuration::{Eligibilities, Role, SignInToken, SignIns, StoreError, UserId, Users};
+use crate::configuration::{
+    Eligibilities, Role, SignInToken, SignIns, StoreError, Transaction, UserId, Users,
+};
 use crate::telemetry::module;
 
 /// How often the lobby is worked out again and pushed if it has moved.
@@ -168,6 +170,12 @@ struct Seat {
     name: String,
     /// How many may occupy it at once, or `null` for a role with no limit ([ADR-0068]).
     ///
+    /// It is here because the lobby cannot ask its question without it: an occupied
+    /// single-occupant role is a seat that cannot be shared, and one somebody may only
+    /// *request* from its incumbent. That request is issued **from the lobby against a
+    /// single-occupant role** (`docs/spec/api-surface.md`), so the lobby has to be able to
+    /// tell one kind of occupied seat from the other.
+    ///
     /// [ADR-0068]: ../../../docs/adr/0068-a-role-with-no-limit-is-the-limit-left-unset.md
     max_occupants: Option<u32>,
     /// Who occupies it, by name. Occupancy means a role somebody has assumed and not
@@ -243,7 +251,7 @@ impl Conversation {
         if !self.permitted(&message.requirement()).await? {
             return Ok(Some(Outgoing::Refused {
                 was: message.named().to_owned(),
-                reason: unmet(&message.requirement()).to_owned(),
+                reason: unmet(&message.requirement(), "message"),
             }));
         }
 
@@ -277,7 +285,7 @@ impl Conversation {
         }
 
         let lobby = self.lobby().await?;
-        if self.sent.as_ref() == Some(&lobby) {
+        if self.already_sent(&lobby) {
             return Ok(None);
         }
 
@@ -288,7 +296,7 @@ impl Conversation {
     async fn lobby_document(&mut self) -> Result<Outgoing, StoreError> {
         let lobby = self.lobby().await?;
 
-        Ok(match self.sent.as_ref() == Some(&lobby) {
+        Ok(match self.already_sent(&lobby) {
             // The same document under the same version. A client that asks twice is told the
             // same thing twice, and a version that moved for a redundant send would make the
             // number mean *how often you asked* rather than *what is true*.
@@ -298,6 +306,16 @@ impl Conversation {
             },
             false => self.versioned(lobby),
         })
+    }
+
+    /// Whether this is the document this socket already has.
+    ///
+    /// The version moves when the document does and not otherwise, so *has anything changed*
+    /// is asked in one place and answered by comparing the whole document — every field of
+    /// it is something the server has committed to keeping true, so any of them differing is
+    /// a change.
+    fn already_sent(&self, lobby: &Lobby) -> bool {
+        self.sent.as_ref() == Some(lobby)
     }
 
     /// Stamp a changed document with the next version, and remember it.
@@ -314,8 +332,15 @@ impl Conversation {
     /// Work out the lobby: the roles this user may assume, and who is in each.
     ///
     /// Eligibility is durable and comes from the store; occupancy is live and comes from the
-    /// state authority ([ADR-0039]). The two meet here, in a projection, rather than either
-    /// one holding a copy of the other.
+    /// state authority. **They are composed here rather than behind either of them**, and
+    /// that is the seam working rather than leaking: the state authority calls nothing and
+    /// holds nothing durable ([ADR-0039]), so a lobby assembled inside it would mean giving
+    /// it the store. The two sides meet at the top by passing values, which is the same rule
+    /// blast radius is answered by.
+    ///
+    /// The presence document (#37) is a different case and belongs behind the state
+    /// authority: it is a projection over live facts alone, and it is scoped to reach rather
+    /// than to eligibility.
     ///
     /// [ADR-0039]: ../../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
     async fn lobby(&self) -> Result<Lobby, StoreError> {
@@ -346,11 +371,7 @@ impl Conversation {
     /// this is not it).
     ///
     /// [ADR-0028]: ../../../docs/adr/0028-the-audit-log-records-decisions-not-traffic.md
-    async fn seat(
-        &self,
-        transaction: &mut crate::configuration::Transaction,
-        role: &Role,
-    ) -> Result<Seat, StoreError> {
+    async fn seat(&self, transaction: &mut Transaction, role: &Role) -> Result<Seat, StoreError> {
         let mut occupants = Vec::new();
         for occupant in self.api.state.occupants_of(&role.id) {
             if let Some(user) = transaction.user(&occupant).await? {
@@ -401,21 +422,6 @@ impl Conversation {
             .send(Message::Text(text.into()))
             .await
             .map_err(|_| ())
-    }
-}
-
-/// What a caller is missing, said plainly enough to act on.
-///
-/// The same job [`super::routes`] does for an HTTP refusal, on the surface that does not have
-/// a status line to say it with.
-fn unmet(requirement: &Requirement) -> &'static str {
-    match requirement {
-        Requirement::Public => "That message is not available.",
-        Requirement::SignedIn => "That message is for a signed-in user.",
-        Requirement::Session => "That message is for a user who has assumed a role.",
-        Requirement::SystemAdministration => "That message is for a system administrator.",
-        Requirement::ServiceToken => "That message is for a service principal.",
-        Requirement::Grid { .. } => "That message needs more than this role holds on that loop.",
     }
 }
 

@@ -181,9 +181,9 @@ precedence.
 
 ## The admin console
 
-Signing in as a system administrator opens the console, reachable from the lobby. It is gated on the user's
-system-administration flag and **never on a role**, so an operator who is also a sysadmin
-reaches it without dropping off the air
+Signing in as a system administrator opens the console, reachable from the lobby. It is
+gated on the user's system-administration flag and **never on a role**, so an operator who
+is also a sysadmin reaches it without dropping off the air
 ([v1 §9](docs/spec/v1.md#9-the-admin-console)). The flag is read from the store on every
 request rather than carried in the cookie, so taking it away closes the console at once.
 

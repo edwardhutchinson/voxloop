@@ -125,6 +125,32 @@ where
     serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
+/// What a caller is missing, said plainly enough to act on.
+///
+/// Authorisation answers permitted or refused and never *why*; turning that into something a
+/// human reads is Transport's job, and this is where it happens — once, for both surfaces
+/// that have to say it. `what` is the noun the surface uses: an HTTP route refuses an
+/// *operation* and the signalling channel refuses a *message*, and that is the whole of the
+/// difference between them.
+fn unmet(requirement: &Requirement, what: &str) -> String {
+    match requirement {
+        // Nothing public is refused for want of a principal, so this arm answers a question
+        // nobody asked — and saying so is better than inventing a reason.
+        Requirement::Public => format!("That {what} is not available."),
+        Requirement::SignedIn => format!("That {what} is for a signed-in user."),
+        Requirement::Session => format!("That {what} is for a user who has assumed a role."),
+        Requirement::SystemAdministration => format!("That {what} is for a system administrator."),
+        Requirement::ServiceToken => format!("That {what} is for a service principal."),
+        // Never registered on a route: it names a loop the caller supplies, so it is built
+        // per message on the signalling channel (`docs/spec/api-surface.md`). The arm says
+        // what the caller's role did not hold rather than which rung, because the answer is
+        // the same whether the cell is `none`, absent, or on a loop nobody has ruled on.
+        Requirement::Grid { .. } => {
+            format!("That {what} needs more than this role holds on that loop.")
+        }
+    }
+}
+
 /// How long a connection has to finish what it was doing once the server is asked to stop.
 const GRACE: Duration = Duration::from_secs(5);
 
@@ -360,7 +386,9 @@ mod tests {
     use axum::http::{Request, StatusCode, header};
     use axum::response::Response;
 
-    use crate::configuration::{AuditEvent, AuditLog, NewUser, Snapshot, Users, a_temporary_store};
+    use crate::configuration::{
+        AuditEvent, AuditLog, NewUser, SignIns, Snapshot, Users, a_temporary_store,
+    };
 
     /// A deployment serving on a port the operating system picks, read from a real file, with
     /// a certificate made for the occasion. Nothing here is committed and nothing outlives
@@ -548,6 +576,38 @@ mod tests {
                     .unwrap(),
             )
             .await
+        }
+
+        /// Push the clock of the sign-in this cookie carries back, the way time would.
+        async fn the_sign_in_behind(&self, cookie: &str, idle_for: Duration) {
+            let token = crate::configuration::SignInToken::presented(
+                cookie
+                    .split('=')
+                    .nth(1)
+                    .expect("a token in the cookie")
+                    .to_owned(),
+            );
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            transaction
+                .a_sign_in_has_been_idle_for(&token, idle_for)
+                .await
+                .expect("the clock to be moved back");
+            transaction.commit().await.expect("the clock to land");
+        }
+
+        /// End every sign-in idle for `hours`, and answer with whose they were.
+        ///
+        /// The sweep is the one in `lifetimes`, reached through the store the way it reaches
+        /// it: nothing here holds a session, so nothing here is spared.
+        async fn swept(&self, hours: u64) -> Vec<crate::configuration::UserId> {
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            let ended = transaction
+                .end_sign_ins_idle_for(has_been_idle_for(hours), &[])
+                .await
+                .expect("the sweep to answer");
+            transaction.commit().await.expect("the sweep to land");
+
+            ended
         }
 
         /// Everything the audit log holds, newest first.
@@ -3632,6 +3692,54 @@ mod tests {
     }
 
     // ---- #36: the signalling channel and the lobby ---------------------------------------
+
+    /// **A sign-in ends after 24 hours with no deliberate act** (v1 §2), and administering
+    /// the deployment is somebody doing something. Without this, a sysadmin reading the
+    /// console for a day and a night is signed out mid-work by a window meant for abandoned
+    /// tabs.
+    #[tokio::test]
+    async fn a_request_a_person_made_is_a_deliberate_act() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", true).await;
+        let cookie = box_of.signed_in_as("flight").await;
+        box_of
+            .the_sign_in_behind(&cookie, has_been_idle_for(25))
+            .await;
+
+        assert_eq!(
+            box_of.get_holding(&cookie, "/api/users").await.status,
+            StatusCode::OK
+        );
+
+        assert!(
+            box_of.swept(24).await.is_empty(),
+            "a sign-in that had just been used was reaped as abandoned"
+        );
+    }
+
+    /// ...and the same tab, left alone past the window, is reaped: what stops the clock is
+    /// the act, not the sign-in existing.
+    #[tokio::test]
+    async fn a_sign_in_nobody_has_used_for_a_day_ends() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", true).await;
+        let cookie = box_of.signed_in_as("flight").await;
+
+        box_of
+            .the_sign_in_behind(&cookie, has_been_idle_for(25))
+            .await;
+
+        assert_eq!(box_of.swept(24).await.len(), 1);
+        assert_eq!(
+            box_of.get_holding(&cookie, "/api/users").await.status,
+            StatusCode::FORBIDDEN,
+            "a reaped sign-in still opened the console"
+        );
+    }
+
+    const fn has_been_idle_for(hours: u64) -> Duration {
+        Duration::from_secs(hours * 60 * 60)
+    }
 
     /// The handshake a browser opens a WebSocket with.
     ///

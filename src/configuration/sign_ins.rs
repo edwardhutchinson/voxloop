@@ -45,6 +45,12 @@ impl std::fmt::Debug for SignInToken {
     }
 }
 
+/// How finely the clock is kept.
+///
+/// The window it feeds is 24 hours, so a minute is already far finer than anything measured
+/// against it — and it is what keeps a burst of requests from being a burst of writes.
+const TO_THE_MINUTE: Duration = Duration::from_secs(60);
+
 /// The sign-ins a user holds, as domain operations rather than queries.
 #[async_trait]
 pub(crate) trait SignIns {
@@ -72,6 +78,11 @@ pub(crate) trait SignIns {
     /// notion, unchanged: something the person did, never something their browser did on
     /// their behalf and never the server pushing at them — a console left open on a desk
     /// has done nothing, which is the whole point of the window.
+    ///
+    /// It is written no more often than [`TO_THE_MINUTE`], because the window is a day and
+    /// recording it to the minute is four orders of magnitude finer than anything turns on.
+    /// Without that, a page of ten reads would be ten write transactions saying the same
+    /// thing.
     async fn note_a_deliberate_act(&mut self, token: &SignInToken) -> Result<(), StoreError>;
 
     /// End every sign-in that has seen no deliberate act for `idle_for`, except `spared`.
@@ -146,12 +157,17 @@ impl SignIns for Transaction {
     }
 
     async fn note_a_deliberate_act(&mut self, token: &SignInToken) -> Result<(), StoreError> {
-        sqlx::query("UPDATE sign_ins SET last_active_at = ? WHERE fingerprint = ?")
-            .bind(now())
-            .bind(secrets::fingerprint(&token.0))
-            .execute(self.connection())
-            .await
-            .map_err(unavailable)?;
+        let at = now();
+
+        sqlx::query(
+            "UPDATE sign_ins SET last_active_at = ? WHERE fingerprint = ? AND last_active_at < ?",
+        )
+        .bind(at)
+        .bind(secrets::fingerprint(&token.0))
+        .bind(at - milliseconds(TO_THE_MINUTE))
+        .execute(self.connection())
+        .await
+        .map_err(unavailable)?;
 
         Ok(())
     }

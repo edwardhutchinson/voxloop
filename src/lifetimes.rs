@@ -65,7 +65,7 @@ pub(crate) fn sweeping(store: Arc<Store>, state: Arc<StateAuthority>) -> Sweepin
                 sweep.tick().await;
 
                 if let Err(error) = end_abandoned_sign_ins(&store, &state, THE_WINDOW).await {
-                    tracing::error!(target: module::CONFIGURATION, %error, "the sign-in window could not be swept");
+                    tracing::error!(target: module::IDENTITY, %error, "the sign-in window could not be swept");
                 }
             }
         }),

@@ -52,6 +52,7 @@ function listening() {
 	return {
 		told,
 		onLobby: (lobby) => told.push(['lobby', lobby]),
+		onRefused: (reason) => told.push(['refused', reason]),
 		onEnded: (reason) => told.push(['ended', reason]),
 		onLost: () => told.push(['lost'])
 	};
@@ -106,7 +107,10 @@ test('a sign-in that has ended is said to have ended, with the reason the server
 	assert.deepEqual(page.told, [['ended', 'That sign-in has ended.']]);
 });
 
-test('a refusal is the sign-in no longer standing, because the lobby is all that is asked for', () => {
+// A refusal is a fact about one message, not about the sign-in behind it: every message on
+// this socket is judged on its own (ADR-0054), so reading one as a sign-out would take an
+// operator off a console over a message they were never entitled to send.
+test('a refusal is about the message, and ends nothing', () => {
 	const page = listening();
 	openSignalling(page);
 
@@ -116,7 +120,16 @@ test('a refusal is the sign-in no longer standing, because the lobby is all that
 		reason: 'That message is for a signed-in user.'
 	});
 
-	assert.deepEqual(page.told, [['ended', 'That message is for a signed-in user.']]);
+	assert.deepEqual(page.told, [['refused', 'That message is for a signed-in user.']]);
+});
+
+test('anything the server says that this console has no reading of is not acted on', () => {
+	const page = listening();
+	openSignalling(page);
+
+	lastSocket().says({ message: 'something-from-a-later-ticket', version: 4 });
+
+	assert.deepEqual(page.told, []);
 });
 
 // Losing the channel and being told the sign-in is over are different facts, and the console

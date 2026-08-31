@@ -36,6 +36,13 @@
 	// marked, rather than blanked: an empty page reads as *nothing is happening*, when in
 	// fact anything may be happening and the console simply cannot see it (ADR-0018).
 	let lost = $state(false);
+	// The last thing the socket would not do, and why. It is not the end of anything, so it
+	// is shown where it happened rather than taking the page away.
+	let refused = $state(null);
+	// Whether there is a sign-in to hold a socket open on — and nothing finer. Asking the
+	// server again hands back a new answer object each time, and an effect watching *that*
+	// would tear the socket down and open another one for a sign-in that never changed.
+	const signedIn = $derived(who !== null);
 
 	$effect(() => {
 		ask();
@@ -45,13 +52,15 @@
 	// exactly that reason: it is open for as long as this person is signed in, whichever
 	// surface they are reading. An administrator in the admin console has not left the lobby.
 	$effect(() => {
-		if (!who) return;
+		if (!signedIn) return;
 
 		return openSignalling({
 			onLobby: (said) => {
 				lobby = said;
 				lost = false;
+				refused = null;
 			},
+			onRefused: (reason) => (refused = reason),
 			onEnded: itEnded,
 			onLost: () => (lost = true)
 		});
@@ -72,6 +81,7 @@
 		ended = reason;
 		administering = false;
 		lobby = null;
+		refused = null;
 		await ask();
 	}
 
@@ -81,6 +91,7 @@
 		} finally {
 			who = null;
 			lobby = null;
+			refused = null;
 			ended = null;
 		}
 	}
@@ -123,7 +134,7 @@
 		{#if administering}
 			<AdminConsole />
 		{:else}
-			<Lobby {lobby} {lost} />
+			<Lobby {lobby} {lost} {refused} />
 		{/if}
 
 		<ChangePassword />

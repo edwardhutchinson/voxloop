@@ -39,7 +39,10 @@
 	--refusal: #e8a0a0;
 
 	/* v1 §8: `0 hearing` renders in the warning colour, and the operator keys anyway if they
-	   mean to. Never the only thing carrying a state — the words are always there too. */
+	   mean to. It marks the lobby's frozen state too, where the signalling channel has gone
+	   and what is on screen is last-known rather than current (ADR-0018) — the same reading
+	   both times: *this is true and you should look at it*. Never the only thing carrying a
+	   state — the words are always there too. */
 	--warning: #e8c07a;
 
 	color-scheme: dark;
