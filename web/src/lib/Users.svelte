@@ -3,9 +3,13 @@
 	// the person's side, and it is one of the two directions it is administered from
 	// (ADR-0015) — the other hangs off the role. A user carries eligibility and nothing else:
 	// no permissions of their own, and no per-person exception anywhere.
+	//
+	// That page is at `/admin/users/{id}` and it is reached by a link rather than by a
+	// variable in here (#76), so it reloads, bookmarks and can be handed to a colleague.
+	import { resolve } from '$app/paths';
+
 	import Confirm from './Confirm.svelte';
 	import Icon from './Icon.svelte';
-	import WhichRoles from './WhichRoles.svelte';
 	import {
 		createUser,
 		deleteUser,
@@ -18,11 +22,10 @@
 		whatWentWrong
 	} from './server.js';
 
-	let accounts = $state([]);
-	// The account whose eligibility is being administered, where one is. *Admitting* rather
-	// than *assuming*: assuming is the act by which a signed-in user takes up a role, and
-	// nobody does that here.
-	let admitting = $state(null);
+	// The list as the server last answered it, and `null` until it has answered at all. The
+	// difference matters: a refused read and a deployment with no users would otherwise both
+	// render as an empty table, and only one of them is a fact about the deployment.
+	let accounts = $state(null);
 	let refusal = $state(null);
 	let reading = $state(true);
 
@@ -125,24 +128,24 @@
 	}
 </script>
 
-{#if admitting}
-	<WhichRoles account={admitting} onback={() => (admitting = null)} />
-{:else}
-	<section>
-		<header>
-			<h2>Users</h2>
-			<p>
-				A user is created here and sets their own password from an enrolment code, because VoxLoop
-				has no mail path. A code is single-use, expiring, and handed over out of band; a reset is
-				the same act again. <strong>Roles</strong> is which positions they may assume, which is the only
-				authority a user carries.
-			</p>
-		</header>
+<section>
+	<header>
+		<h2>Users</h2>
+		<p>
+			A user is created here and sets their own password from an enrolment code, because VoxLoop has
+			no mail path. A code is single-use, expiring, and handed over out of band; a reset is the same
+			act again. <strong>Roles</strong> is which positions they may assume, which is the only authority
+			a user carries.
+		</p>
+	</header>
 
-		{#if refusal}
-			<p class="refusal" role="alert">{refusal}</p>
-		{/if}
+	{#if refusal}
+		<p class="refusal" role="alert">{refusal}</p>
+	{/if}
 
+	{#if reading}
+		<p class="quiet">Reading…</p>
+	{:else if accounts}
 		<form class="new" onsubmit={create}>
 			<input bind:value={creating.username} placeholder="Username" required />
 			<label>
@@ -152,129 +155,123 @@
 			<button type="submit"><Icon name="plus" /> Create</button>
 		</form>
 
-		{#if reading}
-			<p class="quiet">Reading…</p>
-		{:else}
-			<table>
-				<thead>
+		<table>
+			<thead>
+				<tr>
+					<th>Username</th>
+					<th>System administration</th>
+					<th>Account</th>
+					<th>Password</th>
+					<th class="acts">Acts</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each accounts as account (account.id)}
 					<tr>
-						<th>Username</th>
-						<th>System administration</th>
-						<th>Account</th>
-						<th>Password</th>
-						<th class="acts">Acts</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each accounts as account (account.id)}
-						<tr>
-							<td>
-								{#if editing?.id === account.id}
-									<form onsubmit={rename}>
-										<!-- svelte-ignore a11y_autofocus -->
-										<input bind:value={editing.username} autofocus required />
-										<button type="submit">Rename</button>
-										<button type="button" onclick={() => (editing = null)}>Cancel</button>
-									</form>
-								{:else}
-									<button
-										class="name"
-										onclick={() => (editing = { id: account.id, username: account.username })}
-									>
-										{account.username}
-									</button>
-								{/if}
-							</td>
-							<td>
-								<!-- A button rather than a checkbox: taking the flag away is confirmed
+						<td>
+							{#if editing?.id === account.id}
+								<form onsubmit={rename}>
+									<!-- svelte-ignore a11y_autofocus -->
+									<input bind:value={editing.username} autofocus required />
+									<button type="submit">Rename</button>
+									<button type="button" onclick={() => (editing = null)}>Cancel</button>
+								</form>
+							{:else}
+								<button
+									class="name"
+									onclick={() => (editing = { id: account.id, username: account.username })}
+								>
+									{account.username}
+								</button>
+							{/if}
+						</td>
+						<td>
+							<!-- A button rather than a checkbox: taking the flag away is confirmed
 								     first, and a checkbox left flipped while the record has not changed
 								     would be the console asserting a state the server never agreed to. -->
-								{account.system_administration ? 'held' : 'not held'}
-								<button onclick={() => setFlag(account, !account.system_administration)}>
-									{account.system_administration ? 'Take away' : 'Give'}
-								</button>
-							</td>
-							<td class:locked={account.locked}>{account.locked ? 'locked' : 'unlocked'}</td>
-							<td class:quiet={!account.enrolled}>
-								{account.enrolled ? 'set' : 'awaiting enrolment'}
-								{#if account.enrolment_expires_at !== null}
-									<span class="meaning">
-										code outstanding until {until(account.enrolment_expires_at)}
-									</span>
-								{/if}
-							</td>
-							<td class="acts">
-								<button onclick={() => (admitting = { id: account.id, username: account.username })}
-									>Roles</button
-								>
-								{#if account.locked}
-									<button
-										onclick={() =>
-											ask(
-												account,
-												() => unlockAccount(account.id),
-												`${account.username} will be able to sign in again.`
-											)}>Unlock</button
-									>
-								{:else}
-									<button
-										onclick={() =>
-											ask(
-												account,
-												() => lockAccount(account.id),
-												`${account.username}'s sign-in and session end immediately, and they cannot sign in until the account is unlocked.`
-											)}>Lock</button
-									>
-								{/if}
-								<button onclick={() => issue(account)}>Issue enrolment code</button>
+							{account.system_administration ? 'held' : 'not held'}
+							<button onclick={() => setFlag(account, !account.system_administration)}>
+								{account.system_administration ? 'Take away' : 'Give'}
+							</button>
+						</td>
+						<td class:locked={account.locked}>{account.locked ? 'locked' : 'unlocked'}</td>
+						<td class:quiet={!account.enrolled}>
+							{account.enrolled ? 'set' : 'awaiting enrolment'}
+							{#if account.enrolment_expires_at !== null}
+								<span class="meaning">
+									code outstanding until {until(account.enrolment_expires_at)}
+								</span>
+							{/if}
+						</td>
+						<td class="acts">
+							<a href={resolve('/admin/users/[id]', { id: account.id })}>Roles</a>
+							{#if account.locked}
 								<button
 									onclick={() =>
 										ask(
 											account,
-											() => forcePasswordReset(account.id),
-											`${account.username}'s password is taken away and their sign-in and session end immediately. They cannot sign in until an enrolment code sets a new one.`
-										)}>Force password reset</button
+											() => unlockAccount(account.id),
+											`${account.username} will be able to sign in again.`
+										)}>Unlock</button
 								>
+							{:else}
 								<button
-									class="destructive"
 									onclick={() =>
 										ask(
 											account,
-											() => deleteUser(account.id),
-											`${account.username} is deleted and signed out everywhere, and every role they were eligible for goes with them. Their audit entries stay, attributed.`
-										)}><Icon name="trash-2" /> Delete</button
+											() => lockAccount(account.id),
+											`${account.username}'s sign-in and session end immediately, and they cannot sign in until the account is unlocked.`
+										)}>Lock</button
 								>
-							</td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
-		{/if}
+							{/if}
+							<button onclick={() => issue(account)}>Issue enrolment code</button>
+							<button
+								onclick={() =>
+									ask(
+										account,
+										() => forcePasswordReset(account.id),
+										`${account.username}'s password is taken away and their sign-in and session end immediately. They cannot sign in until an enrolment code sets a new one.`
+									)}>Force password reset</button
+							>
+							<button
+								class="destructive"
+								onclick={() =>
+									ask(
+										account,
+										() => deleteUser(account.id),
+										`${account.username} is deleted and signed out everywhere, and every role they were eligible for goes with them. Their audit entries stay, attributed.`
+									)}><Icon name="trash-2" /> Delete</button
+							>
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	{/if}
 
-		{#if issued}
-			<div class="awaiting" role="status">
-				<p>
-					An enrolment code for <strong>{issued.username}</strong>, good once, until
-					{until(issued.expires_at)}.
-				</p>
-				<code>{issued.code}</code>
-				<p class="quiet">
-					Hand it over out of band — in person, or over the comms you already have. VoxLoop will not
-					show it again, and issuing another invalidates this one.
-				</p>
-				<button onclick={() => (issued = null)}>Done</button>
-			</div>
-		{/if}
+	{#if issued}
+		<div class="awaiting" role="status">
+			<p>
+				An enrolment code for <strong>{issued.username}</strong>, good once, until
+				{until(issued.expires_at)}.
+			</p>
+			<code>{issued.code}</code>
+			<p class="quiet">
+				Hand it over out of band — in person, or over the comms you already have. VoxLoop will not
+				show it again, and issuing another invalidates this one.
+			</p>
+			<button onclick={() => (issued = null)}>Done</button>
+		</div>
+	{/if}
 
-		{#if confirming}
-			<Confirm
-				consequence={confirming.consequence}
-				oncommit={commit}
-				oncancel={() => (confirming = null)}
-			/>
-		{/if}
-	</section>
-{/if}
+	{#if confirming}
+		<Confirm
+			consequence={confirming.consequence}
+			oncommit={commit}
+			oncancel={() => (confirming = null)}
+		/>
+	{/if}
+</section>
 
 <style>
 	/* The cell says `locked` or `unlocked` in words; the colour is the second telling of it

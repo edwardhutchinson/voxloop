@@ -187,6 +187,25 @@ is also a sysadmin reaches it without dropping off the air
 ([v1 §9](docs/spec/v1.md#9-the-admin-console)). The flag is read from the store on every
 request rather than carried in the cookie, so taking it away closes the console at once.
 
+**Every page of the console has a URL**: `/admin/users` and a user's roles page under it,
+`/admin/roles` with a role's reach and eligibility pages under that, `/admin/loops` and a
+loop's column, and `/admin/grid`. Reloading one lands back on it, and a link to the loop
+being discussed can be pasted into a chat. It is still **one bundle with client-side
+routing** — moving between the pages does not reload the document, because the signalling
+channel is one socket per tab and a full navigation would drop it. A page whose record is
+gone shows the server's *there is no such loop* rather than a blank, and a page opened
+without the flag says which flag was not held rather than showing empty tables.
+
+**The lobby and the operating console have no URL, and that is the point of the split.**
+Which of the two somebody is looking at is not a place they navigated to: it is whether they
+hold a role, which is live state the server resolves. A bookmark to it would be a claim about
+a session, and the console would have to bounce whoever followed it whenever the server
+disagreed — a URL asserting a state nobody observed
+([ADR-0016](docs/adr/0016-displayed-state-is-observed-or-asserted.md)). Reloading asks the
+server where you are and lands you there. An administration page claims nothing live: it is a
+read of configuration, it cannot go stale that way, and it is the thing somebody wants to
+send to a colleague.
+
 ### Users
 
 Users are created here and set their own password from an enrolment code, because VoxLoop
