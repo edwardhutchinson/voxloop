@@ -157,9 +157,31 @@ highest privilege in the system** ([v1 §16](docs/spec/v1.md#16-accepted-gaps)).
 Everything the CLI does is written to the audit log, attributed to `the on-box CLI` with no
 actor id, because there is no person to attribute it to.
 
+## The lobby
+
+Signing in puts you in the **lobby**: signed in, no role assumed, so no audio, no authority
+and nothing to configure. It answers one question — *should I assume a role, and which?* — by
+listing the roles you are eligible for and who occupies each
+([ADR-0023](docs/adr/0023-sign-in-is-to-the-application-and-a-role-is-assumed.md)). Assuming
+one is a separate act, and it is the next ticket.
+
+Sign in and assume are two acts with two lifetimes. There is **no idle timeout on a session
+and no absolute cap on a sign-in**; a sign-in ends after 24 hours with no deliberate act, and
+that clock runs only in the lobby, so an operator holding a role through a thirty-hour
+incident is never signed out for failing to click anything.
+
+The lobby arrives over the **signalling channel**: one WebSocket per tab, opened at sign-in
+at `/api/signalling`, carrying one versioned document that is rendered whole. It is a second
+authorised surface and **every message on it is checked, not just the upgrade**
+([ADR-0054](docs/adr/0054-every-operation-declares-its-authorisation.md)) — an administrator
+editing a grid cell mid-shift has to land on a socket that is already open. The upgrade takes
+the sign-in cookie and nothing else: a service principal has no session and no socket, and a
+request presenting a cookie and a token together is refused rather than resolved by
+precedence.
+
 ## The admin console
 
-Signing in as a system administrator opens the console. It is gated on the user's
+Signing in as a system administrator opens the console, reachable from the lobby. It is gated on the user's
 system-administration flag and **never on a role**, so an operator who is also a sysadmin
 reaches it without dropping off the air
 ([v1 §9](docs/spec/v1.md#9-the-admin-console)). The flag is read from the store on every
@@ -334,7 +356,8 @@ by `npm test`: no literal spacing, type or radius values, no colour outside `app
 ```sh
 cargo test                      # the binary, without the console embedded
 cargo test --features embed-web # the same, plus the embedded bundle (needs npm run build)
-cd web && npm test              # the console: the seam rule, the styling standard, the icons
+cd web && npm test              # the console: the seam rule, the styling standard, the icons,
+                                # and what the client says over the signalling channel
 ```
 
 Tests run against the real store: each one opens a temporary SQLite file, migrates it and

@@ -93,8 +93,12 @@ enum Incoming {
     /// The client saying it has arrived and is ready to render.
     ///
     /// The server answers with the lobby document rather than pushing one at a socket that
-    /// may not be listening yet. #50 extends it to present a session id, which is what moves
-    /// the socket from `SignedIn` to `Session` (ADR-0054).
+    /// may not be listening yet. It performs the two rows `docs/spec/api-surface.md` gives
+    /// this tier — opening the channel, and the lobby document it carries — rather than
+    /// being a third operation of its own.
+    ///
+    /// #50 extends it to present a session id, which is what moves the socket from
+    /// `SignedIn` to `Session` (ADR-0054) and what makes it the *resume a session* row too.
     Hello,
 }
 

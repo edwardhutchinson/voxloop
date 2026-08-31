@@ -185,12 +185,15 @@ pub(crate) async fn start(
     let task = tokio::spawn({
         let handle = handle.clone();
         let routes = routes(&api).into_make_service(api.clone());
+        // The signalling channel opens over HTTP/1.1, on a connection of its own. A server
+        // may instead accept a WebSocket on an HTTP/2 connection through extended `CONNECT`
+        // (RFC 8441), and a browser only tries it where the server has said it will — so not
+        // saying so is what keeps every socket on the one handshake shape this codebase
+        // exercises end to end, rather than on whichever of two a browser happened to pick.
+        // What it costs is a second TLS handshake per tab, once, at sign-in.
+        let server = axum_server::bind_rustls(asked_for, tls).handle(handle);
         async move {
-            if let Err(error) = axum_server::bind_rustls(asked_for, tls)
-                .handle(handle)
-                .serve(routes)
-                .await
-            {
+            if let Err(error) = server.serve(routes).await {
                 tracing::error!(target: module::TRANSPORT, %error, "the server stopped");
             }
         }

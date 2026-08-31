@@ -1,16 +1,19 @@
 <script>
-	// The console frame. There is no lobby yet (#36), so a signed-in user lands here and the
-	// admin console is what they find — or a plain sentence saying it is not theirs.
+	// The console frame. A signed-in user lands in the **lobby** — signed in, no role, no
+	// audio, no authority (ADR-0023) — and that is what this page shows first.
 	//
-	// It opens on the system-administration flag **alone and never on a role** (v1 §9), which
-	// is the whole reason this page asks the server who it is talking to rather than reading
-	// anything out of the cookie: the cookie carries no claims, so the flag is whatever the
-	// store says it is on this request.
+	// The admin console is reachable **from the lobby and from within a session**, gated on
+	// the user's system-administration flag and never on a role (v1 §9): an operator who is
+	// also a sysadmin must not have to drop off the air to add a loop. That is why this page
+	// asks the server who it is talking to rather than reading anything out of the cookie —
+	// the cookie carries no claims, so the flag is whatever the store says on this request.
 	import AdminConsole from '$lib/AdminConsole.svelte';
 	import ChangePassword from '$lib/ChangePassword.svelte';
 	import Enrol from '$lib/Enrol.svelte';
+	import Lobby from '$lib/Lobby.svelte';
 	import SignIn from '$lib/SignIn.svelte';
 	import { principal, signOut } from '$lib/server.js';
+	import { openSignalling } from '$lib/session.js';
 
 	let who = $state(null);
 	let asked = $state(false);
@@ -19,9 +22,39 @@
 	// rather than something reached from inside.
 	let enrolling = $state(false);
 	let enrolled = $state(false);
+	// The lobby, or the admin console. Two surfaces one person may hold at once, never a
+	// role and never a mode: an administrator is in the lobby the whole time they are in
+	// here.
+	let administering = $state(false);
+	// What the server said on its way out, where it said anything: a sign-in that ended
+	// somewhere else is a different fact from a tab that was closed, and the person in front
+	// of this one is owed it.
+	let ended = $state(null);
+	// The lobby, as the signalling channel last had it.
+	let lobby = $state(null);
+	// The channel went away without saying why. What was last shown stays on screen and is
+	// marked, rather than blanked: an empty page reads as *nothing is happening*, when in
+	// fact anything may be happening and the console simply cannot see it (ADR-0018).
+	let lost = $state(false);
 
 	$effect(() => {
 		ask();
+	});
+
+	// **One socket per tab, opened at sign-in** (ADR-0054), and it belongs to the frame for
+	// exactly that reason: it is open for as long as this person is signed in, whichever
+	// surface they are reading. An administrator in the admin console has not left the lobby.
+	$effect(() => {
+		if (!who) return;
+
+		return openSignalling({
+			onLobby: (said) => {
+				lobby = said;
+				lost = false;
+			},
+			onEnded: itEnded,
+			onLost: () => (lost = true)
+		});
 	});
 
 	async function ask() {
@@ -33,11 +66,22 @@
 		asked = true;
 	}
 
+	// The signalling channel said the sign-in is over. Asking again is what settles whether
+	// it truly is, because the store is the only thing entitled to answer that.
+	async function itEnded(reason) {
+		ended = reason;
+		administering = false;
+		lobby = null;
+		await ask();
+	}
+
 	async function leave() {
 		try {
 			await signOut();
 		} finally {
 			who = null;
+			lobby = null;
+			ended = null;
 		}
 	}
 </script>
@@ -54,7 +98,7 @@
 			onBack={() => (enrolling = false)}
 		/>
 	{:else}
-		<SignIn onSignedIn={ask} note={enrolled ? 'Password set. Sign in with it.' : null} />
+		<SignIn onSignedIn={ask} note={ended ?? (enrolled ? 'Password set. Sign in with it.' : null)} />
 		<p class="otherway">
 			<button class="lesser" onclick={() => ((enrolling = true), (enrolled = false))}>
 				I have an enrolment code
@@ -67,17 +111,19 @@
 			<h1>VoxLoop</h1>
 			<p>
 				Signed in as <strong>{who.username}</strong>
+				{#if who.system_administration}
+					<button onclick={() => (administering = !administering)}>
+						{administering ? 'Lobby' : 'Admin console'}
+					</button>
+				{/if}
 				<button onclick={leave}>Sign out</button>
 			</p>
 		</header>
 
-		{#if who.system_administration}
+		{#if administering}
 			<AdminConsole />
 		{:else}
-			<p class="refusal">
-				You may not. The admin console is for a system administrator, and it is the flag rather than
-				any role that opens it.
-			</p>
+			<Lobby {lobby} {lost} />
 		{/if}
 
 		<ChangePassword />
