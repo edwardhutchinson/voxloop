@@ -3227,6 +3227,44 @@ mod tests {
         );
     }
 
+    /// Granting what is already granted is the same grant rather than a second one, and the
+    /// answer says so: `created` is claimed only where this act is what made it, and the
+    /// entry records the same line either side — a write that changed nothing, said honestly.
+    #[tokio::test]
+    async fn granting_what_already_stands_is_not_answered_as_a_creation() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let user = box_of.a_user_called(&held, "capcom").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        assert_eq!(
+            box_of.grants(&held, &user, &role).await.status,
+            StatusCode::CREATED
+        );
+
+        let again = box_of.grants(&held, &user, &role).await;
+
+        assert_eq!(
+            again.status,
+            StatusCode::OK,
+            "a grant that already stood was answered as a creation: {:?}",
+            again.body
+        );
+        let entries = box_of.entries().await;
+        let granted: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.event == AuditEvent::EligibilityGranted)
+            .filter_map(|entry| entry.write.as_ref())
+            .collect();
+        assert_eq!(granted.len(), 2, "the second grant was not audited");
+        // Newest first: the re-grant records the same line either side, and the one that
+        // made the grant records nothing before it.
+        assert_eq!(
+            granted[0].before.as_ref().map(Snapshot::as_str),
+            Some("user=capcom role=Flight Director")
+        );
+        assert_eq!(granted[1].before, None);
+    }
+
     /// **Eligibility is never rendered as a matrix** ([ADR-0015]). There is no whole read to
     /// render one from — no route, and so nothing a console could ask for — which is the
     /// difference between this and the grid, whose matrix survives as a reference view.

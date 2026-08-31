@@ -169,7 +169,7 @@
 										onclick={() =>
 											(confirming = {
 												act: () => deleteRole(role.id),
-												consequence: `${role.name} is deleted. Nobody can assume it again, and its audit entries stay, attributed.`
+												consequence: `${role.name} is deleted, and every grant of eligibility for it goes with it. Nobody can assume it again, and its audit entries stay, attributed.`
 											})}>Delete</button
 									>
 								</td>

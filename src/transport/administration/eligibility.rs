@@ -141,7 +141,7 @@ async fn read_which_roles(api: &Api, user: &UserId) -> Result<Response, StoreErr
     })
 }
 
-/// Grant eligibility. `SystemAdministration`, audited with what it created.
+/// Grant eligibility. `SystemAdministration`, audited with what it did.
 ///
 /// It has its own audited path rather than going through [`super::create`] because a grant
 /// names two records that already exist and creates the relation between them: the pair is
@@ -176,6 +176,11 @@ async fn granting(
 ) -> Result<Response, StoreError> {
     let mut transaction = api.store.begin().await?;
     let administrator = Administrator::of(&mut transaction, acting).await?;
+    // Whether the grant stood already, read before the write and used by both halves of the
+    // answer. Granting what is already granted is the same grant rather than a second one,
+    // and a console told *created* about nothing created would be the console asserting
+    // something that did not happen — which is the one thing displayed state may never do.
+    let stood = transaction.an_eligibility(user, for_role).await?;
 
     // Either half of the pair can be the one that is not there, and the answer says so
     // without guessing which: the console holds both ids and read both lists.
@@ -190,9 +195,11 @@ async fn granting(
             ConfigurationWrite {
                 target: Some(granted.recorded_id()),
                 target_name: granted.recorded_name(),
-                // Nothing before it. A grant that did not stand is not a lesser grant, it is
-                // an absence, and the entry says so by having nothing to show.
-                before: None,
+                // Nothing before it, where this act is what made the grant. A grant that did
+                // not stand is not a lesser grant, it is an absence, and the entry says so by
+                // having nothing to show — while a re-grant records the same line either
+                // side, which is a write that changed nothing said honestly.
+                before: stood.as_ref().map(Record::snapshot),
                 after: Some(granted.snapshot()),
                 blast_radius: nothing_live(),
                 refusal: None,
@@ -208,7 +215,13 @@ async fn granting(
         "eligibility was granted"
     );
 
-    Ok((StatusCode::CREATED, Json(EligibilityAsRead::of(&granted))).into_response())
+    let did = if stood.is_some() {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+
+    Ok((did, Json(EligibilityAsRead::of(&granted))).into_response())
 }
 
 /// Revoke eligibility. `SystemAdministration`, audited with what it took away.

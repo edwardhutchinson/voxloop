@@ -18,8 +18,10 @@
 	} from './server.js';
 
 	let accounts = $state([]);
-	// The account whose eligibility is being administered, where one is.
-	let assuming = $state(null);
+	// The account whose eligibility is being administered, where one is. *Admitting* rather
+	// than *assuming*: assuming is the act by which a signed-in user takes up a role, and
+	// nobody does that here.
+	let admitting = $state(null);
 	let refusal = $state(null);
 	let reading = $state(true);
 
@@ -122,8 +124,8 @@
 	}
 </script>
 
-{#if assuming}
-	<WhichRoles account={assuming} onback={() => (assuming = null)} />
+{#if admitting}
+	<WhichRoles account={admitting} onback={() => (admitting = null)} />
 {:else}
 	<section>
 		<header>
@@ -203,7 +205,7 @@
 							<td class="acts">
 								<button
 									onclick={() =>
-										(assuming = { id: account.id, username: account.username })}>Roles</button
+										(admitting = { id: account.id, username: account.username })}>Roles</button
 								>
 								{#if account.locked}
 									<button
@@ -239,7 +241,7 @@
 										ask(
 											account,
 											() => deleteUser(account.id),
-											`${account.username} is deleted and signed out everywhere. Their audit entries stay, attributed.`
+											`${account.username} is deleted and signed out everywhere, and every role they were eligible for goes with them. Their audit entries stay, attributed.`
 										)}>Delete</button
 								>
 							</td>
