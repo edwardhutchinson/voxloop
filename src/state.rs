@@ -12,17 +12,96 @@
 //! projections this module computes rather than records it keeps, which is what lets their
 //! versions be monotonic and what they show be simultaneously true ([ADR-0019]).
 //!
-//! **What is here today is what #36 needs and no more.** The lobby asks who occupies each
-//! role, and the sign-in clock asks which sign-ins hold a session; both are questions about
-//! occupancy, and occupancy is created by assuming a role — which is #37's operation and
-//! the one writer this module is waiting for.
+//! **Nothing durable is read here and nothing durable is written.** Whatever a live decision
+//! needs from Configuration — how many may occupy a role, which loops a role may monitor —
+//! is passed in as a value by whoever is holding both, which is the same way the blast
+//! radius crosses ([ADR-0039]). That is what keeps the two seams from knowing about each
+//! other.
 //!
 //! [ADR-0019]: ../../docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md
 //! [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
 
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-use crate::configuration::{RoleId, SignInToken, UserId};
+use crate::configuration::{LoopId, Permission, RoleId, SignInToken, UserId};
+use crate::secrets;
+
+/// How long a session's tombstone is kept after the session ends ([ADR-0041]).
+///
+/// Long enough that somebody who was displaced mid-shift and comes back to the tab is told
+/// *what* happened rather than merely that something did, and short enough that the honest
+/// answer after it is the generic one. It is not a credential's lifetime and nothing is
+/// authorised by it.
+///
+/// [ADR-0041]: ../../docs/adr/0041-a-session-is-resumed-by-name.md
+const TOMBSTONES_ARE_KEPT_FOR: Duration = Duration::from_secs(15 * 60);
+
+/// The name of a session, minted by the assume that created it.
+///
+/// **It is not a credential** ([ADR-0041]). It is presented over a channel the sign-in
+/// cookie has already authenticated and can only ever select among that user's own sessions,
+/// so holding somebody else's buys nothing. It is unguessable all the same, because a name
+/// that can be enumerated is a way to ask which sessions exist.
+///
+/// [ADR-0041]: ../../docs/adr/0041-a-session-is-resumed-by-name.md
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionId(String);
+
+impl SessionId {
+    /// Take an id as a client presented it, on a hello that is resuming (#50).
+    #[allow(dead_code)]
+    pub(crate) fn presented(id: String) -> Self {
+        Self(id)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Why a session ended.
+///
+/// A closed set rather than a sentence, because the lobby has to render it, the audit log
+/// has to be filtered on it, and a free-text reason is neither ([ADR-0041]). It grows one
+/// ticket at a time: the reconnection window running out (#50), a forced relinquish (#51)
+/// and a revoked eligibility (#53) are the ones still to come.
+///
+/// [ADR-0041]: ../../docs/adr/0041-a-session-is-resumed-by-name.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ended {
+    /// The occupant gave the role up. Audio stops, and that is the whole of what happened.
+    Relinquished,
+    /// The same user assumed a role somewhere else, and a user has at most one session
+    /// (v1 §2). The displaced console is told this rather than left to infer it from a
+    /// socket that went quiet.
+    AssumedElsewhere,
+}
+
+impl Ended {
+    /// The word the audit log holds. These strings reach disk, so they are renamed only by a
+    /// migration.
+    pub(crate) fn stored(self) -> &'static str {
+        match self {
+            Self::Relinquished => "relinquished",
+            Self::AssumedElsewhere => "assumed_elsewhere",
+        }
+    }
+
+    /// What the console says to whoever was in the seat.
+    ///
+    /// It never implies the session continued somewhere: changing role is a relinquish
+    /// followed by an assume, and a sentence that softened that would be the class of lie
+    /// this product exists to avoid (v1 §2).
+    pub(crate) fn said(self) -> &'static str {
+        match self {
+            Self::Relinquished => "You relinquished the role. Audio has stopped.",
+            Self::AssumedElsewhere => {
+                "You assumed a role on another machine, so this session ended. Audio has stopped."
+            }
+        }
+    }
+}
 
 /// A user's single live connection to the voice loops, bound to exactly one role.
 ///
@@ -32,9 +111,34 @@ use crate::configuration::{RoleId, SignInToken, UserId};
 ///
 /// [ADR-0023]: ../../docs/adr/0023-sign-in-is-to-the-application-and-a-role-is-assumed.md
 struct Session {
+    id: SessionId,
     sign_in: SignInToken,
     occupant: UserId,
     role: RoleId,
+    /// The version of the last document this session was given, and the document itself.
+    ///
+    /// Both live on the session rather than on the socket, because a version is **monotonic
+    /// per session and survives reconnection** ([ADR-0019]) — a counter belonging to the
+    /// socket would restart at every blip, and *is this the same state* is the one question
+    /// versioning answers.
+    ///
+    /// [ADR-0019]: ../../docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md
+    version: u64,
+    last: Option<Presence>,
+}
+
+/// A session that is over, and why.
+///
+/// Kept for [`TOMBSTONES_ARE_KEPT_FOR`] so a client that was not the one doing the ending is
+/// told what happened ([ADR-0041]). It is live state like everything else here, so it does
+/// not survive a restart — which is the case the server's instance id covers instead (#50).
+///
+/// [ADR-0041]: ../../docs/adr/0041-a-session-is-resumed-by-name.md
+struct Tombstone {
+    session: SessionId,
+    occupant: UserId,
+    why: Ended,
+    at: Instant,
 }
 
 /// Everything live, behind one lock so there is one writer.
@@ -43,6 +147,8 @@ struct Live {
     /// One per occupied seat. A user has at most one, though they may be signed in on
     /// several machines (v1 §2).
     sessions: Vec<Session>,
+    /// The sessions that have ended recently, and why.
+    tombstones: Vec<Tombstone>,
 }
 
 /// The single holder of live state, and the only thing that may read or write it.
@@ -54,10 +160,291 @@ pub(crate) struct StateAuthority {
     live: Mutex<Live>,
 }
 
+/// A role somebody is about to take up, and everything the live side needs to rule on it.
+///
+/// `limit` is Configuration's — it is the role's `max_occupants` — and it arrives as a value
+/// because this module reads nothing durable ([ADR-0039]). `None` is a role with no limit,
+/// which is the limit left unset rather than a third kind of role ([ADR-0068]).
+///
+/// [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+/// [ADR-0068]: ../../docs/adr/0068-a-role-with-no-limit-is-the-limit-left-unset.md
+pub(crate) struct Assuming {
+    pub(crate) sign_in: SignInToken,
+    pub(crate) occupant: UserId,
+    pub(crate) role: RoleId,
+    pub(crate) limit: Option<u32>,
+}
+
+/// A role taken up: the session it created, and whatever it ended to create it.
+pub(crate) struct Assumed {
+    pub(crate) session: SessionId,
+    /// The session this one displaced, where the same user held one already. A user has at
+    /// most one session, so assuming anywhere ends whatever they had — and the console that
+    /// had it is owed the reason (v1 §2).
+    pub(crate) displaced: Option<Relinquished>,
+}
+
+/// A session that has ended, named well enough to audit.
+///
+/// The role is here because session start and session end are audited against the role that
+/// was occupied (v1 §12), and the id alone would leave an entry nobody can read after the
+/// process that minted it is gone.
+pub(crate) struct Relinquished {
+    pub(crate) session: SessionId,
+    pub(crate) occupant: UserId,
+    pub(crate) role: RoleId,
+    pub(crate) why: Ended,
+}
+
+/// Why an assume did not happen.
+///
+/// One reason, because there is one: the seat is taken and the role's limit says it cannot
+/// be shared. Eligibility is Configuration's and is checked before this is ever called.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Occupied {
+    /// How many may be in the seat at once, which is what makes the refusal readable.
+    pub(crate) limit: u32,
+}
+
+/// A loop a session's role may monitor, as Configuration has it.
+///
+/// It is handed to [`StateAuthority::presence`] rather than read here: the grid is durable
+/// and the scoping is the grid's answer, so the live side is given the reach and projects
+/// within it ([ADR-0019]).
+///
+/// [ADR-0019]: ../../docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InReach {
+    pub(crate) id: LoopId,
+    pub(crate) name: String,
+    /// What this session's role holds on it — at least `monitor`, or it would not be here.
+    ///
+    /// The console needs it to know which loops it may ever speak on, and *the document is
+    /// the API*: anything the console renders has to be in here ([ADR-0019]).
+    ///
+    /// [ADR-0019]: ../../docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md
+    pub(crate) permission: Permission,
+}
+
+/// The presence document: everything one session may see, as of one moment.
+///
+/// It is a **projection** rather than a record. Nothing here is stored and read back — it is
+/// computed from the live facts and the reach handed in, which is what lets the whole of it
+/// be true at the same instant rather than assembled from several that were each true at
+/// some point ([ADR-0019]).
+///
+/// What it carries today is the session, the role it is bound to, and the loops in reach.
+/// Subscriptions (#39), arms (#41), staffing state (#48), loop health (#46) and the audience
+/// (#49) land in it one ticket at a time, and each of them is a field the server has
+/// committed to keeping true from the moment it appears.
+///
+/// **Occupancy is deliberately not in it** ([ADR-0048]): the hail picker's roster is a
+/// snapshot fetched when the picker opens, and pushing deployment-wide occupancy at every
+/// session's tick rate to serve a modal open for seconds is the wrong trade.
+///
+/// [ADR-0019]: ../../docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md
+/// [ADR-0048]: ../../docs/adr/0048-the-hail-picker-is-the-only-place-the-console-names-a-person.md
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Presence {
+    pub(crate) session: SessionId,
+    pub(crate) role: RoleId,
+    pub(crate) loops: Vec<InReach>,
+}
+
 impl StateAuthority {
     /// A running system with nobody on it, which is what a restart leaves.
     pub(crate) fn empty() -> Self {
         Self::default()
+    }
+
+    /// Take up a role, creating the session that carries voice.
+    ///
+    /// **Occupancy has exactly one origin** and this is it: never inferred from eligibility,
+    /// from being signed in, or from having a socket open ([ADR-0005]).
+    ///
+    /// Three rules land together, and they land under one lock because each is only true
+    /// with respect to the others:
+    ///
+    /// - **A user has at most one session** (v1 §2), so whatever they held is displaced and
+    ///   told why.
+    /// - **`max_occupants` is enforced**, and an occupied single-occupant role is refused
+    ///   rather than granted silently. The caller's own session does not count towards the
+    ///   limit — it is about to be displaced, so counting it would refuse somebody the seat
+    ///   they are already in.
+    /// - **The limit is checked before anything is ended**, so a refused assume costs the
+    ///   caller nothing. Ending first and refusing second would take an operator off the air
+    ///   for a seat they never got.
+    ///
+    /// [ADR-0005]: ../../docs/adr/0005-occupancy-means-listening-not-signed-in.md
+    pub(crate) fn assume(&self, assuming: Assuming) -> Result<Assumed, Occupied> {
+        self.write(|live| {
+            let held_already = live
+                .sessions
+                .iter()
+                .position(|session| session.occupant == assuming.occupant);
+
+            if let Some(limit) = assuming.limit {
+                let occupied = live
+                    .sessions
+                    .iter()
+                    .filter(|session| {
+                        session.role == assuming.role && session.occupant != assuming.occupant
+                    })
+                    .count();
+
+                if occupied >= limit as usize {
+                    return Err(Occupied { limit });
+                }
+            }
+
+            // Whatever this user was last told about a session of theirs is spent: they are
+            // on the air again, and a tombstone nobody came back for would outlive its only
+            // reader. It is dropped **before** the displacement below, so the one thing this
+            // act has to explain — the console it is about to take the air from — survives.
+            live.tombstones
+                .retain(|tombstone| tombstone.occupant != assuming.occupant);
+
+            let displaced = held_already.map(|held| {
+                let session = live.sessions.remove(held);
+                let relinquished = Relinquished {
+                    session: session.id,
+                    occupant: session.occupant,
+                    role: session.role,
+                    why: Ended::AssumedElsewhere,
+                };
+                live.remember(&relinquished);
+
+                relinquished
+            });
+
+            let session = SessionId(secrets::unguessable());
+            live.sessions.push(Session {
+                id: session.clone(),
+                sign_in: assuming.sign_in,
+                occupant: assuming.occupant,
+                role: assuming.role,
+                version: 0,
+                last: None,
+            });
+
+            Ok(Assumed { session, displaced })
+        })
+    }
+
+    /// Give up a role, ending the session and returning the user to the lobby.
+    ///
+    /// It is a full stop rather than a transition (v1 §2). Nothing survives it, and nothing
+    /// here pretends otherwise — a session that has been relinquished is gone from every
+    /// answer this module gives, including its own presence document.
+    ///
+    /// Nothing where the id names no session: a relinquish of something already over is not
+    /// a second ending.
+    pub(crate) fn relinquish(&self, session: &SessionId, why: Ended) -> Option<Relinquished> {
+        self.write(|live| {
+            let held = live.sessions.iter().position(|held| &held.id == session)?;
+            let ended = live.sessions.remove(held);
+            let relinquished = Relinquished {
+                session: ended.id,
+                occupant: ended.occupant,
+                role: ended.role,
+                why,
+            };
+            live.remember(&relinquished);
+
+            Some(relinquished)
+        })
+    }
+
+    /// Whether this session exists and is this user's, which is the whole of what `Session`
+    /// asks ([ADR-0054]).
+    ///
+    /// It is a live fact and it is read on **every** message rather than at the upgrade, so
+    /// a relinquish from another tab is refused within a message rather than within a
+    /// reconnection.
+    ///
+    /// [ADR-0054]: ../../docs/adr/0054-every-operation-declares-its-authorisation.md
+    pub(crate) fn is_held_by(&self, session: &SessionId, occupant: &UserId) -> bool {
+        self.read(|live| {
+            live.sessions
+                .iter()
+                .any(|held| &held.id == session && &held.occupant == occupant)
+        })
+    }
+
+    /// The role a session is acting through, which is where every `Grid` check starts.
+    ///
+    /// Reach is never composed across roles and never read from the person: a session is
+    /// bound to exactly one role, and this is that binding (v1 §1).
+    pub(crate) fn the_role_of(&self, session: &SessionId) -> Option<RoleId> {
+        self.read(|live| {
+            live.sessions
+                .iter()
+                .find(|held| &held.id == session)
+                .map(|held| held.role.clone())
+        })
+    }
+
+    /// Why this session ended, where it ended recently enough to still be said.
+    ///
+    /// The tombstone is **taken**: it exists to be told to somebody once, and a reason
+    /// re-delivered on every tick would put an ended session's banner back on screen after
+    /// the operator dismissed it.
+    ///
+    /// Nothing where the session is still live, and nothing where it ended longer ago than
+    /// [`TOMBSTONES_ARE_KEPT_FOR`] — after which the honest answer is the generic one
+    /// ([ADR-0041]).
+    ///
+    /// [ADR-0041]: ../../docs/adr/0041-a-session-is-resumed-by-name.md
+    pub(crate) fn why_it_ended(&self, session: &SessionId) -> Option<Ended> {
+        self.write(|live| {
+            live.forget_the_old_tombstones();
+
+            let kept = live
+                .tombstones
+                .iter()
+                .position(|tombstone| &tombstone.session == session)?;
+
+            Some(live.tombstones.remove(kept).why)
+        })
+    }
+
+    /// The presence document for this session, and the version it carries.
+    ///
+    /// `within` is the session's **reach** — the loops its role holds at least `monitor` on
+    /// — read from the grid by whoever called and handed over as a value. A session receives
+    /// presence only for those, and one gate or none: leaking the state of loops a role
+    /// cannot touch would erect a second, softer boundary beside the grid that nobody
+    /// configured ([ADR-0019]).
+    ///
+    /// **The version moves when the document moves and not otherwise.** A number that ticked
+    /// whether or not anything had changed would make *is this the same state* unanswerable,
+    /// which is the one question versioning is for.
+    ///
+    /// Nothing where the id names no session — which is how a socket learns its session has
+    /// ended without being told directly.
+    ///
+    /// [ADR-0019]: ../../docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md
+    pub(crate) fn presence(
+        &self,
+        session: &SessionId,
+        within: Vec<InReach>,
+    ) -> Option<(u64, Presence)> {
+        self.write(|live| {
+            let held = live.sessions.iter_mut().find(|held| &held.id == session)?;
+
+            let presence = Presence {
+                session: held.id.clone(),
+                role: held.role.clone(),
+                loops: within,
+            };
+
+            if held.last.as_ref() != Some(&presence) {
+                held.version += 1;
+                held.last = Some(presence.clone());
+            }
+
+            Some((held.version, presence))
+        })
     }
 
     /// Who occupies this role, now.
@@ -107,27 +494,36 @@ impl StateAuthority {
         }
     }
 
-    /// Put a session in, standing in for the assume that creates one (#37).
+    /// Write live state under the same lock, for the same reason.
     ///
-    /// Occupancy has exactly one origin — the explicit act of assuming a role — and building
-    /// half of that act here to have something to test against would be building the wrong
-    /// half. This is the seam the reads above are exercised through until the act exists.
-    #[cfg(test)]
-    pub(crate) fn a_session_is_held(
-        &self,
-        sign_in: &SignInToken,
-        occupant: &UserId,
-        role: &RoleId,
-    ) {
-        let mut live = self
-            .live
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        live.sessions.push(Session {
-            sign_in: sign_in.clone(),
-            occupant: occupant.clone(),
-            role: role.clone(),
+    /// Every rule that has to hold across two facts at once — the one-session rule and the
+    /// occupancy limit — is decided inside one of these, because a check and the write it
+    /// justifies taken separately are two moments a second tab can arrive between.
+    fn write<T>(&self, of: impl FnOnce(&mut Live) -> T) -> T {
+        match self.live.lock() {
+            Ok(mut live) => of(&mut live),
+            Err(poisoned) => of(&mut poisoned.into_inner()),
+        }
+    }
+}
+
+impl Live {
+    /// Keep a session's ending, so whoever was holding it can be told why.
+    fn remember(&mut self, relinquished: &Relinquished) {
+        self.forget_the_old_tombstones();
+        self.tombstones.push(Tombstone {
+            session: relinquished.session.clone(),
+            occupant: relinquished.occupant.clone(),
+            why: relinquished.why,
+            at: Instant::now(),
         });
+    }
+
+    /// Drop the tombstones nobody came back for.
+    fn forget_the_old_tombstones(&mut self) {
+        let now = Instant::now();
+        self.tombstones
+            .retain(|tombstone| now.duration_since(tombstone.at) < TOMBSTONES_ARE_KEPT_FOR);
     }
 }
 
@@ -163,6 +559,22 @@ mod tests {
         (sign_in, user, role)
     }
 
+    /// What a user in front of a console would send: take this role, sharing it with at most
+    /// `limit` others.
+    fn taking(
+        sign_in: &SignInToken,
+        occupant: &UserId,
+        role: &RoleId,
+        limit: Option<u32>,
+    ) -> Assuming {
+        Assuming {
+            sign_in: sign_in.clone(),
+            occupant: occupant.clone(),
+            role: role.clone(),
+            limit,
+        }
+    }
+
     #[tokio::test]
     async fn a_role_nobody_has_assumed_has_no_occupants() {
         let (_directory, store) = a_temporary_store().await;
@@ -180,8 +592,10 @@ mod tests {
         let (elsewhere, capcom, another) = a_seat(&store, "capcom", "CAPCOM").await;
         let live = StateAuthority::empty();
 
-        live.a_session_is_held(&sign_in, &user, &role);
-        live.a_session_is_held(&elsewhere, &capcom, &another);
+        live.assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+        live.assume(taking(&elsewhere, &capcom, &another, Some(1)))
+            .expect("the seat to be free");
 
         assert_eq!(live.occupants_of(&role), vec![user]);
         assert_eq!(live.occupants_of(&another), vec![capcom]);
@@ -197,11 +611,351 @@ mod tests {
         let live = StateAuthority::empty();
         assert!(live.sign_ins_holding_a_session().is_empty());
 
-        live.a_session_is_held(&sign_in, &user, &role);
+        live.assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
 
         let holding = live.sign_ins_holding_a_session();
         assert_eq!(holding.len(), 1);
         assert_eq!(holding[0].as_str(), sign_in.as_str());
         assert_ne!(holding[0].as_str(), in_the_lobby.as_str());
+    }
+
+    /// Assuming mints the session that carries voice, and the session is what everything
+    /// afterwards is asked about.
+    #[tokio::test]
+    async fn assuming_mints_a_session_bound_to_the_role() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+
+        let assumed = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+
+        assert!(live.is_held_by(&assumed.session, &user));
+        assert_eq!(live.the_role_of(&assumed.session), Some(role));
+        assert!(assumed.displaced.is_none());
+    }
+
+    /// A session belongs to the user who assumed it, and to nobody else. It is not a
+    /// credential, but it is not an authority either: the sign-in behind the socket is what
+    /// says whose it is.
+    #[tokio::test]
+    async fn a_session_is_held_by_whoever_assumed_it_and_by_nobody_else() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let (_elsewhere, somebody, _another) = a_seat(&store, "capcom", "CAPCOM").await;
+        let live = StateAuthority::empty();
+
+        let assumed = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+
+        assert!(!live.is_held_by(&assumed.session, &somebody));
+    }
+
+    /// Relinquishing is a full stop: the seat frees, the session is gone from every answer,
+    /// and there is no document left to render.
+    #[tokio::test]
+    async fn relinquishing_ends_the_session_and_frees_the_seat() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+
+        let ended = live
+            .relinquish(&assumed.session, Ended::Relinquished)
+            .expect("the session to be there to end");
+
+        assert_eq!(ended.role, role);
+        assert_eq!(ended.occupant, user);
+        assert!(live.occupants_of(&role).is_empty());
+        assert!(!live.is_held_by(&assumed.session, &user));
+        assert!(live.the_role_of(&assumed.session).is_none());
+        assert!(live.presence(&assumed.session, Vec::new()).is_none());
+        assert!(live.sign_ins_holding_a_session().is_empty());
+    }
+
+    /// Relinquishing something already over is not a second ending.
+    #[tokio::test]
+    async fn relinquishing_a_session_that_is_over_ends_nothing() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+        live.relinquish(&assumed.session, Ended::Relinquished)
+            .expect("the first ending");
+
+        assert!(
+            live.relinquish(&assumed.session, Ended::Relinquished)
+                .is_none()
+        );
+    }
+
+    /// **A user has at most one session**, though they may be signed in on several machines
+    /// (v1 §2). Assuming on the second machine ends the first, and says so.
+    #[tokio::test]
+    async fn a_user_holds_one_session_and_assuming_elsewhere_ends_the_other() {
+        let (_directory, store) = a_temporary_store().await;
+        let (laptop, user, flight) = a_seat(&store, "flight", "Flight Director").await;
+        let (console, _capcom, capcom) = a_seat(&store, "capcom", "CAPCOM").await;
+        let live = StateAuthority::empty();
+        let first = live
+            .assume(taking(&laptop, &user, &flight, Some(1)))
+            .expect("the seat to be free");
+
+        let second = live
+            .assume(taking(&console, &user, &capcom, Some(1)))
+            .expect("the seat to be free");
+
+        let displaced = second.displaced.expect("the first session to be displaced");
+        assert_eq!(displaced.session, first.session);
+        assert_eq!(displaced.why, Ended::AssumedElsewhere);
+        assert!(live.occupants_of(&flight).is_empty());
+        assert_eq!(live.occupants_of(&capcom), vec![user]);
+        assert_eq!(live.sign_ins_holding_a_session().len(), 1);
+    }
+
+    /// ...and the console that lost it is told why rather than left with a socket that went
+    /// quiet.
+    #[tokio::test]
+    async fn a_displaced_session_can_be_told_what_ended_it() {
+        let (_directory, store) = a_temporary_store().await;
+        let (laptop, user, flight) = a_seat(&store, "flight", "Flight Director").await;
+        let (console, _capcom, capcom) = a_seat(&store, "capcom", "CAPCOM").await;
+        let live = StateAuthority::empty();
+        let first = live
+            .assume(taking(&laptop, &user, &flight, Some(1)))
+            .expect("the seat to be free");
+        live.assume(taking(&console, &user, &capcom, Some(1)))
+            .expect("the seat to be free");
+
+        assert_eq!(
+            live.why_it_ended(&first.session),
+            Some(Ended::AssumedElsewhere)
+        );
+    }
+
+    /// The reason is told once. A banner that came back on every tick would be one the
+    /// operator cannot dismiss.
+    #[tokio::test]
+    async fn the_reason_a_session_ended_is_said_once() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+        live.relinquish(&assumed.session, Ended::Relinquished)
+            .expect("the session to end");
+
+        assert_eq!(
+            live.why_it_ended(&assumed.session),
+            Some(Ended::Relinquished)
+        );
+        assert_eq!(live.why_it_ended(&assumed.session), None);
+    }
+
+    /// A session that is still live has not ended, so there is nothing to say about it.
+    #[tokio::test]
+    async fn a_live_session_has_no_reason_for_ending() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+
+        assert_eq!(live.why_it_ended(&assumed.session), None);
+    }
+
+    /// **An occupied single-occupant role is always refused, never granted silently**
+    /// (v1 §2). The refusal carries the limit, because *the seat is taken* and *this role
+    /// seats one* are the two halves of the answer.
+    #[tokio::test]
+    async fn refuses_an_occupied_single_occupant_role() {
+        let (_directory, store) = a_temporary_store().await;
+        let (held, occupant, flight) = a_seat(&store, "gene", "Flight Director").await;
+        let (arriving, somebody, _capcom) = a_seat(&store, "flight", "CAPCOM").await;
+        let live = StateAuthority::empty();
+        live.assume(taking(&held, &occupant, &flight, Some(1)))
+            .expect("the seat to be free");
+
+        let refused = live.assume(taking(&arriving, &somebody, &flight, Some(1)));
+
+        assert_eq!(refused.err(), Some(Occupied { limit: 1 }));
+        assert_eq!(live.occupants_of(&flight), vec![occupant]);
+    }
+
+    /// `max_occupants` is the same concept at every value, so a role seating two takes two
+    /// and refuses the third.
+    #[tokio::test]
+    async fn enforces_max_occupants_above_one() {
+        let (_directory, store) = a_temporary_store().await;
+        let (first, one, role) = a_seat(&store, "gene", "Support Engineer").await;
+        let (second, two, _elsewhere) = a_seat(&store, "flight", "CAPCOM").await;
+        let (third, three, _another) = a_seat(&store, "capcom", "Surgeon").await;
+        let live = StateAuthority::empty();
+
+        live.assume(taking(&first, &one, &role, Some(2)))
+            .expect("the first seat");
+        live.assume(taking(&second, &two, &role, Some(2)))
+            .expect("the second seat");
+        let refused = live.assume(taking(&third, &three, &role, Some(2)));
+
+        assert_eq!(refused.err(), Some(Occupied { limit: 2 }));
+        assert_eq!(live.occupants_of(&role).len(), 2);
+    }
+
+    /// A role with **no limit** is the limit left unset rather than a third kind of role
+    /// ([ADR-0068]), so nothing here refuses anybody.
+    #[tokio::test]
+    async fn a_role_with_no_limit_seats_everybody() {
+        let (_directory, store) = a_temporary_store().await;
+        let (first, one, observer) = a_seat(&store, "gene", "Booster").await;
+        let (second, two, _elsewhere) = a_seat(&store, "flight", "CAPCOM").await;
+        let live = StateAuthority::empty();
+
+        live.assume(taking(&first, &one, &observer, None))
+            .expect("no limit to refuse anybody");
+        live.assume(taking(&second, &two, &observer, None))
+            .expect("no limit to refuse anybody");
+
+        assert_eq!(live.occupants_of(&observer).len(), 2);
+    }
+
+    /// The caller's own session does not count towards the limit: it is about to be
+    /// displaced. Counting it would refuse somebody the seat they are already in, which is
+    /// what a reload from a second tab looks like.
+    #[tokio::test]
+    async fn re_assuming_the_seat_you_are_already_in_is_not_refused() {
+        let (_directory, store) = a_temporary_store().await;
+        let (laptop, user, flight) = a_seat(&store, "flight", "Flight Director").await;
+        let (console, _elsewhere, _capcom) = a_seat(&store, "gene", "CAPCOM").await;
+        let live = StateAuthority::empty();
+        let first = live
+            .assume(taking(&laptop, &user, &flight, Some(1)))
+            .expect("the seat to be free");
+
+        let second = live
+            .assume(taking(&console, &user, &flight, Some(1)))
+            .expect("the seat this user is already in");
+
+        assert_eq!(
+            second.displaced.expect("the first to be displaced").session,
+            first.session
+        );
+        assert_eq!(live.occupants_of(&flight), vec![user]);
+    }
+
+    /// **The limit is checked before anything is ended.** A refused assume costs the caller
+    /// nothing, or an operator is taken off the air for a seat they never got.
+    #[tokio::test]
+    async fn a_refused_assume_leaves_the_session_the_caller_already_held() {
+        let (_directory, store) = a_temporary_store().await;
+        let (held, occupant, flight) = a_seat(&store, "gene", "Flight Director").await;
+        let (mine, me, capcom) = a_seat(&store, "flight", "CAPCOM").await;
+        let live = StateAuthority::empty();
+        live.assume(taking(&held, &occupant, &flight, Some(1)))
+            .expect("the seat to be free");
+        let standing = live
+            .assume(taking(&mine, &me, &capcom, Some(1)))
+            .expect("the seat to be free");
+
+        let refused = live.assume(taking(&mine, &me, &flight, Some(1)));
+
+        assert!(refused.is_err());
+        assert!(
+            live.is_held_by(&standing.session, &me),
+            "a refused assume ended the session the caller was holding"
+        );
+        assert_eq!(live.occupants_of(&capcom), vec![me]);
+    }
+
+    /// The presence document is scoped to reach: it carries the loops handed in and nothing
+    /// else, because the grid is the one gate on what a session may see (ADR-0019).
+    #[tokio::test]
+    async fn the_presence_document_carries_the_session_the_role_and_the_reach() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+
+        let (version, presence) = live
+            .presence(&assumed.session, vec![a_loop("air-to-ground")])
+            .expect("a document for a live session");
+
+        assert_eq!(version, 1);
+        assert_eq!(presence.session, assumed.session);
+        assert_eq!(presence.role, role);
+        assert_eq!(presence.loops, vec![a_loop("air-to-ground")]);
+    }
+
+    /// **The version moves when the document moves and not otherwise**, or *is this the same
+    /// state* — the one question versioning answers — stops being answerable (ADR-0019).
+    #[tokio::test]
+    async fn the_version_moves_only_when_the_document_moves() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+
+        let (first, _) = live
+            .presence(&assumed.session, vec![a_loop("air-to-ground")])
+            .expect("a document");
+        let (again, _) = live
+            .presence(&assumed.session, vec![a_loop("air-to-ground")])
+            .expect("a document");
+        let (moved, _) = live
+            .presence(
+                &assumed.session,
+                vec![a_loop("air-to-ground"), a_loop("flight-director")],
+            )
+            .expect("a document");
+
+        assert_eq!((first, again), (1, 1));
+        assert_eq!(moved, 2);
+    }
+
+    /// A version belongs to the session, so two sessions count independently and neither
+    /// inherits the other's place.
+    #[tokio::test]
+    async fn versions_are_per_session() {
+        let (_directory, store) = a_temporary_store().await;
+        let (mine, me, flight) = a_seat(&store, "flight", "Flight Director").await;
+        let (theirs, them, capcom) = a_seat(&store, "gene", "CAPCOM").await;
+        let live = StateAuthority::empty();
+        let one = live
+            .assume(taking(&mine, &me, &flight, Some(1)))
+            .expect("the seat to be free");
+        let two = live
+            .assume(taking(&theirs, &them, &capcom, Some(1)))
+            .expect("the seat to be free");
+
+        live.presence(&one.session, vec![a_loop("air-to-ground")])
+            .expect("a document");
+        live.presence(&one.session, Vec::new()).expect("a document");
+        let (theirs, _) = live
+            .presence(&two.session, vec![a_loop("air-to-ground")])
+            .expect("a document");
+
+        assert_eq!(theirs, 1, "one session's version counted the other's");
+    }
+
+    /// One loop in reach, named the way a grid row hands it over.
+    fn a_loop(name: &str) -> InReach {
+        InReach {
+            id: LoopId::presented(name.to_owned()),
+            name: name.to_owned(),
+            permission: Permission::Monitor,
+        }
     }
 }

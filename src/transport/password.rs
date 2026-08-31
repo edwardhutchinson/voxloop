@@ -88,6 +88,7 @@ async fn changing(
                 source: Some(source.ip()),
                 write: None,
                 operation: None,
+                occupancy: None,
             })
             .await?;
         transaction.commit().await?;
@@ -120,6 +121,7 @@ async fn changing(
             // record: the log would otherwise hold two identical lines and say nothing.
             write: None,
             operation: None,
+            occupancy: None,
         })
         .await?;
     transaction.commit().await?;

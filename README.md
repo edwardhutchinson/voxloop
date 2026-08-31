@@ -162,8 +162,7 @@ actor id, because there is no person to attribute it to.
 Signing in puts you in the **lobby**: signed in, no role assumed, so no audio, no authority
 and nothing to configure. It answers one question — *should I assume a role, and which?* — by
 listing the roles you are eligible for and who occupies each
-([ADR-0023](docs/adr/0023-sign-in-is-to-the-application-and-a-role-is-assumed.md)). Assuming
-one is a separate act, and it is the next ticket.
+([ADR-0023](docs/adr/0023-sign-in-is-to-the-application-and-a-role-is-assumed.md)).
 
 Sign in and assume are two acts with two lifetimes. There is **no idle timeout on a session
 and no absolute cap on a sign-in**; a sign-in ends after 24 hours with no deliberate act, and
@@ -178,6 +177,48 @@ editing a grid cell mid-shift has to land on a socket that is already open. The 
 the sign-in cookie and nothing else: a service principal has no session and no socket, and a
 request presenting a cookie and a token together is refused rather than resolved by
 precedence.
+
+## Assuming a role
+
+**Assume** takes up a role from the lobby and creates the **session** that carries voice. It
+mints a session id, moves the socket from `SignedIn` to `Session`, and swaps the lobby for
+the **presence document**. **Relinquish** ends the session and puts you back in the lobby.
+
+A user has **at most one session**, though they may be signed in on several machines, so
+assuming a role anywhere ends whatever session they held and tells that console why.
+Assuming an **occupied single-occupant role is refused** rather than granted silently, and
+`max_occupants` is enforced at every value. Both ends of a session are audited, and the end
+carries its reason.
+
+**Changing role is a relinquish followed by an assume, and the console says so.** There is no
+role picker on the console and no *switch*: you give the role up, land in the lobby, and take
+the other one from there. Audio genuinely stops in between, and a control that hid that would
+be the class of lie the product exists to avoid.
+
+## The presence document
+
+State reaches a session as **one versioned document, pushed by the server and rendered
+atomically** ([ADR-0019](docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md)).
+There are no per-topic streams: they permit a torn state — arms as of one instant beside
+subscriptions as of another, each individually true and the combination never true at any
+moment.
+
+**The document is the API.** Whatever the console renders is in it, and anything in it is
+something the server has committed to keeping true. It carries the session, the role it is
+bound to, and the loops in reach; subscriptions, arms, staffing state, loop health and the
+audience land in it one ticket at a time.
+
+It is **scoped to reach** — only loops the session's role holds at least `monitor` on — and
+it is recomputed on every tick, so a grid edit narrows or widens a live session's document
+without a re-assume. Occupancy is *not* scoped to reach and is deliberately not in the
+document at all: the hail picker fetches a roster when it opens
+([ADR-0048](docs/adr/0048-the-hail-picker-is-the-only-place-the-console-names-a-person.md)).
+
+Versions are **monotonic per session** and move only when the document does, so *is this the
+same state* stays answerable. The wire is JSON at a ~5 Hz tick.
+`permessage-deflate` with context takeover is specified and **not yet built** — the WebSocket
+implementation underneath negotiates no extensions — which costs bandwidth and nothing else
+([#78](https://github.com/edwardhutchinson/voxloop/issues/78)).
 
 ## The admin console
 

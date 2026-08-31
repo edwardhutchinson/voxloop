@@ -146,6 +146,7 @@ async fn create(
             source: Some(source.ip()),
             write: None,
             operation: None,
+            occupancy: None,
         })
         .await?;
     transaction.commit().await?;
@@ -182,6 +183,7 @@ async fn refuse(api: &Api, submitted: &str, source: &SocketAddr) -> Result<Respo
             source: Some(source.ip()),
             write: None,
             operation: None,
+            occupancy: None,
         })
         .await?;
     transaction.commit().await?;

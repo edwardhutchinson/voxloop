@@ -108,6 +108,7 @@ async fn end_abandoned_sign_ins(
                 source: None,
                 write: None,
                 operation: None,
+                occupancy: None,
             })
             .await?;
     }
@@ -128,6 +129,7 @@ async fn end_abandoned_sign_ins(
 mod tests {
     use super::*;
     use crate::configuration::{NewRole, NewUser, Roles, SignInToken, UserId, a_temporary_store};
+    use crate::state::Assuming;
 
     /// A signed-in user, and the sign-in they hold.
     async fn signed_in(store: &Store, username: &str) -> (UserId, SignInToken) {
@@ -192,7 +194,14 @@ mod tests {
             .expect("the role to be created");
         transaction.commit().await.expect("the role to land");
         let state = StateAuthority::empty();
-        state.a_session_is_held(&holding_a_role, &occupant, &role);
+        state
+            .assume(Assuming {
+                sign_in: holding_a_role.clone(),
+                occupant: occupant.clone(),
+                role: role.clone(),
+                limit: Some(1),
+            })
+            .expect("the seat to be free");
 
         end_abandoned_sign_ins(&store, &state, AT_ONCE)
             .await

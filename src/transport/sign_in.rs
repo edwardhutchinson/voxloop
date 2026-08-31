@@ -81,6 +81,7 @@ async fn attempt(
                 source: Some(source.ip()),
                 write: None,
                 operation: None,
+                occupancy: None,
             })
             .await?;
         transaction.commit().await?;
@@ -100,6 +101,7 @@ async fn attempt(
             source: Some(source.ip()),
             write: None,
             operation: None,
+            occupancy: None,
         })
         .await?;
     transaction.commit().await?;
@@ -146,6 +148,7 @@ async fn end(api: &Api, user: &UserId, sign_in: &SignInToken) -> Result<(), Stor
             source: None,
             write: None,
             operation: None,
+            occupancy: None,
         })
         .await?;
     transaction.commit().await?;

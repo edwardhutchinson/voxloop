@@ -26,7 +26,7 @@ use super::eligibility::Eligibility;
 use super::grid::Cell;
 use super::loops::Loop;
 use super::records::Change;
-use super::roles::Role;
+use super::roles::{Role, RoleId};
 use super::store::{StoreError, Transaction, now, unavailable};
 use super::users::{User, UserId};
 
@@ -51,6 +51,20 @@ pub(crate) enum AuditEvent {
     /// for. It is a separate event from a sign-out because a log filtered to *what ended
     /// somebody's shift* must not read a reaped tab as somebody leaving.
     SignInExpired,
+    /// A role assumed: the session that carries voice was created (v1 §2).
+    ///
+    /// It is an **authentication event** rather than a configuration write — nothing on disk
+    /// changed — so it carries no before, no after and no blast radius. It names the role,
+    /// because *who was in that seat* is the whole of what it is for and the log is
+    /// filterable by target.
+    SessionStarted,
+    /// A session ended, **with the reason** (v1 §12).
+    ///
+    /// Relinquished and displaced by an assume elsewhere today; reaped at the reconnection
+    /// window (#50), forced (#51) and revoked (#53) later. A log filtered to *what ended
+    /// somebody's shift* has to be able to tell those apart, which is why the reason is a
+    /// word on the entry rather than a sentence in it.
+    SessionEnded,
     /// The first system administrator, made by whoever could read the server's own log.
     BootstrapRedeemed,
     /// A bootstrap code presented and not accepted. Refused administration writes are
@@ -136,6 +150,8 @@ impl AuditEvent {
             Self::SignInFailed => "sign_in_failed",
             Self::SignedOut => "signed_out",
             Self::SignInExpired => "sign_in_expired",
+            Self::SessionStarted => "session_started",
+            Self::SessionEnded => "session_ended",
             Self::BootstrapRedeemed => "bootstrap_redeemed",
             Self::BootstrapRefused => "bootstrap_refused",
             Self::UserCreated => "user_created",
@@ -170,6 +186,8 @@ impl AuditEvent {
             "sign_in_failed" => Some(Self::SignInFailed),
             "signed_out" => Some(Self::SignedOut),
             "sign_in_expired" => Some(Self::SignInExpired),
+            "session_started" => Some(Self::SessionStarted),
+            "session_ended" => Some(Self::SessionEnded),
             "bootstrap_redeemed" => Some(Self::BootstrapRedeemed),
             "bootstrap_refused" => Some(Self::BootstrapRefused),
             "user_created" => Some(Self::UserCreated),
@@ -242,6 +260,29 @@ pub(crate) struct AuditEntry {
     /// no before, no after and no radius to record — and which operation it was is the whole
     /// of what makes the entry worth keeping.
     pub(crate) operation: Option<String>,
+    /// The seat a session start or session end was about, where the entry is one.
+    ///
+    /// It is beside [`AuditEntry::write`] rather than inside it because a session is not
+    /// configuration: assuming a role changes no record, so there is nothing to snapshot
+    /// before and after and no blast radius to compute.
+    pub(crate) occupancy: Option<Occupancy>,
+}
+
+/// The role a session was of, and why the session ended.
+///
+/// The role is written into the entry's target the way every other record is — the internal
+/// id and a snapshot of the name — because the log is filterable by target and outlives the
+/// records it references ([ADR-0028]).
+///
+/// [ADR-0028]: ../../../docs/adr/0028-the-audit-log-records-decisions-not-traffic.md
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Occupancy {
+    pub(crate) role: RoleId,
+    /// The role's name as it stood, which keeps the entry readable after the role is gone.
+    pub(crate) role_name: String,
+    /// Why the session ended, as one of a closed set of words. Absent on a session start,
+    /// which needs no reason: somebody took the seat.
+    pub(crate) reason: Option<String>,
 }
 
 /// What a configuration change did: to which record, from what, to what, and to anything
@@ -566,6 +607,7 @@ pub(crate) struct RecordedEntry {
     pub(crate) source: Option<IpAddr>,
     pub(crate) write: Option<ConfigurationWrite>,
     pub(crate) operation: Option<String>,
+    pub(crate) occupancy: Option<Occupancy>,
     /// Milliseconds since the Unix epoch.
     pub(crate) recorded_at: i64,
 }
@@ -589,26 +631,38 @@ pub(crate) trait AuditLog {
 impl AuditLog for Transaction {
     async fn record(&mut self, entry: AuditEntry) -> Result<(), StoreError> {
         let write = entry.write.as_ref();
+        let occupancy = entry.occupancy.as_ref();
 
         sqlx::query(
             "INSERT INTO audit_entries \
              (recorded_at, event, actor_id, actor_name, source, \
               target_id, target_name, state_before, state_after, blast_radius, refusal, \
-              operation) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              operation, reason) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(now())
         .bind(entry.event.stored())
         .bind(entry.actor.as_ref().map(UserId::as_str))
         .bind(&entry.actor_name)
         .bind(entry.source.map(|source| source.to_string()))
-        .bind(write.and_then(|write| write.target.as_ref().map(RecordId::as_str)))
-        .bind(write.map(|write| write.target_name.as_str()))
+        // A configuration write names its record and a session names its role, and the two
+        // never both apply: one is a change to the store and the other changed nothing in it.
+        .bind(
+            write
+                .and_then(|write| write.target.as_ref().map(RecordId::as_str))
+                .or_else(|| occupancy.map(|occupancy| occupancy.role.as_str())),
+        )
+        .bind(
+            write
+                .map(|write| write.target_name.as_str())
+                .or_else(|| occupancy.map(|occupancy| occupancy.role_name.as_str())),
+        )
         .bind(write.and_then(|write| write.before.as_ref().map(Snapshot::as_str)))
         .bind(write.and_then(|write| write.after.as_ref().map(Snapshot::as_str)))
         .bind(write.map(|write| write.blast_radius.stored()))
         .bind(write.and_then(|write| write.refusal.as_deref()))
         .bind(entry.operation.as_deref())
+        .bind(occupancy.and_then(|occupancy| occupancy.reason.as_deref()))
         .execute(self.connection())
         .await
         .map_err(unavailable)?;
@@ -620,7 +674,7 @@ impl AuditLog for Transaction {
         let rows = sqlx::query(
             "SELECT recorded_at, event, actor_id, actor_name, source, \
              target_id, target_name, state_before, state_after, blast_radius, refusal, \
-             operation FROM audit_entries ORDER BY id DESC LIMIT ?",
+             operation, reason FROM audit_entries ORDER BY id DESC LIMIT ?",
         )
         .bind(at_most)
         .fetch_all(self.connection())
@@ -661,6 +715,20 @@ impl AuditLog for Transaction {
                             refusal: row.get("refusal"),
                         });
 
+                // A session entry is the other thing that names a target, and it is told
+                // apart the same way: it changed no record, so it carries no blast radius.
+                let occupancy =
+                    matches!(event, AuditEvent::SessionStarted | AuditEvent::SessionEnded)
+                        .then(|| {
+                            row.get::<Option<String>, _>("target_id")
+                                .map(|id| Occupancy {
+                                    role: RoleId::presented(id),
+                                    role_name: row.get("target_name"),
+                                    reason: row.get("reason"),
+                                })
+                        })
+                        .flatten();
+
                 Ok(RecordedEntry {
                     event,
                     actor: row.get::<Option<String>, _>("actor_id").map(UserId::known),
@@ -668,6 +736,7 @@ impl AuditLog for Transaction {
                     source,
                     write,
                     operation: row.get("operation"),
+                    occupancy,
                     recorded_at: row.get("recorded_at"),
                 })
             })
@@ -689,6 +758,7 @@ mod tests {
             source: Some(IpAddr::from([192, 0, 2, 7])),
             write: None,
             operation: None,
+            occupancy: None,
         }
     }
 
@@ -762,6 +832,7 @@ mod tests {
                 source: Some(IpAddr::from([192, 0, 2, 7])),
                 write: None,
                 operation: None,
+                occupancy: None,
             })
             .await
             .expect("the entry to be recorded");
@@ -947,6 +1018,7 @@ mod tests {
                 actor_name: "root".to_owned(),
                 source: None,
                 operation: None,
+                occupancy: None,
                 write: Some(ConfigurationWrite {
                     target: Some(target.clone()),
                     target_name: "flight".to_owned(),
@@ -991,6 +1063,7 @@ mod tests {
                 actor_name: "root".to_owned(),
                 source: None,
                 operation: None,
+                occupancy: None,
                 write: Some(ConfigurationWrite {
                     target: None,
                     target_name: "root".to_owned(),
@@ -1049,6 +1122,7 @@ mod tests {
                 actor_name: "root".to_owned(),
                 source: None,
                 operation: None,
+                occupancy: None,
                 write: Some(ConfigurationWrite {
                     target: Some(target.clone()),
                     target_name: "flight".to_owned(),
@@ -1106,6 +1180,7 @@ mod tests {
                 source: Some(IpAddr::from([198, 51, 100, 9])),
                 write: None,
                 operation: Some("POST /api/users".to_owned()),
+                occupancy: None,
             })
             .await
             .expect("the entry to be recorded");

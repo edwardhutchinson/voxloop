@@ -1,7 +1,7 @@
-// The client's Session module: the socket, and the documents that arrive on it.
+// The client's Session module: the socket, what is said on it, and the documents that arrive.
 //
 // This and `server.js` are the two halves of the client's Session module (`modules.md`):
-// what is asked for over HTTP, and what arrives on the socket. Nothing else in the console
+// what is asked for over HTTP, and what travels on the socket. Nothing else in the console
 // talks to VoxLoop over the signalling channel. One socket per tab, opened at sign-in
 // (ADR-0054), and it is the only channel live state travels on —
 // which is what makes the state on screen one thing that was simultaneously true rather
@@ -12,8 +12,13 @@
 // showing a role's occupants as of one moment beside its limit as of another, and each half
 // being true is exactly what makes the combination a lie.
 //
-// Assuming a role, resuming a session, and everything the presence document carries are
-// still to come; what this opens is the lobby, and the lobby has no acts in it.
+// **A tab is at one of two tiers and the server says which.** It opens in the lobby and is
+// sent the lobby document; assuming a role moves it to a session and it is sent the presence
+// document instead. Neither is inferred here — the console renders whichever document last
+// arrived, because the server is the only thing entitled to say whether somebody holds a
+// role.
+//
+// Resuming a session by name, and the gap events that come with it, are still to come (#50).
 
 const HELLO = JSON.stringify({ message: 'hello' });
 
@@ -27,10 +32,14 @@ function where() {
 /**
  * Open the signalling channel and start listening.
  *
- * Four things can happen to it and the console shows a different thing for each, because
- * they are different facts about the deployment rather than four shades of *offline*:
+ * Six things can happen to it and the console shows a different thing for each, because
+ * they are different facts about the deployment rather than six shades of *offline*:
  *
  * - `onLobby(document)` — the lobby, whole, to be rendered as it stands.
+ * - `onPresence(document)` — the presence document, whole, for the session this tab holds.
+ * - `onSessionEnded(reason)` — the role is given up and audio has stopped, and this is why.
+ *   It arrives **before** the lobby that follows it, so the console can say what happened
+ *   rather than merely reappearing somewhere else.
  * - `onRefused(reason)` — the server would not do that, and said what was not met. **A
  *   refusal is not the end of anything**: the socket stands, and the next message is judged
  *   on its own (ADR-0054).
@@ -38,9 +47,16 @@ function where() {
  * - `onLost()` — the channel went away without saying anything. Nothing has ended; the
  *   console simply cannot see any more, and says so rather than blanking.
  *
- * Answers with the way to close it, which is what a tab does on its way out.
+ * Answers with the two acts a tab can perform on its own session, and the way to close it.
  */
-export function openSignalling({ onLobby, onRefused, onEnded, onLost }) {
+export function openSignalling({
+	onLobby,
+	onPresence,
+	onSessionEnded,
+	onRefused,
+	onEnded,
+	onLost
+}) {
 	const socket = new WebSocket(where());
 	// A reason arrives before the close does, and a console that showed both would tell the
 	// operator their sign-in ended and then that the network did.
@@ -53,6 +69,10 @@ export function openSignalling({ onLobby, onRefused, onEnded, onLost }) {
 
 		if (said?.message === 'lobby') {
 			onLobby(said);
+		} else if (said?.message === 'presence') {
+			onPresence(said);
+		} else if (said?.message === 'session-ended') {
+			onSessionEnded(said.reason ?? null);
 		} else if (said?.message === 'refused') {
 			// Somebody may not do something. That is a fact about one message and not about
 			// the sign-in: reading it as *you are signed out* would take an operator off a
@@ -68,10 +88,25 @@ export function openSignalling({ onLobby, onRefused, onEnded, onLost }) {
 		if (!told) onLost();
 	});
 
-	return () => {
-		told = true;
-		socket.close();
+	return {
+		/** Take up a role. The server answers with the presence document, or with a refusal. */
+		assume: (role) => say(socket, { message: 'assume', role }),
+		/**
+		 * Give it up. **A full stop rather than a transition** (v1 §2): the server answers
+		 * with why the session ended and then with the lobby, and nothing here pretends the
+		 * two are one thing.
+		 */
+		relinquish: () => say(socket, { message: 'relinquish' }),
+		close: () => {
+			told = true;
+			socket.close();
+		}
 	};
+}
+
+/** Say one thing, where the socket is still open to say it on. */
+function say(socket, message) {
+	if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 }
 
 /** What the server said, or nothing at all if it was not something this console reads. */

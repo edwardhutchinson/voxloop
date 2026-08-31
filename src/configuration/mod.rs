@@ -38,7 +38,7 @@ mod users;
 #[cfg(test)]
 pub(crate) use audit::RecordedEntry;
 pub(crate) use audit::{
-    AuditEntry, AuditEvent, AuditLog, BlastRadius, ConfigurationWrite, Record, Snapshot,
+    AuditEntry, AuditEvent, AuditLog, BlastRadius, ConfigurationWrite, Occupancy, Record, Snapshot,
 };
 pub(crate) use deployment::{Deployment, DeploymentError};
 pub(crate) use eligibility::{Eligibilities, Eligibility};

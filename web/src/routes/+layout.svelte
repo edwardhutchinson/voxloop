@@ -49,13 +49,26 @@
 		who: null,
 		// The lobby, as the signalling channel last had it.
 		lobby: null,
+		// The presence document, where this tab holds a session. **The server says which of
+		// the two a person is looking at**, by sending one document or the other: whether
+		// somebody holds a role is live state, never something the console decides for
+		// itself (ADR-0016).
+		presence: null,
+		// Why the session ended, said once and shown in the lobby it lands back in. Audio
+		// genuinely stopped, so a console that merely reappeared in the lobby would be
+		// leaving the operator to work out what happened (v1 §2).
+		relinquished: null,
 		// The channel went away without saying why. What was last shown stays on screen and
 		// is marked, rather than blanked: an empty page reads as *nothing is happening*, when
 		// in fact anything may be happening and the console simply cannot see it (ADR-0018).
 		lost: false,
 		// The last thing the socket would not do, and why. It is not the end of anything, so
 		// it is shown where it happened rather than taking the page away.
-		refused: null
+		refused: null,
+		// The two acts a tab performs on its own session. They are here because the socket is
+		// here: a page under the frame asks the frame, and never opens a second channel.
+		assume: () => {},
+		relinquish: () => {}
 	});
 
 	holdFrame(frame);
@@ -80,16 +93,44 @@
 	$effect(() => {
 		if (!signedIn) return;
 
-		return openSignalling({
+		const channel = openSignalling({
 			onLobby: (said) => {
 				frame.lobby = said;
+				// The lobby is where a session ends up, so arriving at it clears the session
+				// rather than leaving two documents on screen describing two different states.
+				frame.presence = null;
 				frame.lost = false;
 				frame.refused = null;
+			},
+			onPresence: (said) => {
+				frame.presence = said;
+				// A role taken up is the answer to whatever the lobby was refusing, and it is
+				// the end of whatever ended before it.
+				frame.relinquished = null;
+				frame.lost = false;
+				frame.refused = null;
+			},
+			onSessionEnded: (reason) => {
+				frame.presence = null;
+				frame.relinquished = reason;
 			},
 			onRefused: (reason) => (frame.refused = reason),
 			onEnded: itEnded,
 			onLost: () => (frame.lost = true)
 		});
+
+		frame.assume = (role) => {
+			frame.refused = null;
+			frame.relinquished = null;
+			channel.assume(role);
+		};
+		frame.relinquish = channel.relinquish;
+
+		return () => {
+			frame.assume = () => {};
+			frame.relinquish = () => {};
+			channel.close();
+		};
 	});
 
 	async function ask() {
@@ -115,6 +156,8 @@
 	async function itEnded(reason) {
 		ended = reason;
 		frame.lobby = null;
+		frame.presence = null;
+		frame.relinquished = null;
 		frame.refused = null;
 		toTheTop();
 		await ask();
@@ -126,6 +169,8 @@
 		} finally {
 			frame.who = null;
 			frame.lobby = null;
+			frame.presence = null;
+			frame.relinquished = null;
 			frame.refused = null;
 			ended = null;
 			toTheTop();

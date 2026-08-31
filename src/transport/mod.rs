@@ -262,7 +262,7 @@ fn routes(api: &Api) -> RouteTable<Api> {
     use Requirement::{Public, SignedIn, SystemAdministration};
     use administration::{eligibility, grid, loops, roles, users};
 
-    let mut table = RouteTable::new(Arc::clone(&api.store))
+    let mut table = RouteTable::new(Arc::clone(&api.store), Arc::clone(&api.state))
         .get("/api/liveness", Public, liveness::liveness)
         .post("/api/sign-in", Public, sign_in::sign_in)
         .post("/api/sign-out", SignedIn, sign_in::sign_out)
@@ -1234,15 +1234,16 @@ mod tests {
         serving.stop().await;
     }
 
-    /// The signalling channel, over the wire a deployment actually serves: the cookie is
-    /// what opens it, the client says hello, and the lobby comes back.
+    /// The signalling channel, over the wire a deployment actually serves: the cookie opens
+    /// it, the client says hello, the lobby comes back, a role is assumed and relinquished,
+    /// and the socket moves between the two tiers as it goes.
     ///
     /// The in-process tests cannot reach this far. A WebSocket needs a connection something
     /// can hand over, and a request driven straight into the router has none — so what is
     /// checked here is the part only a real socket has: that the upgrade completes and the
     /// two halves speak.
     #[tokio::test]
-    async fn carries_the_lobby_over_a_real_socket() {
+    async fn carries_the_lobby_and_a_session_over_a_real_socket() {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::protocol::Role;
 
@@ -1316,7 +1317,183 @@ mod tests {
         // first thing anybody's lobby has ever held is that one seat.
         assert!(said.contains(r#""name":"Observer""#), "{said}");
 
+        // ...and assuming that seat over the same socket moves it to the session tier and
+        // swaps the lobby for the presence document, which is the whole of #37 end to end.
+        let observer = id_in(&said);
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::text(format!(
+                r#"{{"message":"assume","role":"{observer}"}}"#
+            )))
+            .await
+            .expect("the assume to be sent");
+
+        let said = socket
+            .next()
+            .await
+            .expect("the socket to say something")
+            .expect("a readable message")
+            .into_text()
+            .expect("text");
+        assert!(
+            said.contains(r#""message":"presence""#) && said.contains(r#""name":"Observer""#),
+            "the socket answered {said}"
+        );
+
+        // Relinquishing says the session ended before it says what the lobby holds: audio
+        // stops, and dressing that as a transition is the class of lie the product exists to
+        // avoid (v1 §2).
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                r#"{"message":"relinquish"}"#,
+            ))
+            .await
+            .expect("the relinquish to be sent");
+
+        let ended = socket
+            .next()
+            .await
+            .expect("the socket to say something")
+            .expect("a readable message")
+            .into_text()
+            .expect("text");
+        assert!(ended.contains(r#""message":"session-ended""#), "{ended}");
+        let back = socket
+            .next()
+            .await
+            .expect("the socket to say something")
+            .expect("a readable message")
+            .into_text()
+            .expect("text");
+        assert!(back.contains(r#""message":"lobby""#), "{back}");
+
         serving.stop().await;
+    }
+
+    /// **The document is pushed**, and it narrows and widens with the grid.
+    ///
+    /// The socket answers messages and it also pushes on a tick, and only a real socket has
+    /// the second half: a document assembled by a handler proves nothing about the loop that
+    /// sends one nobody asked for. A cell edit lands on a session that is already open, and
+    /// the next document carries it (ADR-0019).
+    #[tokio::test]
+    async fn pushes_a_narrowed_or_widened_presence_document_at_a_live_session() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let (serving, client, at, code) = a_server_in(directory.path()).await;
+        client
+            .post(format!("{at}/api/bootstrap"))
+            .header("content-type", "application/json")
+            .body(redeeming(&code, "flight", "a long enough password"))
+            .send()
+            .await
+            .expect("the bootstrap to be redeemed");
+        let signed_in = client
+            .post(format!("{at}/api/sign-in"))
+            .header("content-type", "application/json")
+            .body(signing_in("flight", "a long enough password"))
+            .send()
+            .await
+            .expect("an answer over TLS");
+        let cookie = signed_in
+            .headers()
+            .get("set-cookie")
+            .expect("a cookie")
+            .to_str()
+            .expect("a readable cookie")
+            .split(';')
+            .next()
+            .expect("a value")
+            .to_owned();
+
+        let upgraded = client
+            .get(format!("{at}/api/signalling"))
+            .header("cookie", &cookie)
+            .header(header::CONNECTION, "upgrade")
+            .header(header::UPGRADE, "websocket")
+            .header(header::SEC_WEBSOCKET_VERSION, "13")
+            .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+            .send()
+            .await
+            .expect("an answer over TLS");
+        let mut socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            upgraded
+                .upgrade()
+                .await
+                .expect("the connection to be handed over"),
+            Role::Client,
+            None,
+        )
+        .await;
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                r#"{"message":"hello"}"#,
+            ))
+            .await
+            .expect("the hello to be sent");
+
+        let lobby = next_said(&mut socket).await;
+        let observer = id_in(&lobby);
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::text(format!(
+                r#"{{"message":"assume","role":"{observer}"}}"#
+            )))
+            .await
+            .expect("the assume to be sent");
+        let presence = next_said(&mut socket).await;
+        assert!(presence.contains(r#""loops":[]"#), "{presence}");
+
+        // An administrator gives `Observer` a loop to monitor, while that session is open.
+        let created = client
+            .post(format!("{at}/api/loops"))
+            .header("cookie", &cookie)
+            .header("content-type", "application/json")
+            .body(r#"{"name":"Air-to-ground"}"#)
+            .send()
+            .await
+            .expect("the loop to be created");
+        let held_on = id_in(&created.text().await.expect("a readable answer"));
+        client
+            .put(format!("{at}/api/grid/{observer}/{held_on}"))
+            .header("cookie", &cookie)
+            .header("content-type", "application/json")
+            .body(r#"{"permission":"monitor"}"#)
+            .send()
+            .await
+            .expect("the cell to be set");
+        client
+            .post(format!("{at}/api/loops/{held_on}/dismiss-unreviewed"))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .expect("the column to be ruled on");
+
+        let widened = next_said(&mut socket).await;
+        assert!(
+            widened.contains(r#""message":"presence""#)
+                && widened.contains(r#""name":"Air-to-ground""#)
+                && widened.contains(r#""version":2"#),
+            "the socket pushed {widened}"
+        );
+
+        serving.stop().await;
+    }
+
+    /// The next thing a real socket says, or a failure rather than a test that hangs.
+    async fn next_said(
+        socket: &mut tokio_tungstenite::WebSocketStream<reqwest::Upgraded>,
+    ) -> String {
+        use futures_util::StreamExt;
+
+        tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("the socket to say something before the test gave up")
+            .expect("the socket to say something")
+            .expect("a readable message")
+            .into_text()
+            .expect("text")
+            .to_string()
     }
 
     // ---- #31: the admin console shell and user administration -------------------------

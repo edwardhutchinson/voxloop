@@ -379,6 +379,7 @@ async fn enrol(
             source: None,
             write: Some(issued.to_the_code(user, username, nothing_live())),
             operation: None,
+            occupancy: None,
         })
         .await?;
 
@@ -417,6 +418,7 @@ async fn record(
             source: None,
             write: Some(ConfigurationWrite::about(change, nothing_live())),
             operation: None,
+            occupancy: None,
         })
         .await
 }

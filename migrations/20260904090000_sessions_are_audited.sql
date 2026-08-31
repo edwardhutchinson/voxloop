@@ -1,0 +1,15 @@
+-- Session start and session end, with the reason (v1 §12).
+--
+-- They are **authentication events** rather than configuration writes: assuming a role
+-- changes no record, so there is no before, no after and no blast radius — and the radius
+-- staying NULL is what keeps it the discriminator it already is.
+--
+-- The role is written into the target the way every other entry names what it was about,
+-- because the log is filterable by target and *who was in that seat* is the question a
+-- session entry exists to answer. It is not a foreign key, for the reason none of the others
+-- are: the log outlives the records it references (ADR-0028).
+--
+-- The reason is its own column rather than the existing `refusal`, which says why a write did
+-- not happen. A session that ended did happen, and collapsing the two would make a log
+-- filtered to refusals show every shift change.
+ALTER TABLE audit_entries ADD COLUMN reason TEXT;

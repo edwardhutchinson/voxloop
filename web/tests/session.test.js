@@ -14,11 +14,14 @@ import { openSignalling } from '../src/lib/session.js';
 class ASocket {
 	static opened = [];
 
+	static OPEN = 1;
+
 	constructor(url) {
 		this.url = url;
 		this.sent = [];
 		this.closed = false;
 		this.listeners = {};
+		this.readyState = ASocket.OPEN;
 		ASocket.opened.push(this);
 	}
 
@@ -52,6 +55,8 @@ function listening() {
 	return {
 		told,
 		onLobby: (lobby) => told.push(['lobby', lobby]),
+		onPresence: (presence) => told.push(['presence', presence]),
+		onSessionEnded: (reason) => told.push(['session-ended', reason]),
 		onRefused: (reason) => told.push(['refused', reason]),
 		onEnded: (reason) => told.push(['ended', reason]),
 		onLost: () => told.push(['lost'])
@@ -157,10 +162,68 @@ test('a channel that said why is not also reported lost', () => {
 test('a tab on its way out closes the socket and reports nothing', () => {
 	const page = listening();
 
-	openSignalling(page)();
+	openSignalling(page).close();
 
 	assert.equal(lastSocket().closed, true);
 	assert.deepEqual(page.told, []);
+});
+
+test('hands the presence document out whole, as it arrived', () => {
+	const page = listening();
+	openSignalling(page);
+	const presence = {
+		message: 'presence',
+		version: 3,
+		session: 'a-session',
+		role: { id: 'a', name: 'Flight Director' },
+		loops: [{ id: 'b', name: 'Air-to-ground', permission: 'emit' }]
+	};
+
+	lastSocket().says(presence);
+
+	assert.deepEqual(page.told, [['presence', presence]]);
+});
+
+// **A session ending is not a sign-in ending, and neither is a lost channel.** Three ways to
+// end up with no console in front of you, and the operator is owed the difference: one is
+// over, one is somebody else's act, and one is the network.
+test('a session that ended is said to have ended, and the sign-in is untouched', () => {
+	const page = listening();
+	openSignalling(page);
+
+	lastSocket().says({
+		message: 'session-ended',
+		reason: 'You relinquished the role. Audio has stopped.'
+	});
+
+	assert.deepEqual(page.told, [['session-ended', 'You relinquished the role. Audio has stopped.']]);
+});
+
+test('taking up a role and giving it up are the two things a tab says about its session', () => {
+	const channel = openSignalling(listening());
+	lastSocket().happens('open');
+
+	channel.assume('a-role');
+	channel.relinquish();
+
+	assert.deepEqual(lastSocket().sent, [
+		'{"message":"hello"}',
+		'{"message":"assume","role":"a-role"}',
+		'{"message":"relinquish"}'
+	]);
+});
+
+// A socket that has gone is not somewhere to shout into. Nothing is queued either: an assume
+// that arrived after a reconnection would be a role taken up seconds after somebody asked
+// for it, on a console they may have walked away from.
+test('nothing is said on a socket that is not open', () => {
+	const channel = openSignalling(listening());
+	lastSocket().happens('open');
+	lastSocket().readyState = 3;
+
+	channel.assume('a-role');
+
+	assert.deepEqual(lastSocket().sent, ['{"message":"hello"}']);
 });
 
 test('anything unreadable on the wire is not read as a document', () => {

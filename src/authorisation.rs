@@ -17,6 +17,7 @@
 use crate::configuration::{
     Grid, LoopId, Permission, RoleId, SignInToken, SignIns, Store, StoreError, UserId, Users,
 };
+use crate::state::{SessionId, StateAuthority};
 
 /// What an operation demands of whoever calls it.
 ///
@@ -25,9 +26,8 @@ use crate::configuration::{
 /// it names a loop the caller supplies — so every operation carrying it is a
 /// signalling-channel message rather than an HTTP route (`docs/spec/api-surface.md`), built
 /// per message rather than registered once.
-// Two of the six name something no principal can hold yet: a role (#37) or a service token
-// (#57). They are declared together anyway: the list is fixed by ADR-0054, not grown one
-// route at a time.
+// One of the six names something no principal can hold yet: a service token (#57). It is
+// declared anyway — the list is fixed by ADR-0054, not grown one route at a time.
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Requirement {
@@ -86,20 +86,30 @@ impl std::fmt::Debug for ServiceToken {
     }
 }
 
-/// Everything a request offers about who is making it, before anything is read from the
-/// store.
+/// Everything a request offers about who is making it, before anything is read.
 ///
-/// Three things and no more. The **sign-in** is what a browser presents and the **service
+/// Four things and no more. The **sign-in** is what a browser presents and the **service
 /// token** is what a script presents, and a request carrying both is refused rather than
-/// resolved by precedence (v1 §3). The **acting role** is resolved by whoever calls this
-/// rather than read here — it is a session's assumed role (#37) or a service token's bound
-/// role (#57), and both are live facts this module does not reach for. Nothing supplies one
-/// yet, so `Grid` is refused today for want of a principal to check, which is the same
-/// default everything else here has.
+/// resolved by precedence (v1 §3).
+///
+/// The **session** is what a socket that has assumed a role presents. It is a name rather
+/// than a claim: it is resolved here, against the state authority, on every message — so a
+/// session ended from another tab a moment ago is refused now rather than at the next
+/// reconnection. It is not a second credential ([ADR-0041]), because it is only ever read on
+/// a channel the sign-in has already authenticated and can only select among that user's own
+/// sessions.
+///
+/// The **acting role** is the one exception: it is handed over as a value by a caller that
+/// resolved it some other way, which is the service principal's bound role (#57). A user's
+/// acting role is never supplied this way — it is the session's, read here, because a role
+/// nobody can be shown to occupy is authority asserted rather than observed.
+///
+/// [ADR-0041]: ../../docs/adr/0041-a-session-is-resumed-by-name.md
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Presented {
     sign_in: Option<SignInToken>,
     service_token: Option<ServiceToken>,
+    session: Option<SessionId>,
     acting_role: Option<RoleId>,
 }
 
@@ -109,6 +119,7 @@ impl Presented {
         Self {
             sign_in,
             service_token: None,
+            session: None,
             acting_role: None,
         }
     }
@@ -121,10 +132,17 @@ impl Presented {
         }
     }
 
+    /// ...and the session this socket has assumed a role into, where it has.
+    pub(crate) fn in_session(self, session: SessionId) -> Self {
+        Self {
+            session: Some(session),
+            ..self
+        }
+    }
+
     /// ...and the role the caller has resolved this principal to be acting through.
-    // Nothing but a test supplies one until a role can be assumed (#37). It is here rather
-    // than with that ticket because the requirement it feeds is fixed by ADR-0054, and a
-    // requirement nothing can satisfy is a requirement nothing has tested.
+    // Nothing but a test supplies one until a service token resolves to a principal (#57):
+    // a user's acting role comes from their session and is read here rather than handed in.
     #[allow(dead_code)]
     pub(crate) fn acting_through(self, role: RoleId) -> Self {
         Self {
@@ -167,10 +185,18 @@ pub(crate) enum Outcome {
 /// audit entry commit together. This reads and writes nothing, so it has nothing to commit
 /// with anybody — and requiring an open transaction here would mean opening one for every
 /// static asset the console asks for.
+///
+/// The state authority is passed for the same reason the store is: two of the six
+/// requirements are about a role somebody is **occupying**, which is a live fact and nowhere
+/// on disk. Both seams are read here and neither is reached across — this asks each of them
+/// a question and composes the answers, which is the only way they ever meet ([ADR-0039]).
+///
+/// [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
 pub(crate) async fn evaluate(
     requirement: &Requirement,
     presented: Presented,
     store: &Store,
+    state: &StateAuthority,
 ) -> Result<Outcome, StoreError> {
     // **A request carries exactly one credential kind** (v1 §3). Both is refused before the
     // requirement is so much as looked at, and deliberately not resolved by precedence: a
@@ -201,12 +227,32 @@ pub(crate) async fn evaluate(
             .await
         }
 
-        Requirement::Grid { rung, on } => carries(presented, store, *rung, on).await,
+        // A role assumed, and still held. Both halves are checked: the sign-in says who is
+        // asking, and the state authority says whether the session they named is theirs and
+        // is still there. Either one alone would let a socket keep the tier it had when it
+        // opened, which is exactly what per-message authorisation exists to stop.
+        Requirement::Session => {
+            let Some(session) = presented.session.clone() else {
+                return Ok(Outcome::Refused);
+            };
 
-        // A role is assumed over the signalling channel and a service principal is
-        // administered, and neither exists yet. They are refused rather than waved through:
-        // the default is refusal, everywhere and always.
-        Requirement::Session | Requirement::ServiceToken => Ok(Outcome::Refused),
+            signed_in(presented.sign_in, store, |_| true)
+                .await
+                .map(|outcome| match &outcome {
+                    Outcome::Permitted(Caller::User { id, .. })
+                        if state.is_held_by(&session, id) =>
+                    {
+                        outcome
+                    }
+                    _ => Outcome::Refused,
+                })
+        }
+
+        Requirement::Grid { rung, on } => carries(presented, store, state, *rung, on).await,
+
+        // A service principal is administered, and none exists yet. It is refused rather
+        // than waved through: the default is refusal, everywhere and always.
+        Requirement::ServiceToken => Ok(Outcome::Refused),
     }
 }
 
@@ -219,13 +265,20 @@ pub(crate) async fn evaluate(
 ///
 /// A principal with no acting role is refused rather than checked against something else,
 /// because there is nothing else: authority belongs to the role, never to the person.
+///
+/// For a user the acting role is **the one their session is bound to**, read from the state
+/// authority here rather than taken from the caller: reach is never composed across roles
+/// and never inherited from eligibility (v1 §1), and a session is the only thing that says
+/// which single role somebody is acting through. A bound role handed in by a caller is the
+/// service principal's path (#57) and is used as given.
 async fn carries(
     presented: Presented,
     store: &Store,
+    state: &StateAuthority,
     rung: Permission,
     on: &LoopId,
 ) -> Result<Outcome, StoreError> {
-    let (Some(role), Some(token)) = (presented.acting_role, presented.sign_in) else {
+    let Some(token) = presented.sign_in else {
         return Ok(Outcome::Refused);
     };
 
@@ -238,6 +291,22 @@ async fn carries(
         // requirement is about. The other principal it answers for is a service one, which
         // resolves from the token that names it and reaches this same lookup unchanged (#57).
         let Some(user) = whoever_holds(&mut transaction, &token).await? else {
+            return Ok(None);
+        };
+
+        // The session is resolved **against this user**, so a name belonging to somebody
+        // else's session confers nothing — which is what keeps it from being a credential
+        // by the back door (ADR-0041).
+        let acting_role = match presented.acting_role.clone() {
+            handed_over @ Some(_) => handed_over,
+            None => presented
+                .session
+                .as_ref()
+                .filter(|session| state.is_held_by(session, &user.id))
+                .and_then(|session| state.the_role_of(session)),
+        };
+
+        let Some(role) = acting_role else {
             return Ok(None);
         };
 
@@ -299,6 +368,60 @@ mod tests {
     use crate::configuration::{
         Loops, NewRole, NewUser, PasswordHash, Roles, Users, a_temporary_store,
     };
+    use crate::state::Assuming;
+
+    /// A signed-in user and a role they could assume, for the requirements that are about
+    /// occupying one.
+    async fn a_signed_in_user(store: &Store) -> (SignInToken, UserId, RoleId) {
+        a_user_named(store, "flight", "Flight Director").await
+    }
+
+    /// Somebody else entirely, on their own sign-in.
+    async fn a_second_signed_in_user(store: &Store) -> (SignInToken, UserId, RoleId) {
+        a_user_named(store, "gene", "CAPCOM").await
+    }
+
+    async fn a_user_named(
+        store: &Store,
+        username: &str,
+        role: &str,
+    ) -> (SignInToken, UserId, RoleId) {
+        let mut transaction = store.begin().await.expect("a transaction");
+        let user = transaction
+            .create_user(NewUser {
+                username: username.to_owned(),
+                password_hash: None,
+                is_system_administrator: false,
+            })
+            .await
+            .expect("the user to be created");
+        let token = transaction
+            .open_sign_in(&user)
+            .await
+            .expect("the sign-in to open");
+        let role = transaction
+            .create_role(NewRole {
+                name: role.to_owned(),
+                max_occupants: Some(1),
+            })
+            .await
+            .expect("the role to be created");
+        transaction.commit().await.expect("the deployment to land");
+
+        (token, user, role)
+    }
+
+    /// Whoever holds a sign-in, as the store has them.
+    async fn holder_of(store: &Store, token: &SignInToken) -> UserId {
+        let mut transaction = store.begin().await.expect("a transaction");
+        let holder = transaction
+            .holder_of(token)
+            .await
+            .expect("the read to answer");
+        transaction.roll_back().await.expect("the read to close");
+
+        holder.expect("a user behind the sign-in")
+    }
 
     fn is_permitted(outcome: &Outcome) -> bool {
         matches!(outcome, Outcome::Permitted(_))
@@ -308,9 +431,14 @@ mod tests {
     async fn a_public_operation_is_permitted_to_nobody_in_particular() {
         let (_directory, store) = a_temporary_store().await;
 
-        let outcome = evaluate(&Requirement::Public, Presented::default(), &store)
-            .await
-            .expect("an answer");
+        let outcome = evaluate(
+            &Requirement::Public,
+            Presented::default(),
+            &store,
+            &StateAuthority::empty(),
+        )
+        .await
+        .expect("an answer");
 
         assert!(matches!(outcome, Outcome::Permitted(Caller::Nobody)));
     }
@@ -337,6 +465,7 @@ mod tests {
             &Requirement::SignedIn,
             Presented::cookie(Some(token)),
             &store,
+            &StateAuthority::empty(),
         )
         .await
         .expect("an answer");
@@ -351,9 +480,14 @@ mod tests {
     async fn a_signed_in_operation_is_refused_to_a_caller_presenting_nothing() {
         let (_directory, store) = a_temporary_store().await;
 
-        let outcome = evaluate(&Requirement::SignedIn, Presented::default(), &store)
-            .await
-            .expect("an answer");
+        let outcome = evaluate(
+            &Requirement::SignedIn,
+            Presented::default(),
+            &store,
+            &StateAuthority::empty(),
+        )
+        .await
+        .expect("an answer");
 
         assert!(!is_permitted(&outcome));
     }
@@ -366,6 +500,7 @@ mod tests {
             &Requirement::SignedIn,
             Presented::cookie(Some(SignInToken::presented("guessed".to_owned()))),
             &store,
+            &StateAuthority::empty(),
         )
         .await
         .expect("an answer");
@@ -396,7 +531,8 @@ mod tests {
             &evaluate(
                 &Requirement::SignedIn,
                 Presented::cookie(Some(token.clone())),
-                &store
+                &store,
+                &StateAuthority::empty(),
             )
             .await
             .expect("an answer")
@@ -413,6 +549,7 @@ mod tests {
             &Requirement::SignedIn,
             Presented::cookie(Some(token)),
             &store,
+            &StateAuthority::empty(),
         )
         .await
         .expect("an answer");
@@ -444,6 +581,7 @@ mod tests {
             &Requirement::SystemAdministration,
             Presented::cookie(Some(token)),
             &store,
+            &StateAuthority::empty(),
         )
         .await
         .expect("an answer");
@@ -476,6 +614,7 @@ mod tests {
             &Requirement::SystemAdministration,
             Presented::cookie(Some(token)),
             &store,
+            &StateAuthority::empty(),
         )
         .await
         .expect("an answer");
@@ -516,7 +655,8 @@ mod tests {
             &evaluate(
                 &Requirement::SystemAdministration,
                 Presented::cookie(Some(token.clone())),
-                &store
+                &store,
+                &StateAuthority::empty(),
             )
             .await
             .expect("an answer")
@@ -533,14 +673,193 @@ mod tests {
             &Requirement::SystemAdministration,
             Presented::cookie(Some(token)),
             &store,
+            &StateAuthority::empty(),
+        )
+        .await
+        .expect("an answer");
+        assert!(!is_permitted(&outcome));
+    }
+    /// A session is the one thing that satisfies `Session`, and it is refused to a signed-in
+    /// user who has assumed nothing — which is what the lobby is.
+    #[tokio::test]
+    async fn the_session_requirement_is_refused_to_a_user_who_has_assumed_nothing() {
+        let (_directory, store) = a_temporary_store().await;
+        let (token, _user, _role) = a_signed_in_user(&store).await;
+
+        let outcome = evaluate(
+            &Requirement::SignedIn,
+            Presented::cookie(Some(token.clone())),
+            &store,
+            &StateAuthority::empty(),
+        )
+        .await
+        .expect("an answer");
+        assert!(is_permitted(&outcome), "the sign-in itself was refused");
+
+        let outcome = evaluate(
+            &Requirement::Session,
+            Presented::cookie(Some(token)),
+            &store,
+            &StateAuthority::empty(),
         )
         .await
         .expect("an answer");
         assert!(!is_permitted(&outcome));
     }
 
+    /// ...and it is met once a role is assumed, because the session is read from the state
+    /// authority on this call rather than remembered from an earlier one.
     #[tokio::test]
-    async fn every_requirement_no_principal_can_hold_yet_is_refused() {
+    async fn the_session_requirement_is_met_by_a_role_actually_assumed() {
+        let (_directory, store) = a_temporary_store().await;
+        let (token, user, role) = a_signed_in_user(&store).await;
+        let state = StateAuthority::empty();
+        let assumed = state
+            .assume(Assuming {
+                sign_in: token.clone(),
+                occupant: user,
+                role,
+                limit: Some(1),
+            })
+            .expect("the seat to be free");
+
+        let outcome = evaluate(
+            &Requirement::Session,
+            Presented::cookie(Some(token)).in_session(assumed.session),
+            &store,
+            &state,
+        )
+        .await
+        .expect("an answer");
+
+        assert!(is_permitted(&outcome));
+    }
+
+    /// A session belongs to whoever assumed it. Naming somebody else's confers nothing,
+    /// which is what keeps the session id from being a credential by the back door
+    /// (ADR-0041).
+    #[tokio::test]
+    async fn a_session_somebody_else_holds_meets_nothing() {
+        let (_directory, store) = a_temporary_store().await;
+        let (mine, _me, role) = a_signed_in_user(&store).await;
+        let (theirs, them, _elsewhere) = a_second_signed_in_user(&store).await;
+        let state = StateAuthority::empty();
+        let assumed = state
+            .assume(Assuming {
+                sign_in: theirs,
+                occupant: them,
+                role,
+                limit: Some(1),
+            })
+            .expect("the seat to be free");
+
+        let outcome = evaluate(
+            &Requirement::Session,
+            Presented::cookie(Some(mine)).in_session(assumed.session),
+            &store,
+            &state,
+        )
+        .await
+        .expect("an answer");
+
+        assert!(!is_permitted(&outcome));
+    }
+
+    /// A session ended a moment ago takes the tier with it. Nothing is cached, so the
+    /// refusal arrives on the next message rather than on the next reconnection.
+    #[tokio::test]
+    async fn a_session_that_has_ended_meets_nothing() {
+        let (_directory, store) = a_temporary_store().await;
+        let (token, user, role) = a_signed_in_user(&store).await;
+        let state = StateAuthority::empty();
+        let assumed = state
+            .assume(Assuming {
+                sign_in: token.clone(),
+                occupant: user,
+                role,
+                limit: Some(1),
+            })
+            .expect("the seat to be free");
+        state
+            .relinquish(&assumed.session, crate::state::Ended::Relinquished)
+            .expect("the session to end");
+
+        let outcome = evaluate(
+            &Requirement::Session,
+            Presented::cookie(Some(token)).in_session(assumed.session),
+            &store,
+            &state,
+        )
+        .await
+        .expect("an answer");
+
+        assert!(!is_permitted(&outcome));
+    }
+
+    /// **A user's acting role is their session's**, read here rather than handed in. Reach
+    /// is never composed across roles and never inherited from eligibility (v1 §1), so a
+    /// session is the only thing that says which single role somebody is acting through.
+    #[tokio::test]
+    async fn the_grid_requirement_reads_the_acting_role_from_the_session() {
+        let (_directory, store) = a_temporary_store().await;
+        let (token, role, on) = a_role_holding(&store, Permission::Emit).await;
+        let user = holder_of(&store, &token).await;
+        let state = StateAuthority::empty();
+        let assumed = state
+            .assume(Assuming {
+                sign_in: token.clone(),
+                occupant: user,
+                role,
+                limit: Some(1),
+            })
+            .expect("the seat to be free");
+
+        let permitted = grid_answer(
+            &store,
+            &state,
+            Presented::cookie(Some(token.clone())).in_session(assumed.session.clone()),
+            Permission::Emit,
+            &on,
+        )
+        .await;
+        let refused = grid_answer(
+            &store,
+            &state,
+            Presented::cookie(Some(token.clone())).in_session(assumed.session.clone()),
+            Permission::Control,
+            &on,
+        )
+        .await;
+
+        assert!(is_permitted(&permitted));
+        assert!(!is_permitted(&refused));
+    }
+
+    /// ...and a caller who has assumed nothing holds nothing on any loop, whatever the grid
+    /// says about roles they are eligible for. Authority belongs to the role, never to the
+    /// person.
+    #[tokio::test]
+    async fn a_user_with_no_session_carries_nothing_on_the_grid() {
+        let (_directory, store) = a_temporary_store().await;
+        let (token, _role, on) = a_role_holding(&store, Permission::Control).await;
+
+        let outcome = grid_answer(
+            &store,
+            &StateAuthority::empty(),
+            Presented::cookie(Some(token)),
+            Permission::Monitor,
+            &on,
+        )
+        .await;
+
+        assert!(!is_permitted(&outcome));
+    }
+
+    /// A service principal is administered and none exists yet, so the requirement it
+    /// carries is refused rather than waved through: the default is refusal, everywhere and
+    /// always.
+    #[tokio::test]
+    async fn the_service_token_requirement_is_refused_for_want_of_a_principal() {
         let (_directory, store) = a_temporary_store().await;
         let mut transaction = store.begin().await.expect("a transaction");
         let user = transaction
@@ -557,16 +876,16 @@ mod tests {
             .expect("the sign-in to open");
         transaction.commit().await.expect("the sign-in to land");
 
-        for requirement in [Requirement::Session, Requirement::ServiceToken] {
-            let outcome = evaluate(&requirement, Presented::cookie(Some(token.clone())), &store)
-                .await
-                .expect("an answer");
+        let outcome = evaluate(
+            &Requirement::ServiceToken,
+            Presented::cookie(Some(token)),
+            &store,
+            &StateAuthority::empty(),
+        )
+        .await
+        .expect("an answer");
 
-            assert!(
-                !is_permitted(&outcome),
-                "expected {requirement:?} to be refused"
-            );
-        }
+        assert!(!is_permitted(&outcome));
     }
 
     /// **A request carries exactly one credential kind** (v1 §3). Presenting a cookie and a
@@ -600,6 +919,7 @@ mod tests {
                 Presented::cookie(Some(token.clone()))
                     .and_service_token(Some(ServiceToken::presented("a-service-token".to_owned()))),
                 &store,
+                &StateAuthority::empty(),
             )
             .await
             .expect("an answer");
@@ -662,6 +982,7 @@ mod tests {
 
     async fn grid_answer(
         store: &Store,
+        state: &StateAuthority,
         presented: Presented,
         rung: Permission,
         on: &LoopId,
@@ -673,6 +994,7 @@ mod tests {
             },
             presented,
             store,
+            state,
         )
         .await
         .expect("an answer")
@@ -691,7 +1013,14 @@ mod tests {
             (Permission::Emit, true),
             (Permission::Control, false),
         ] {
-            let outcome = grid_answer(&store, presented.clone(), rung, &on).await;
+            let outcome = grid_answer(
+                &store,
+                &StateAuthority::empty(),
+                presented.clone(),
+                rung,
+                &on,
+            )
+            .await;
 
             assert_eq!(
                 is_permitted(&outcome),
@@ -710,7 +1039,16 @@ mod tests {
         let (token, role, on) = a_role_holding(&store, Permission::Control).await;
         let presented = Presented::cookie(Some(token)).acting_through(role.clone());
         assert!(
-            is_permitted(&grid_answer(&store, presented.clone(), Permission::Control, &on).await),
+            is_permitted(
+                &grid_answer(
+                    &store,
+                    &StateAuthority::empty(),
+                    presented.clone(),
+                    Permission::Control,
+                    &on
+                )
+                .await
+            ),
             "a ruled-on loop refused the control its cell holds"
         );
 
@@ -739,11 +1077,29 @@ mod tests {
 
         for rung in [Permission::Monitor, Permission::Emit, Permission::Control] {
             assert!(
-                !is_permitted(&grid_answer(&store, presented.clone(), rung, &unreviewed).await),
+                !is_permitted(
+                    &grid_answer(
+                        &store,
+                        &StateAuthority::empty(),
+                        presented.clone(),
+                        rung,
+                        &unreviewed
+                    )
+                    .await
+                ),
                 "an unreviewed loop conferred {rung:?} on the strength of a cell somebody set"
             );
             assert!(
-                !is_permitted(&grid_answer(&store, presented.clone(), rung, &deliberate).await),
+                !is_permitted(
+                    &grid_answer(
+                        &store,
+                        &StateAuthority::empty(),
+                        presented.clone(),
+                        rung,
+                        &deliberate
+                    )
+                    .await
+                ),
                 "a deliberate none conferred {rung:?}"
             );
         }
@@ -758,6 +1114,7 @@ mod tests {
 
         let outcome = grid_answer(
             &store,
+            &StateAuthority::empty(),
             Presented::cookie(Some(token)),
             Permission::Monitor,
             &on,
@@ -792,6 +1149,7 @@ mod tests {
 
         let outcome = grid_answer(
             &store,
+            &StateAuthority::empty(),
             Presented::cookie(Some(token)).acting_through(role),
             Permission::Monitor,
             &on,
@@ -822,6 +1180,7 @@ mod tests {
 
         let outcome = grid_answer(
             &store,
+            &StateAuthority::empty(),
             Presented::cookie(Some(token)).acting_through(observer),
             Permission::Monitor,
             &on,
