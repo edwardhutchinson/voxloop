@@ -23,8 +23,8 @@ use axum::response::Response;
 use axum::routing::{MethodRouter, any, delete, get, patch, post, put};
 use tracing::Instrument;
 
-use super::{answers, cookies, name_as_it_stands};
-use crate::authorisation::{self, Outcome, Presented, Requirement};
+use super::{answers, credentials, name_as_it_stands, unmet};
+use crate::authorisation::{self, Caller, Outcome, Presented, Requirement};
 use crate::configuration::{
     AuditEntry, AuditEvent, AuditLog, SignInToken, SignIns, Store, StoreError,
 };
@@ -215,18 +215,24 @@ where
                     path = %request.uri().path()
                 );
 
-                let presented = cookies::presented(&axum_extra::extract::CookieJar::from_headers(
-                    request.headers(),
-                ));
+                // Both kinds of credential are read, because a request presenting two is
+                // refused rather than resolved by precedence (v1 §3) — and a server that
+                // never looked for a token could not refuse one.
+                let presented = credentials::presented(request.headers());
+                let sign_in = presented.sign_in.clone();
 
                 let mut answer = match authorisation::evaluate(
                     &requirement,
-                    Presented::cookie(presented.clone()),
+                    Presented::cookie(presented.sign_in).and_service_token(presented.service_token),
                     &store,
                 )
                 .await
                 {
                     Ok(Outcome::Permitted(caller)) => {
+                        if let Err(error) = note_a_deliberate_act(&store, &caller).await {
+                            return answers::unavailable(&error);
+                        }
+
                         // The handler acts on whoever the store said this was, this
                         // request. Nothing downstream re-reads the cookie.
                         request.extensions_mut().insert(caller);
@@ -242,12 +248,12 @@ where
 
                         if let Some(attempted) = Attempt::of(&requirement, &request)
                             && let Err(error) =
-                                record_a_refused_write(&store, attempted, presented).await
+                                record_a_refused_write(&store, attempted, sign_in).await
                         {
                             return answers::unavailable(&error);
                         }
 
-                        answers::refusal(unmet(&requirement))
+                        answers::refusal(&unmet(&requirement, "operation"))
                     }
                     Err(error) => {
                         let _entered = span.enter();
@@ -260,6 +266,35 @@ where
             }
         },
     ))
+}
+
+/// Note that whoever made this request did something deliberate.
+///
+/// A sign-in ends after 24 hours with no deliberate act (v1 §2), so the acts have to be
+/// noticed somewhere, and every route is somewhere. **A request that resolved to a signed-in
+/// user is one their browser made because they did something**: the console asks for nothing
+/// on a timer, and the one thing that arrives without being asked for — the lobby document —
+/// is pushed the other way, on the socket, and never counted.
+///
+/// That is a promise about the console as much as about this function. **A page that ever
+/// polls must not carry the sign-in's clock with it**, or the window stops measuring whether
+/// anybody is there and starts measuring whether a tab is open — which is the timeout
+/// [ADR-0016] refused.
+///
+/// A caller who is nobody has no clock to keep, which is every public route and every static
+/// asset the console fetches.
+///
+/// [ADR-0016]: ../../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+async fn note_a_deliberate_act(store: &Store, caller: &Caller) -> Result<(), StoreError> {
+    let Caller::User { sign_in, .. } = caller else {
+        return Ok(());
+    };
+
+    let mut transaction = store.begin().await?;
+    transaction.note_a_deliberate_act(sign_in).await?;
+    transaction.commit().await?;
+
+    Ok(())
 }
 
 /// An administration write somebody was turned away from, as much of it as an entry needs.
@@ -333,27 +368,6 @@ async fn record_a_refused_write(
     transaction.commit().await?;
 
     Ok(())
-}
-
-/// What a caller is missing, said plainly enough to act on.
-///
-/// Authorisation answers permitted or refused and never *why*; turning that into something a
-/// human reads is Transport's job, and this is where it happens.
-fn unmet(requirement: &Requirement) -> &'static str {
-    match requirement {
-        // Nothing public is refused for want of a principal, so this arm answers a question
-        // nobody asked — and saying so is better than inventing a reason.
-        Requirement::Public => "That operation is not available.",
-        Requirement::SignedIn => "That operation is for a signed-in user.",
-        Requirement::Session => "That operation is for a user who has assumed a role.",
-        Requirement::SystemAdministration => "That operation is for a system administrator.",
-        Requirement::ServiceToken => "That operation is for a service principal.",
-        // Never registered on a route: it names a loop the caller supplies, so it is built
-        // per message on the signalling channel (`docs/spec/api-surface.md`). The arm says
-        // what the caller's role did not hold rather than which rung, because the answer is
-        // the same whether the cell is `none`, absent, or on a loop nobody has ruled on.
-        Requirement::Grid { .. } => "That operation needs more than this role holds on that loop.",
-    }
 }
 
 /// Left on every answer that came through [`guarded`], and on no other.

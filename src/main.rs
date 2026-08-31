@@ -28,8 +28,10 @@ compile_error!(
 mod authorisation;
 mod configuration;
 mod identity;
+mod lifetimes;
 mod on_box;
 mod secrets;
+mod state;
 mod telemetry;
 mod transport;
 
@@ -41,6 +43,7 @@ use std::sync::Arc;
 use configuration::{Deployment, DeploymentError, Store, StoreError};
 use identity::{Bootstrap, Identity};
 use on_box::{Invocation, OnBoxError};
+use state::StateAuthority;
 use telemetry::{TelemetryError, module};
 use transport::TransportError;
 
@@ -134,16 +137,29 @@ async fn serve(deployment: &Path) -> Result<(), StartupError> {
     // code to this log, and one that somebody does mints nothing and registers no route.
     let bootstrap = Bootstrap::mint_unless_administered(&store).await?;
 
+    // Live state starts empty, and that is the honest state of a box that has just come up:
+    // a restart ends every session, because the media plane cannot survive one and occupancy
+    // restored without an audio path would be a lie (ADR-0039). Sign-ins are durable and
+    // survive, so everybody who was on console is signed in, in the lobby.
+    let state = Arc::new(StateAuthority::empty());
+
     let serving = transport::start(
         &deployment,
         Arc::clone(&store),
+        Arc::clone(&state),
         Identity::local_passwords(),
         bootstrap,
     )
     .await?;
     tracing::info!(target: module::TRANSPORT, address = %serving.address(), "serving");
 
+    // The one clock VoxLoop runs: a sign-in ends after 24 hours with no deliberate act, and
+    // only while it stands in the lobby (v1 §2).
+    let sweeping = lifetimes::sweeping(Arc::clone(&store), state);
+
     wait_to_be_stopped().await;
+
+    sweeping.stop();
 
     // A restart is indistinguishable from total network loss to every client, and it ends
     // every session, so the least this can do is put the store down cleanly.

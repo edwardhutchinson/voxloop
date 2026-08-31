@@ -16,6 +16,7 @@ mod answers;
 mod assets;
 mod bootstrap;
 mod cookies;
+mod credentials;
 mod enrolment;
 mod liveness;
 mod password;
@@ -23,6 +24,7 @@ mod principal;
 mod rate_limit;
 mod routes;
 mod sign_in;
+mod signalling;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -37,6 +39,7 @@ use axum::response::Response;
 
 use crate::configuration::{Deployment, Store, StoreError, Transaction, UserId, Users};
 use crate::identity::{Bootstrap, Identity, PasswordRefused};
+use crate::state::StateAuthority;
 use crate::telemetry::module;
 use rate_limit::{Admission, RateLimits};
 use routes::RouteTable;
@@ -51,6 +54,11 @@ use routes::RouteTable;
 #[derive(Clone)]
 struct Api {
     store: Arc<Store>,
+    /// Every live fact, behind the one thing entitled to hold one ([ADR-0039]). The lobby
+    /// asks it who occupies each role; nothing here reaches past it.
+    ///
+    /// [ADR-0039]: ../../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+    state: Arc<StateAuthority>,
     identity: Identity,
     limits: Arc<RateLimits>,
     /// The code this run of the process minted, where nobody administers this deployment
@@ -117,6 +125,32 @@ where
     serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
+/// What a caller is missing, said plainly enough to act on.
+///
+/// Authorisation answers permitted or refused and never *why*; turning that into something a
+/// human reads is Transport's job, and this is where it happens — once, for both surfaces
+/// that have to say it. `what` is the noun the surface uses: an HTTP route refuses an
+/// *operation* and the signalling channel refuses a *message*, and that is the whole of the
+/// difference between them.
+fn unmet(requirement: &Requirement, what: &str) -> String {
+    match requirement {
+        // Nothing public is refused for want of a principal, so this arm answers a question
+        // nobody asked — and saying so is better than inventing a reason.
+        Requirement::Public => format!("That {what} is not available."),
+        Requirement::SignedIn => format!("That {what} is for a signed-in user."),
+        Requirement::Session => format!("That {what} is for a user who has assumed a role."),
+        Requirement::SystemAdministration => format!("That {what} is for a system administrator."),
+        Requirement::ServiceToken => format!("That {what} is for a service principal."),
+        // Never registered on a route: it names a loop the caller supplies, so it is built
+        // per message on the signalling channel (`docs/spec/api-surface.md`). The arm says
+        // what the caller's role did not hold rather than which rung, because the answer is
+        // the same whether the cell is `none`, absent, or on a loop nobody has ruled on.
+        Requirement::Grid { .. } => {
+            format!("That {what} needs more than this role holds on that loop.")
+        }
+    }
+}
+
 /// How long a connection has to finish what it was doing once the server is asked to stop.
 const GRACE: Duration = Duration::from_secs(5);
 
@@ -152,6 +186,7 @@ fn install_cryptography() {
 pub(crate) async fn start(
     deployment: &Deployment,
     store: Arc<Store>,
+    state: Arc<StateAuthority>,
     identity: Identity,
     bootstrap: Option<Bootstrap>,
 ) -> Result<Serving, TransportError> {
@@ -159,6 +194,7 @@ pub(crate) async fn start(
 
     let api = Api {
         store,
+        state,
         identity,
         limits: Arc::new(RateLimits::default()),
         bootstrap: bootstrap.map(Arc::new),
@@ -175,12 +211,15 @@ pub(crate) async fn start(
     let task = tokio::spawn({
         let handle = handle.clone();
         let routes = routes(&api).into_make_service(api.clone());
+        // The signalling channel opens over HTTP/1.1, on a connection of its own. A server
+        // may instead accept a WebSocket on an HTTP/2 connection through extended `CONNECT`
+        // (RFC 8441), and a browser only tries it where the server has said it will — so not
+        // saying so is what keeps every socket on the one handshake shape this codebase
+        // exercises end to end, rather than on whichever of two a browser happened to pick.
+        // What it costs is a second TLS handshake per tab, once, at sign-in.
+        let server = axum_server::bind_rustls(asked_for, tls).handle(handle);
         async move {
-            if let Err(error) = axum_server::bind_rustls(asked_for, tls)
-                .handle(handle)
-                .serve(routes)
-                .await
-            {
+            if let Err(error) = server.serve(routes).await {
                 tracing::error!(target: module::TRANSPORT, %error, "the server stopped");
             }
         }
@@ -234,6 +273,12 @@ fn routes(api: &Api) -> RouteTable<Api> {
         .post("/api/enrolment", Public, enrolment::redeem)
         .get("/api/principal", SignedIn, principal::own)
         .post("/api/password", SignedIn, password::change)
+        // The signalling channel: one socket per tab, opened at sign-in, starting at this
+        // tier with the lobby document. It is a second authorised surface and **every
+        // message on it is checked, not just this upgrade** (ADR-0054) — a grid edit lands
+        // mid-shift, and an already-open socket is exactly what upgrade-time authorisation
+        // would keep serving.
+        .get("/api/signalling", SignedIn, signalling::open)
         // System administration. Every one of these is gated on the user's flag and never on
         // a role (v1 §9), so the console opens from the lobby and from within a session
         // alike. Every write is audited; the two reads are not.
@@ -341,7 +386,9 @@ mod tests {
     use axum::http::{Request, StatusCode, header};
     use axum::response::Response;
 
-    use crate::configuration::{AuditEvent, AuditLog, NewUser, Snapshot, Users, a_temporary_store};
+    use crate::configuration::{
+        AuditEvent, AuditLog, NewUser, SignIns, Snapshot, Users, a_temporary_store,
+    };
 
     /// A deployment serving on a port the operating system picks, read from a real file, with
     /// a certificate made for the occasion. Nothing here is committed and nothing outlives
@@ -394,6 +441,7 @@ mod tests {
                 _directory: directory,
                 api: Api {
                     store,
+                    state: Arc::new(StateAuthority::empty()),
                     identity: Identity::local_passwords(),
                     limits: Arc::new(RateLimits::default()),
                     bootstrap: bootstrap.map(Arc::new),
@@ -528,6 +576,38 @@ mod tests {
                     .unwrap(),
             )
             .await
+        }
+
+        /// Push the clock of the sign-in this cookie carries back, the way time would.
+        async fn the_sign_in_behind(&self, cookie: &str, idle_for: Duration) {
+            let token = crate::configuration::SignInToken::presented(
+                cookie
+                    .split('=')
+                    .nth(1)
+                    .expect("a token in the cookie")
+                    .to_owned(),
+            );
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            transaction
+                .a_sign_in_has_been_idle_for(&token, idle_for)
+                .await
+                .expect("the clock to be moved back");
+            transaction.commit().await.expect("the clock to land");
+        }
+
+        /// End every sign-in idle for `hours`, and answer with whose they were.
+        ///
+        /// The sweep is the one in `lifetimes`, reached through the store the way it reaches
+        /// it: nothing here holds a session, so nothing here is spared.
+        async fn swept(&self, hours: u64) -> Vec<crate::configuration::UserId> {
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            let ended = transaction
+                .end_sign_ins_idle_for(has_been_idle_for(hours), &[])
+                .await
+                .expect("the sweep to answer");
+            transaction.commit().await.expect("the sweep to land");
+
+            ended
         }
 
         /// Everything the audit log holds, newest first.
@@ -1053,9 +1133,15 @@ mod tests {
             .as_ref()
             .and_then(Bootstrap::code)
             .expect("a bootstrap code");
-        let serving = start(&deployment, store, Identity::local_passwords(), bootstrap)
-            .await
-            .expect("the server to start");
+        let serving = start(
+            &deployment,
+            store,
+            Arc::new(StateAuthority::empty()),
+            Identity::local_passwords(),
+            bootstrap,
+        )
+        .await
+        .expect("the server to start");
 
         let root = reqwest::Certificate::from_pem(
             &std::fs::read(&deployment.tls.certificate).expect("the certificate to be read"),
@@ -1144,6 +1230,91 @@ mod tests {
             .await
             .expect("an answer over TLS");
         assert_eq!(signed_out.status(), reqwest::StatusCode::NO_CONTENT);
+
+        serving.stop().await;
+    }
+
+    /// The signalling channel, over the wire a deployment actually serves: the cookie is
+    /// what opens it, the client says hello, and the lobby comes back.
+    ///
+    /// The in-process tests cannot reach this far. A WebSocket needs a connection something
+    /// can hand over, and a request driven straight into the router has none — so what is
+    /// checked here is the part only a real socket has: that the upgrade completes and the
+    /// two halves speak.
+    #[tokio::test]
+    async fn carries_the_lobby_over_a_real_socket() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let (serving, client, at, code) = a_server_in(directory.path()).await;
+        client
+            .post(format!("{at}/api/bootstrap"))
+            .header("content-type", "application/json")
+            .body(redeeming(&code, "flight", "a long enough password"))
+            .send()
+            .await
+            .expect("the bootstrap to be redeemed");
+        let signed_in = client
+            .post(format!("{at}/api/sign-in"))
+            .header("content-type", "application/json")
+            .body(signing_in("flight", "a long enough password"))
+            .send()
+            .await
+            .expect("an answer over TLS");
+        let cookie = signed_in
+            .headers()
+            .get("set-cookie")
+            .expect("a cookie")
+            .to_str()
+            .expect("a readable cookie")
+            .split(';')
+            .next()
+            .expect("a value")
+            .to_owned();
+
+        let upgraded = client
+            .get(format!("{at}/api/signalling"))
+            .header("cookie", &cookie)
+            .header(header::CONNECTION, "upgrade")
+            .header(header::UPGRADE, "websocket")
+            .header(header::SEC_WEBSOCKET_VERSION, "13")
+            .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+            .send()
+            .await
+            .expect("an answer over TLS");
+        assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
+
+        let mut socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            upgraded
+                .upgrade()
+                .await
+                .expect("the connection to be handed over"),
+            Role::Client,
+            None,
+        )
+        .await;
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                r#"{"message":"hello"}"#,
+            ))
+            .await
+            .expect("the hello to be sent");
+
+        let said = socket
+            .next()
+            .await
+            .expect("the socket to say something")
+            .expect("a readable message")
+            .into_text()
+            .expect("text");
+        assert!(
+            said.contains(r#""message":"lobby""#) && said.contains(r#""version":1"#),
+            "the socket answered {said}"
+        );
+        // Every user is eligible for `Observer` from the moment their record exists, so the
+        // first thing anybody's lobby has ever held is that one seat.
+        assert!(said.contains(r#""name":"Observer""#), "{said}");
 
         serving.stop().await;
     }
@@ -3517,6 +3688,147 @@ mod tests {
             )
             .is_empty(),
             "a refused grant landed anyway"
+        );
+    }
+
+    // ---- #36: the signalling channel and the lobby ---------------------------------------
+
+    /// **A sign-in ends after 24 hours with no deliberate act** (v1 §2), and administering
+    /// the deployment is somebody doing something. Without this, a sysadmin reading the
+    /// console for a day and a night is signed out mid-work by a window meant for abandoned
+    /// tabs.
+    #[tokio::test]
+    async fn a_request_a_person_made_is_a_deliberate_act() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", true).await;
+        let cookie = box_of.signed_in_as("flight").await;
+        box_of
+            .the_sign_in_behind(&cookie, has_been_idle_for(25))
+            .await;
+
+        assert_eq!(
+            box_of.get_holding(&cookie, "/api/users").await.status,
+            StatusCode::OK
+        );
+
+        assert!(
+            box_of.swept(24).await.is_empty(),
+            "a sign-in that had just been used was reaped as abandoned"
+        );
+    }
+
+    /// ...and the same tab, left alone past the window, is reaped: what stops the clock is
+    /// the act, not the sign-in existing.
+    #[tokio::test]
+    async fn a_sign_in_nobody_has_used_for_a_day_ends() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", true).await;
+        let cookie = box_of.signed_in_as("flight").await;
+
+        box_of
+            .the_sign_in_behind(&cookie, has_been_idle_for(25))
+            .await;
+
+        assert_eq!(box_of.swept(24).await.len(), 1);
+        assert_eq!(
+            box_of.get_holding(&cookie, "/api/users").await.status,
+            StatusCode::FORBIDDEN,
+            "a reaped sign-in still opened the console"
+        );
+    }
+
+    const fn has_been_idle_for(hours: u64) -> Duration {
+        Duration::from_secs(hours * 60 * 60)
+    }
+
+    /// The handshake a browser opens a WebSocket with.
+    ///
+    /// These tests are about what the upgrade **refuses**, which is decided before anything
+    /// is handed over. The upgrade that succeeds is `carries_the_lobby_over_a_real_socket`,
+    /// over a real connection, because a request driven straight into the router has no
+    /// connection to hand over and cannot get past that.
+    fn upgrading(cookie: Option<&str>) -> Request<Body> {
+        let mut request = from("192.0.2.1")
+            .uri("/api/signalling")
+            .header(header::CONNECTION, "upgrade")
+            .header(header::UPGRADE, "websocket")
+            .header(header::SEC_WEBSOCKET_VERSION, "13")
+            .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==");
+
+        if let Some(cookie) = cookie {
+            request = request.header(header::COOKIE, cookie);
+        }
+
+        request.body(Body::empty()).unwrap()
+    }
+
+    /// It is a second authorised surface, not an unauthenticated one: the upgrade carries a
+    /// requirement like every other route.
+    #[tokio::test]
+    async fn refuses_the_signalling_channel_to_a_browser_that_is_not_signed_in() {
+        let box_of = ABox::already_administered().await;
+
+        let answer = box_of.ask(upgrading(None)).await;
+
+        assert_eq!(answer.status, StatusCode::FORBIDDEN);
+        assert_eq!(answer.body, "That operation is for a signed-in user.\n");
+    }
+
+    /// **The upgrade refuses a service token outright** (ADR-0054): a service principal has
+    /// no session, no client and no media path, so there is nothing for it on this channel.
+    #[tokio::test]
+    async fn refuses_the_signalling_channel_to_a_service_token() {
+        let box_of = ABox::already_administered().await;
+
+        let mut request = upgrading(None);
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            "Bearer a-service-token".parse().unwrap(),
+        );
+        let answer = box_of.ask(request).await;
+
+        assert_eq!(answer.status, StatusCode::FORBIDDEN);
+    }
+
+    /// **A request carries exactly one credential kind** (v1 §3), and a cookie beside a token
+    /// is refused rather than resolved by precedence — on the socket upgrade and on every
+    /// cookie route alike. Without the rule, the cookie would quietly win.
+    #[tokio::test]
+    async fn refuses_a_request_presenting_a_cookie_and_a_token_together() {
+        let box_of = ABox::already_administered().await;
+        box_of.a_user_who_can_sign_in("flight", false).await;
+        let cookie = box_of.signed_in_as("flight").await;
+
+        let mut upgrade = upgrading(Some(&cookie));
+        upgrade.headers_mut().insert(
+            header::AUTHORIZATION,
+            "Bearer a-service-token".parse().unwrap(),
+        );
+        assert_eq!(
+            box_of.ask(upgrade).await.status,
+            StatusCode::FORBIDDEN,
+            "the socket upgrade resolved two credentials by precedence"
+        );
+
+        let read = box_of
+            .ask(
+                from("192.0.2.1")
+                    .uri("/api/principal")
+                    .header(header::COOKIE, &cookie)
+                    .header(header::AUTHORIZATION, "Bearer a-service-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(
+            read.status,
+            StatusCode::FORBIDDEN,
+            "a cookie route resolved two credentials by precedence"
+        );
+        assert_eq!(
+            box_of.get_holding(&cookie, "/api/principal").await.status,
+            StatusCode::OK,
+            "the cookie on its own stopped working"
         );
     }
 }
