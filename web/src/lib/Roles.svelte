@@ -98,9 +98,10 @@
 		<header>
 			<h2>Roles</h2>
 			<p>
-				A role is a position somebody assumes, with a limit on how many may hold it at once.
-				Leave the limit empty for no limit. <strong>Reach</strong> is what the role may hear
-				and say; <strong>Eligible</strong> is who may assume it. Install seeds
+				A role is a position somebody assumes, with a limit on how many may hold it at once. Leave
+				the limit empty for no limit. <strong>Reach</strong> is what the role may hear and say;
+				<strong>Eligible</strong>
+				is who may assume it. Install seeds
 				<strong>Observer</strong>, which a site renames like any other role.
 			</p>
 		</header>

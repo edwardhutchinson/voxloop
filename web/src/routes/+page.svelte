@@ -75,8 +75,8 @@
 			<AdminConsole />
 		{:else}
 			<p class="refusal">
-				You may not. The admin console is for a system administrator, and it is the flag
-				rather than any role that opens it.
+				You may not. The admin console is for a system administrator, and it is the flag rather than
+				any role that opens it.
 			</p>
 		{/if}
 
@@ -96,7 +96,9 @@
 		color-scheme: dark;
 		background: var(--ground);
 		color: var(--ink);
-		font: 15px/1.5 system-ui, sans-serif;
+		font:
+			15px/1.5 system-ui,
+			sans-serif;
 	}
 
 	:global(body) {

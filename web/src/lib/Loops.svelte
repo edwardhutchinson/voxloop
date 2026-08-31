@@ -119,9 +119,9 @@
 		<header>
 			<h2>Loops</h2>
 			<p>
-				A loop is an audio conference, and the only thing voice can be addressed to. This
-				order is the deployment's base order: it is administered here rather than derived,
-				and every console starts from it. A new loop lands at the end.
+				A loop is an audio conference, and the only thing voice can be addressed to. This order is
+				the deployment's base order: it is administered here rather than derived, and every console
+				starts from it. A new loop lands at the end.
 			</p>
 		</header>
 
@@ -172,10 +172,7 @@
 										<button type="button" onclick={() => (editing = null)}>Cancel</button>
 									</form>
 								{:else}
-									<button
-										class="name"
-										onclick={() => (editing = { id: held.id, name: held.name })}
-									>
+									<button class="name" onclick={() => (editing = { id: held.id, name: held.name })}>
 										{held.name}
 									</button>
 								{/if}

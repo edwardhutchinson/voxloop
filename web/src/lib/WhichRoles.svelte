@@ -9,7 +9,13 @@
 	// authority nobody can hold. Answering *what can this person do* is this page and then
 	// that role's reach — one extra hop, taken knowingly.
 	import Confirm from './Confirm.svelte';
-	import { grantEligibility, revokeEligibility, roles, whatWentWrong, whichRoles } from './server.js';
+	import {
+		grantEligibility,
+		revokeEligibility,
+		roles,
+		whatWentWrong,
+		whichRoles
+	} from './server.js';
 
 	let { account, onback } = $props();
 
@@ -68,10 +74,10 @@
 	<header>
 		<h2>{page?.user.username ?? account.username}</h2>
 		<p>
-			Which positions this person may assume. A user carries eligibility and nothing else
-			— no permissions of their own, and no exception anywhere. Every account starts
-			eligible for <strong>Observer</strong>, and giving somebody one extra loop costs a
-			role rather than a per-person grant.
+			Which positions this person may assume. A user carries eligibility and nothing else — no
+			permissions of their own, and no exception anywhere. Every account starts eligible for <strong
+				>Observer</strong
+			>, and giving somebody one extra loop costs a role rather than a per-person grant.
 		</p>
 	</header>
 
@@ -95,8 +101,7 @@
 		<p class="quiet">Reading…</p>
 	{:else if page && page.roles.length === 0}
 		<p class="quiet">
-			This person may assume nothing. They can sign in, and the lobby has no seat to offer
-			them.
+			This person may assume nothing. They can sign in, and the lobby has no seat to offer them.
 		</p>
 	{:else if page}
 		<table>

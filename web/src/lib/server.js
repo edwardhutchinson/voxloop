@@ -83,11 +83,9 @@ export const createUser = (username, systemAdministration) =>
 export const editUser = (id, edit) =>
 	ask(`/api/users/${encodeURIComponent(id)}`, { method: 'PATCH', ...sending(edit) });
 
-export const deleteUser = (id) =>
-	ask(`/api/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export const deleteUser = (id) => ask(`/api/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
 
-const act = (id, what) =>
-	ask(`/api/users/${encodeURIComponent(id)}/${what}`, { method: 'POST' });
+const act = (id, what) => ask(`/api/users/${encodeURIComponent(id)}/${what}`, { method: 'POST' });
 
 export const lockAccount = (id) => act(id, 'lock');
 export const unlockAccount = (id) => act(id, 'unlock');
@@ -117,8 +115,7 @@ export const createRole = (name, maxOccupants) =>
 export const editRole = (id, edit) =>
 	ask(`/api/roles/${encodeURIComponent(id)}`, { method: 'PATCH', ...sending(edit) });
 
-export const deleteRole = (id) =>
-	ask(`/api/roles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export const deleteRole = (id) => ask(`/api/roles/${encodeURIComponent(id)}`, { method: 'DELETE' });
 
 /**
  * Eligibility: who may assume which role.
@@ -147,20 +144,17 @@ const eligibility = (user, role) =>
 
 export const grantEligibility = (user, role) => ask(eligibility(user, role), { method: 'PUT' });
 
-export const revokeEligibility = (user, role) =>
-	ask(eligibility(user, role), { method: 'DELETE' });
+export const revokeEligibility = (user, role) => ask(eligibility(user, role), { method: 'DELETE' });
 
 /** Loops, in the administered base order. The order they come back in is the order. */
 export const loops = () => ask('/api/loops');
 
-export const createLoop = (name) =>
-	ask('/api/loops', { method: 'POST', ...sending({ name }) });
+export const createLoop = (name) => ask('/api/loops', { method: 'POST', ...sending({ name }) });
 
 export const editLoop = (id, edit) =>
 	ask(`/api/loops/${encodeURIComponent(id)}`, { method: 'PATCH', ...sending(edit) });
 
-export const deleteLoop = (id) =>
-	ask(`/api/loops/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export const deleteLoop = (id) => ask(`/api/loops/${encodeURIComponent(id)}`, { method: 'DELETE' });
 
 /**
  * Set the deployment-wide base loop order.

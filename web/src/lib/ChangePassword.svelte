@@ -41,8 +41,7 @@
 <section>
 	<h2>Your password</h2>
 	<p class="quiet">
-		Re-present the one you have now. You stay signed in and, if you have assumed a role, on
-		the air.
+		Re-present the one you have now. You stay signed in and, if you have assumed a role, on the air.
 	</p>
 
 	<form onsubmit={attempt}>

@@ -52,10 +52,10 @@
 	<header>
 		<h2>{row?.role.name ?? role.name}</h2>
 		<p>
-			What this role may hear, say and command, one loop at a time. Each rung carries the
-			ones below it: <strong>control</strong> can emit, and
-			<strong>emit</strong> can monitor. Granting one person one extra loop costs a role — there
-			is no per-person exception anywhere in VoxLoop.
+			What this role may hear, say and command, one loop at a time. Each rung carries the ones below
+			it: <strong>control</strong> can emit, and
+			<strong>emit</strong> can monitor. Granting one person one extra loop costs a role — there is no
+			per-person exception anywhere in VoxLoop.
 		</p>
 	</header>
 
@@ -89,8 +89,8 @@
 							     loop's own page. Either way it is per loop, never per cell. -->
 							{#if cell.loop.unreviewed}
 								<span class="note">
-									unreviewed — enforced as none until every role's cell on this loop
-									is set, or the mark is dismissed from its loop page
+									unreviewed — enforced as none until every role's cell on this loop is set, or the
+									mark is dismissed from its loop page
 								</span>
 							{/if}
 						</td>
