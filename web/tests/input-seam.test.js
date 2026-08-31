@@ -4,10 +4,13 @@
 // promise into a failing build". A rule nobody has watched fail is not that, which is why
 // this file exists and why there is no equivalent for the rest of the config.
 //
-// It loads the seam rule on its own rather than the whole of `eslint.config.js`, and lints
-// source text at a made-up path, because the question is always *what does this rule say
-// about a file living here* — and the exemption for Input's own files is a question about a
-// path that has no file behind it yet.
+// It asks one question of every specifier, in every syntax that can carry one, because the
+// seam's failure mode is not "the rule does nothing" — it is the rule agreeing with itself
+// about `$lib/input/level.js` and disagreeing about the same path in backticks. A back door
+// is as good as an open one.
+//
+// It lints source text at made-up paths rather than fixtures on disk, because the question
+// is always *what does this rule say about a file living here*, and Input has no files yet.
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -17,78 +20,86 @@ import { ESLint } from 'eslint';
 
 import { inputSeam } from '../eslint.input-seam.js';
 
-const justTheSeam = new ESLint({
-	cwd: fileURLToPath(new URL('..', import.meta.url)),
-	overrideConfigFile: true,
-	baseConfig: inputSeam
-});
+const web = fileURLToPath(new URL('..', import.meta.url));
 
-/** What the seam rule says about this source, were it to live at this path. */
-async function complaints(source, at) {
-	const [result] = await justTheSeam.lintText(source, { filePath: at });
-	return result.messages.map(({ ruleId, message }) => ({ ruleId, message }));
-}
+const justTheSeam = new ESLint({ cwd: web, overrideConfigFile: true, baseConfig: inputSeam });
 
-const refused = (said, by) => {
-	assert.equal(said.length, 1, `expected one complaint, got ${JSON.stringify(said)}`);
-	assert.equal(said[0].ruleId, by);
-	assert.match(said[0].message, /Input is a seam/);
+/** Every syntax that can name a module. */
+const spellings = {
+	'a static import': (it) => `import x from '${it}';`,
+	'a re-export': (it) => `export { x } from '${it}';`,
+	'a dynamic import': (it) => `export const later = () => import('${it}');`,
+	'a dynamic import in backticks': (it) => `export const later = () => import(\`${it}\`);`
 };
 
-test('a module outside Input may not reach past its interface', async () => {
-	refused(
-		await complaints(
-			"import { keyboard } from '$lib/input/sources/keyboard.js';\n",
-			'src/lib/Console.js'
-		),
-		'no-restricted-imports'
-	);
+/** What the seam says about this specifier, spelled every way, from a file at `from`. */
+async function verdicts(specifier, from = 'src/lib/Console.js') {
+	const asked = Object.entries(spellings).map(async ([spelling, write]) => {
+		const [result] = await justTheSeam.lintText(`${write(specifier)}\n`, { filePath: from });
+		return [spelling, result.messages];
+	});
+
+	return Object.fromEntries(await Promise.all(asked));
+}
+
+const refuses = async (specifier) => {
+	for (const [spelling, said] of Object.entries(await verdicts(specifier))) {
+		assert.equal(said.length, 1, `${spelling} of '${specifier}' was not refused`);
+		assert.match(said[0].message, /Input is a seam/, `${spelling} of '${specifier}'`);
+	}
+};
+
+const allows = async (specifier, from) => {
+	for (const [spelling, said] of Object.entries(await verdicts(specifier, from))) {
+		assert.deepEqual(said, [], `${spelling} of '${specifier}' was refused and should not be`);
+	}
+};
+
+test('nothing outside Input may reach past its interface', async (t) => {
+	for (const specifier of [
+		'$lib/input/level.js',
+		'$lib/input/sources/keyboard.js',
+		// An index one level down is still an internal one.
+		'$lib/input/sources/index.js',
+		// The trailing slash, and the relative walk, are the two ways round it.
+		'$lib/input/',
+		'./input/level.js',
+		'../input/level.js',
+		'../../input/level.js'
+	]) {
+		await t.test(specifier, () => refuses(specifier));
+	}
 });
 
-test('nor may it, by taking the relative way round', async () => {
-	refused(
-		await complaints(
-			"import { keyboard } from './input/sources/keyboard.js';\n",
-			'src/lib/Console.js'
-		),
-		'no-restricted-imports'
-	);
+test('the interface is the way in', async (t) => {
+	for (const specifier of ['$lib/input', '$lib/input/index.js', './input/index.js']) {
+		await t.test(specifier, () => allows(specifier));
+	}
 });
 
-test('nor by importing it at runtime', async () => {
-	// `no-restricted-imports` does not read `import()`, so this one is held by the syntax rule
-	// standing beside it. The seam does not care which of them says no.
-	refused(
-		await complaints(
-			"export const later = () => import('$lib/input/sources/keyboard.js');\n",
-			'src/lib/Console.js'
-		),
-		'no-restricted-syntax'
-	);
+test('and everything else is somebody else’s business', async (t) => {
+	for (const specifier of [
+		// A package that happens to have an `input` directory is not this Input.
+		'some-pkg/input/thing.js',
+		// Nor is a sibling whose name merely starts the same way.
+		'$lib/inputs/x.js',
+		'$lib/server.js',
+		'svelte'
+	]) {
+		await t.test(specifier, () => allows(specifier));
+	}
 });
 
-test('the interface is the way in', async () => {
-	assert.deepEqual(
-		await complaints("import { sources } from '$lib/input';\n", 'src/lib/Console.js'),
-		[]
-	);
-	assert.deepEqual(
-		await complaints("export const later = () => import('$lib/input');\n", 'src/lib/Console.js'),
-		[]
-	);
-});
-
-test("Input's own files reach their own internals", async () => {
-	assert.deepEqual(
-		await complaints("import { level } from '../level.js';\n", 'src/lib/input/sources/keyboard.js'),
-		[]
-	);
+test("Input's own files reach their own internals", async (t) => {
+	for (const specifier of ['../level.js', '$lib/input/level.js']) {
+		await t.test(specifier, () => allows(specifier, 'src/lib/input/sources/keyboard.js'));
+	}
 });
 
 // Everything above tests the rule. This tests that the build is running it: `eslint.config.js`
 // could stop composing the seam rule tomorrow and every assertion above would still pass.
 test('and the console is linted with it', async () => {
-	const asTheBuildRunsIt = new ESLint({ cwd: fileURLToPath(new URL('..', import.meta.url)) });
+	const asTheBuildRunsIt = new ESLint({ cwd: web });
 
 	const [result] = await asTheBuildRunsIt.lintText(
 		"<script>\n\timport { keyboard } from '$lib/input/sources/keyboard.js';\n</script>\n",

@@ -1,10 +1,17 @@
-# The console's checks. It does not build the Rust binary: the two halves of VoxLoop ship as
-# one artefact but they break in different ways, and a Rust compile in front of a formatting
-# check would make the fast half wait for the slow one.
+# The console's checks: formatting, lint and the Input seam test.
+#
+# There is no CI for the Rust half yet, and this is deliberately not the place it arrives.
+# The two halves ship as one artefact but they break in different ways and on different
+# timescales, and putting a Rust compile in front of a formatting check would make the fast
+# half wait on the slow one.
 name: Console
 
 on:
+  # Pull requests carry the branches; `main` is checked on the way in as well, so a merge
+  # that went in some other way still gets an answer. Scoping the push side keeps a branch
+  # with an open pull request from running everything twice.
   push:
+    branches: [main]
   pull_request:
 
 jobs:

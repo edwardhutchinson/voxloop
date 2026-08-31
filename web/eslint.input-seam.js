@@ -13,35 +13,42 @@
 // It lives in its own file so the test can load the rule the build actually uses rather
 // than a copy of it that can drift.
 
-const wayIn = '$lib/input';
-
-/** Every spelling of "somewhere under Input", including the relative way round. */
-const underneath = [`${wayIn}/**`, '**/input/**'];
-
-/** …except the interface itself, which is what everyone is supposed to import. */
-const exceptTheWayIn = [`!${wayIn}`, `!${wayIn}/index.js`, '!**/input/index.js'];
+/**
+ * Somewhere under Input that is not its interface.
+ *
+ * One expression, used by both rules below, because the two of them are one policy said
+ * about two syntaxes. Writing it twice — globs for one, a regex for the other — is how they
+ * came to disagree about `$lib/input/` in an earlier draft of this file.
+ *
+ * It is anchored to the ways the console can name its own module: `$lib/input/…` and the
+ * relative walk to the same place. A bare specifier is a package, so `some-pkg/input/x.js`
+ * is somebody else's directory called input and none of Input's business.
+ */
+const underneath = String.raw`^(?:\$lib|\.\.?(?:/\.\.)*)/input/(?!index\.js$).*$`;
 
 const message =
 	'Input is a seam (ADR-0061): import it as `$lib/input`. ' +
 	'Reaching past its interface is how the Tauri wrapper stops being able to just add a source.';
 
-// `no-restricted-imports` reads `import` and `export ... from` and stops there, so on its own
-// it leaves `import()` as an unlocked back door into exactly what it is guarding. The second
-// rule is the same sentence said about the other syntax, not a second policy: anything under
-// Input that is not its interface.
-const underneathAtRuntime = /(^\$lib|\/)input\/(?!index\.js$)/;
+// `no-restricted-imports` reads `import` and `export ... from` and stops there, which leaves
+// `import()` an unlocked back door into exactly what is being guarded. Hence the second
+// rule — and hence two selectors, because a specifier in backticks is a TemplateLiteral and
+// walks straight past a rule that only knows about Literal.
+//
+// A selector ends its regex at the first bare `/`, and this one is full of path separators,
+// so they are escaped on the way in. Same expression, spelled for the reader that gets it.
+const inASelector = underneath.replaceAll('/', String.raw`\/`);
+
+const atRuntime = [
+	`ImportExpression > Literal[value=/${inASelector}/]`,
+	`ImportExpression > TemplateLiteral > TemplateElement[value.raw=/${inASelector}/]`
+];
 
 export const inputSeam = [
 	{
 		rules: {
-			'no-restricted-imports': [
-				'error',
-				{ patterns: [{ group: [...underneath, ...exceptTheWayIn], message }] }
-			],
-			'no-restricted-syntax': [
-				'error',
-				{ selector: `ImportExpression > Literal[value=${underneathAtRuntime}]`, message }
-			]
+			'no-restricted-imports': ['error', { patterns: [{ regex: underneath, message }] }],
+			'no-restricted-syntax': ['error', ...atRuntime.map((selector) => ({ selector, message }))]
 		}
 	},
 	{

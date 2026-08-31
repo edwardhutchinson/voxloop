@@ -47,4 +47,4 @@ Every part of VoxLoop, what its interface promises, and who may call it. The rul
 - A `mediasoup::Producer`, a `rusqlite::Row`, or an HTTP status crossing outward from a module that does not own it ([ADR-0060](../adr/0060-a-seam-names-domain-operations.md)).
 - Routing computed inside Media plane ([ADR-0063](../adr/0063-the-media-plane-executes-routing-it-never-computes-it.md)).
 - An in-memory repository fake ([ADR-0064](../adr/0064-tests-run-against-the-real-store.md)).
-- A module reaching past a sibling's interface into its internals. The compiler stops this on the server and a lint rule stops it at Input ([#69](https://github.com/edwardhutchinson/voxloop/issues/69)); review stops it across the rest of the client.
+- A module reaching past a sibling's interface into its internals. The compiler stops this on the server and the lint rule stops it at Input ([ADR-0061](../adr/0061-module-privacy-is-the-seam-enforcement.md)); review stops it across the rest of the client.
