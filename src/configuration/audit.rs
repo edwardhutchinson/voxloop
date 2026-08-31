@@ -22,6 +22,7 @@ use std::net::IpAddr;
 use async_trait::async_trait;
 use sqlx::Row;
 
+use super::eligibility::Eligibility;
 use super::grid::Cell;
 use super::loops::Loop;
 use super::records::Change;
@@ -79,6 +80,17 @@ pub(crate) enum AuditEvent {
     /// A loop's `unreviewed` mark dismissed, recording a deliberate `none` for every role
     /// nobody had ruled on. It is per loop, never per cell (v1 §9).
     LoopReviewed,
+    /// A user made eligible to assume a role.
+    ///
+    /// Two events rather than one, where the grid has one: a cell always holds exactly one
+    /// of four values and granting is setting it, but an eligibility is present or absent,
+    /// and the two acts are not the same write with different words in it. Revoking also has
+    /// a consequence granting cannot have — it ends an occupancy — so a log filtered to
+    /// *what ended somebody's shift* has to be able to name it.
+    EligibilityGranted,
+    /// A user's eligibility to assume a role taken away, ending their occupancy of it
+    /// immediately (v1 §2's lifetime table).
+    EligibilityRevoked,
     AccountLocked,
     AccountUnlocked,
     /// The password taken away, ending the sign-in and the session immediately (v1 §2).
@@ -132,6 +144,8 @@ impl AuditEvent {
             Self::LoopOrderEdited => "loop_order_edited",
             Self::GridCellEdited => "grid_cell_edited",
             Self::LoopReviewed => "loop_reviewed",
+            Self::EligibilityGranted => "eligibility_granted",
+            Self::EligibilityRevoked => "eligibility_revoked",
             Self::AccountLocked => "account_locked",
             Self::AccountUnlocked => "account_unlocked",
             Self::PasswordResetForced => "password_reset_forced",
@@ -163,6 +177,8 @@ impl AuditEvent {
             "loop_order_edited" => Some(Self::LoopOrderEdited),
             "grid_cell_edited" => Some(Self::GridCellEdited),
             "loop_reviewed" => Some(Self::LoopReviewed),
+            "eligibility_granted" => Some(Self::EligibilityGranted),
+            "eligibility_revoked" => Some(Self::EligibilityRevoked),
             "account_locked" => Some(Self::AccountLocked),
             "account_unlocked" => Some(Self::AccountUnlocked),
             "password_reset_forced" => Some(Self::PasswordResetForced),
@@ -290,9 +306,10 @@ impl RecordId {
     }
 }
 
-/// A configuration record the log can be about: a user, a role, a loop or a grid cell.
+/// A configuration record the log can be about: a user, a role, a loop, a grid cell or an
+/// eligibility.
 ///
-/// Four writes, one audited path. What each record renders into a [`Snapshot`] is the only
+/// Five records, one audited path. What each record renders into a [`Snapshot`] is the only
 /// thing that differs between them, and it is here rather than with the record so that the
 /// strings customer deployments hold on disk are changed in one place, deliberately.
 pub(crate) trait Record {
@@ -402,6 +419,38 @@ impl Record for Cell {
             self.held_on.name,
             self.permission.as_str(),
             yes_or_no(!self.held_on.is_unreviewed),
+        ))
+    }
+}
+
+impl Record for Eligibility {
+    /// An eligibility is about two records, and the entry names the **user**.
+    ///
+    /// One target id is what the log holds, so one of the pair has to be chosen — and where
+    /// a grid cell names the loop, because that is what authority is over, this names the
+    /// person, because eligibility is the one thing in VoxLoop held *by* a person. Every
+    /// other grant is per role, so filtering the log to a user is the only way *what was
+    /// this person given, and what was taken away* can be answered at all. The role is not
+    /// lost: it is in the target name and in the snapshot.
+    fn recorded_id(&self) -> RecordId {
+        RecordId::of(self.user.id.as_str())
+    }
+
+    /// Both names, because an eligibility nobody can name is one nobody can read the entry
+    /// for.
+    fn recorded_name(&self) -> String {
+        format!("{} as {}", self.user.username, self.for_role.name)
+    }
+
+    /// An eligibility as it stood: the pair, and nothing else.
+    ///
+    /// There is nothing else to record. An eligibility carries no rung, no condition and no
+    /// expiry, so what the entry says is who and which seat — and whether it stood at all is
+    /// carried by the snapshot being there or not, exactly as a deletion's is.
+    fn snapshot(&self) -> Snapshot {
+        Snapshot(format!(
+            "user={} role={}",
+            self.user.username, self.for_role.name,
         ))
     }
 }

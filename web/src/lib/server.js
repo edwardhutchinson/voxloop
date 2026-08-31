@@ -120,6 +120,36 @@ export const editRole = (id, edit) =>
 export const deleteRole = (id) =>
 	ask(`/api/roles/${encodeURIComponent(id)}`, { method: 'DELETE' });
 
+/**
+ * Eligibility: who may assume which role.
+ *
+ * It is administered from **two directions** and never as a matrix (ADR-0015) — rendered as
+ * one, 190 users by 15 roles was the least legible object the prototype produced.
+ * `whoMayAssume` is the role page and `whichRoles` is the user page, and there is
+ * deliberately no third call: the server has no whole-eligibility read to make one from.
+ *
+ * A grant confers nothing of its own. It permits somebody to take up a role, and what that
+ * role can hear or say is the grid.
+ */
+export const whoMayAssume = (role) => ask(`/api/roles/${encodeURIComponent(role)}/eligibility`);
+
+export const whichRoles = (user) => ask(`/api/users/${encodeURIComponent(user)}/eligibility`);
+
+/**
+ * Grant and revoke, from either page.
+ *
+ * The pair is the whole address: an eligibility is present or absent, so there is no value to
+ * send and nothing to patch. Revoking ends the occupancy of whoever is in the seat,
+ * immediately and with the reason shown to them.
+ */
+const eligibility = (user, role) =>
+	`/api/eligibility/${encodeURIComponent(user)}/${encodeURIComponent(role)}`;
+
+export const grantEligibility = (user, role) => ask(eligibility(user, role), { method: 'PUT' });
+
+export const revokeEligibility = (user, role) =>
+	ask(eligibility(user, role), { method: 'DELETE' });
+
 /** Loops, in the administered base order. The order they come back in is the order. */
 export const loops = () => ask('/api/loops');
 

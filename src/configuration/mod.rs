@@ -25,6 +25,7 @@
 
 mod audit;
 mod deployment;
+mod eligibility;
 mod enrolment;
 mod grid;
 mod loops;
@@ -40,6 +41,7 @@ pub(crate) use audit::{
     AuditEntry, AuditEvent, AuditLog, BlastRadius, ConfigurationWrite, Record, Snapshot,
 };
 pub(crate) use deployment::{Deployment, DeploymentError};
+pub(crate) use eligibility::{Eligibilities, Eligibility};
 pub(crate) use enrolment::{Enrolment, EnrolmentCode, Outstanding};
 pub(crate) use grid::{Cell, Grid, Permission};
 pub(crate) use loops::{Loop, LoopId, Loops};

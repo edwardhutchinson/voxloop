@@ -237,6 +237,12 @@ impl Users for Transaction {
         .await
         .map_err(|error| taken_or_unavailable(error, "username", &new.username))?;
 
+        // Every user record starts with seeded `Observer` eligibility (v1 §2). It is part of
+        // creating one rather than a step the console, the on-box CLI and the bootstrap route
+        // each remember, because a rule three callers have to keep is a rule with three
+        // chances of being forgotten.
+        self.seed_observer_eligibility(&id).await?;
+
         Ok(id)
     }
 
@@ -464,7 +470,10 @@ impl Transaction {
 }
 
 /// A user, from the row every read of one selects.
-fn a_user(row: &sqlx::sqlite::SqliteRow) -> User {
+///
+/// Eligibility reads users too — a role page is everyone who may assume it — so this is
+/// `pub(super)` rather than copied there.
+pub(super) fn a_user(row: &sqlx::sqlite::SqliteRow) -> User {
     User {
         id: UserId(row.get("id")),
         username: row.get("username"),
