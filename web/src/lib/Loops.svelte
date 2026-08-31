@@ -7,9 +7,10 @@
 	// administered rather than derived (ADR-0053) — not alphabetical, and not creation order.
 	// A new loop lands at the end, because appending is the only honest placement for
 	// something VoxLoop has been told nothing about.
+	import { resolve } from '$app/paths';
+
 	import Confirm from './Confirm.svelte';
 	import Icon from './Icon.svelte';
-	import LoopPage from './LoopPage.svelte';
 	import {
 		createLoop,
 		deleteLoop,
@@ -19,10 +20,10 @@
 		whatWentWrong
 	} from './server.js';
 
-	let allLoops = $state([]);
-	// The loop whose column is being read, where one is. Ruling on a loop is done there,
-	// because what it writes is that loop's cells.
-	let showing = $state(null);
+	// The list as the server last answered it, and `null` until it has answered at all: a
+	// refused read and a deployment with no loops are different facts, and rendering them
+	// alike would make the second one up.
+	let allLoops = $state(null);
 	// The order as the server last answered it, so an arrangement in progress can be told
 	// apart from the one that is actually saved. Nothing here renders optimistically: the
 	// list says plainly that a rearrangement has not been committed yet.
@@ -33,7 +34,7 @@
 	let creating = $state({ name: '' });
 	let editing = $state(null);
 
-	const arranged = $derived(allLoops.map((held) => held.id).join() !== saved.join());
+	const arranged = $derived((allLoops ?? []).map((held) => held.id).join() !== saved.join());
 
 	$effect(() => {
 		read();
@@ -97,14 +98,6 @@
 		await read();
 	}
 
-	// Read again on the way back: ruling on a loop's column clears its unreviewed mark, and
-	// this list is where that mark is shown. Nothing on a role's page changes the role list,
-	// which is why that one comes back without a read.
-	function back() {
-		showing = null;
-		read();
-	}
-
 	async function commit() {
 		const { act } = confirming;
 		confirming = null;
@@ -113,31 +106,29 @@
 	}
 </script>
 
-{#if showing}
-	<LoopPage held={showing} onback={back} />
-{:else}
-	<section>
-		<header>
-			<h2>Loops</h2>
-			<p>
-				A loop is an audio conference, and the only thing voice can be addressed to. This order is
-				the deployment's base order: it is administered here rather than derived, and every console
-				starts from it. A new loop lands at the end.
-			</p>
-		</header>
+<section>
+	<header>
+		<h2>Loops</h2>
+		<p>
+			A loop is an audio conference, and the only thing voice can be addressed to. This order is the
+			deployment's base order: it is administered here rather than derived, and every console starts
+			from it. A new loop lands at the end.
+		</p>
+	</header>
 
-		{#if refusal}
-			<p class="refusal" role="alert">{refusal}</p>
-		{/if}
+	{#if refusal}
+		<p class="refusal" role="alert">{refusal}</p>
+	{/if}
 
+	{#if reading}
+		<p class="quiet">Reading…</p>
+	{:else if allLoops}
 		<form class="new" onsubmit={create}>
 			<input bind:value={creating.name} placeholder="Loop" required />
 			<button type="submit"><Icon name="plus" /> Create</button>
 		</form>
 
-		{#if reading}
-			<p class="quiet">Reading…</p>
-		{:else if allLoops.length === 0}
+		{#if allLoops.length === 0}
 			<p class="quiet">No loops yet. Create the first one above.</p>
 		{:else}
 			<table>
@@ -190,14 +181,10 @@
 								{/if}
 							</td>
 							<td class="acts">
-								<button
-									onclick={() =>
-										(showing = {
-											id: held.id,
-											name: held.name,
-											unreviewed: held.unreviewed
-										})}>Permissions</button
-								>
+								<!-- The column is a page with a URL of its own (#76), and coming back
+								     to this list mounts it again and reads: ruling on a loop clears
+								     its unreviewed mark, and this list is where that mark is shown. -->
+								<a href={resolve('/admin/loops/[id]', { id: held.id })}>Permissions</a>
 								<button
 									class="destructive"
 									onclick={() =>
@@ -220,16 +207,16 @@
 				</p>
 			{/if}
 		{/if}
+	{/if}
 
-		{#if confirming}
-			<Confirm
-				consequence={confirming.consequence}
-				oncommit={commit}
-				oncancel={() => (confirming = null)}
-			/>
-		{/if}
-	</section>
-{/if}
+	{#if confirming}
+		<Confirm
+			consequence={confirming.consequence}
+			oncommit={commit}
+			oncancel={() => (confirming = null)}
+		/>
+	{/if}
+</section>
 
 <style>
 	/* The two order buttons are one control and stay on one line: wrapped, the down arrow

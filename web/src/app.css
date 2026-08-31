@@ -61,7 +61,16 @@ body {
    nobody can forget an import. A component exists where there is behaviour rather than
    appearance, which is what `Confirm.svelte` is. */
 
-button {
+/* Every link in the console goes to another page of the console, and every one of them
+   stands among buttons: the console's nav, a row's acts, the way back out of a page. There
+   is no prose here for a link to sit inside, so a link is drawn as the control it is and a
+   row of acts reads as one row rather than as two kinds of thing.
+
+   It is a link rather than a button because the page it opens has a URL (#76). It
+   middle-clicks, it copies, and it can be handed to somebody else — which is the whole of
+   why those pages were given URLs. */
+button,
+a {
 	font: inherit;
 	color: var(--ink);
 	background: var(--raised);
@@ -69,6 +78,11 @@ button {
 	border-radius: var(--radius);
 	padding: var(--space-1) var(--space-3);
 	cursor: pointer;
+}
+
+a {
+	display: inline-block;
+	text-decoration: none;
 }
 
 /* A select is written with the input because it is one on these pages. The two eligibility
@@ -198,7 +212,9 @@ th {
 }
 
 /* The way back out of a row or a column. Every page under a list carries one, in the same
-   place, because a list is the only way in to the page below it. */
+   place, and it sits **above the heading** rather than under it: a page reached by its URL
+   may have no record behind it at all — a deleted loop, a role somebody else removed — and
+   the way back has to be on screen when the rest of the page is a sentence saying so. */
 .back {
 	margin: 0 0 var(--space-5);
 }

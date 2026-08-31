@@ -10,6 +10,12 @@
 	//
 	// Nothing granted here confers anything. Eligibility permits somebody to take up the
 	// position; what the position can hear or say is the grid, one page across.
+	//
+	// It has a URL of its own (#76), so what arrives here is a role's **id** and not a role.
+	// The name is the server's to give, and where there is no such role that is the server's
+	// sentence too.
+	import { resolve } from '$app/paths';
+
 	import Confirm from './Confirm.svelte';
 	import Icon from './Icon.svelte';
 	import {
@@ -20,7 +26,7 @@
 		whoMayAssume
 	} from './server.js';
 
-	let { role, onback } = $props();
+	let { role } = $props();
 
 	let page = $state(null);
 	let everybody = $state([]);
@@ -37,7 +43,7 @@
 	);
 
 	$effect(() => {
-		read(role.id);
+		read(role);
 	});
 
 	async function read(id) {
@@ -64,77 +70,87 @@
 		event.preventDefault();
 		const user = granting;
 		granting = '';
-		await attempt(() => grantEligibility(user, role.id));
-		await read(role.id);
+		await attempt(() => grantEligibility(user, role));
+		await read(role);
 	}
 
 	async function commit() {
 		const { act } = confirming;
 		confirming = null;
 		await attempt(act);
-		await read(role.id);
+		await read(role);
 	}
 </script>
 
 <section>
-	<header>
-		<h2>{page?.role.name ?? role.name}</h2>
-		<p>
-			Who may assume this position. Eligibility is an unconditional grant and it carries no
-			permissions of its own — what this role can hear, say and command is its
-			<strong>reach</strong>, one page across. Revoking it from somebody occupying the role ends
-			their occupancy immediately, and they are told why.
-		</p>
-	</header>
-
-	<p class="back"><button onclick={onback}><Icon name="arrow-left" /> All roles</button></p>
-
-	{#if refusal}
-		<p class="refusal" role="alert">{refusal}</p>
-	{/if}
-
-	<form class="new" onsubmit={grant}>
-		<select bind:value={granting} required aria-label="Somebody to make eligible">
-			<option value="" disabled>Somebody else…</option>
-			{#each candidates as account (account.id)}
-				<option value={account.id}>{account.username}</option>
-			{/each}
-		</select>
-		<button type="submit" disabled={granting === ''}>
-			<Icon name="plus" /> Make eligible
-		</button>
-	</form>
+	<!-- Above the heading, because the heading may never arrive: a link to a role somebody
+	     deleted has no name to show, and the way back out has to be on screen anyway. -->
+	<p class="back">
+		<a href={resolve('/admin/roles')}><Icon name="arrow-left" /> All roles</a>
+	</p>
 
 	{#if reading}
 		<p class="quiet">Reading…</p>
-	{:else if page && page.users.length === 0}
-		<p class="quiet">Nobody may assume this role. It is a position with no candidates.</p>
-	{:else if page}
-		<table>
-			<thead>
-				<tr>
-					<th>User</th>
-					<th class="acts">Acts</th>
-				</tr>
-			</thead>
-			<tbody>
-				{#each page.users as user (user.id)}
-					<tr>
-						<td>{user.username}</td>
-						<td class="acts">
-							<button
-								class="destructive"
-								onclick={() =>
-									(confirming = {
-										act: () => revokeEligibility(user.id, role.id),
-										consequence: `${user.username} can no longer assume ${page.role.name}. If they are occupying it, their occupancy ends immediately and they are told why.`
-									})}><Icon name="trash-2" /> Revoke</button
-							>
-						</td>
-					</tr>
+	{:else if !page}
+		<!-- There is no such role, or the caller may not read it. Both are the server's own
+		     sentence and the page is that sentence. -->
+		<p class="refusal" role="alert">{refusal}</p>
+	{:else}
+		<header>
+			<h2>{page.role.name}</h2>
+			<p>
+				Who may assume this position. Eligibility is an unconditional grant and it carries no
+				permissions of its own — what this role can hear, say and command is its
+				<strong>reach</strong>, one page across. Revoking it from somebody occupying the role ends
+				their occupancy immediately, and they are told why.
+			</p>
+		</header>
+
+		{#if refusal}
+			<p class="refusal" role="alert">{refusal}</p>
+		{/if}
+
+		<form class="new" onsubmit={grant}>
+			<select bind:value={granting} required aria-label="Somebody to make eligible">
+				<option value="" disabled>Somebody else…</option>
+				{#each candidates as account (account.id)}
+					<option value={account.id}>{account.username}</option>
 				{/each}
-			</tbody>
-		</table>
+			</select>
+			<button type="submit" disabled={granting === ''}>
+				<Icon name="plus" /> Make eligible
+			</button>
+		</form>
+
+		{#if page.users.length === 0}
+			<p class="quiet">Nobody may assume this role. It is a position with no candidates.</p>
+		{:else}
+			<table>
+				<thead>
+					<tr>
+						<th>User</th>
+						<th class="acts">Acts</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each page.users as user (user.id)}
+						<tr>
+							<td>{user.username}</td>
+							<td class="acts">
+								<button
+									class="destructive"
+									onclick={() =>
+										(confirming = {
+											act: () => revokeEligibility(user.id, role),
+											consequence: `${user.username} can no longer assume ${page.role.name}. If they are occupying it, their occupancy ends immediately and they are told why.`
+										})}><Icon name="trash-2" /> Revoke</button
+								>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		{/if}
 	{/if}
 
 	{#if confirming}

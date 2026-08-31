@@ -5,12 +5,18 @@
 	// past roughly thirty loops a row's header and its far end cannot share a screen.
 	//
 	// This page answers *what can this role reach*. Who may assume the role is eligibility,
-	// and it is not here.
+	// and it is the role's other page.
+	//
+	// It has a URL of its own (#76), so what arrives here is a role's **id** and not a role.
+	// The name is the server's to give, and where there is no such role that is the server's
+	// sentence too.
+	import { resolve } from '$app/paths';
+
 	import Icon from './Icon.svelte';
 	import Rungs from './Rungs.svelte';
 	import { roleRow, setCell, whatWentWrong } from './server.js';
 
-	let { role, onback } = $props();
+	let { role } = $props();
 
 	let row = $state(null);
 	let refusal = $state(null);
@@ -18,7 +24,7 @@
 	let setting = $state(null);
 
 	$effect(() => {
-		read(role.id);
+		read(role);
 	});
 
 	async function read(id) {
@@ -43,69 +49,75 @@
 	// console asked for.
 	async function set(held, permission) {
 		setting = held.id;
-		await attempt(() => setCell(role.id, held.id, permission));
+		await attempt(() => setCell(role, held.id, permission));
 		setting = null;
-		await read(role.id);
+		await read(role);
 	}
 </script>
 
 <section>
-	<header>
-		<h2>{row?.role.name ?? role.name}</h2>
-		<p>
-			What this role may hear, say and command, one loop at a time. Each rung carries the ones below
-			it: <strong>control</strong> can emit, and
-			<strong>emit</strong> can monitor. Granting one person one extra loop costs a role — there is no
-			per-person exception anywhere in VoxLoop.
-		</p>
-	</header>
-
-	<p class="back"><button onclick={onback}><Icon name="arrow-left" /> All roles</button></p>
-
-	{#if refusal}
-		<p class="refusal" role="alert">{refusal}</p>
-	{/if}
+	<p class="back">
+		<a href={resolve('/admin/roles')}><Icon name="arrow-left" /> All roles</a>
+	</p>
 
 	{#if reading}
 		<p class="quiet">Reading…</p>
-	{:else if row && row.cells.length === 0}
-		<p class="quiet">No loops yet. A role reaches loops, so create one first.</p>
-	{:else if row}
-		<table>
-			<thead>
-				<tr>
-					<th>Loop</th>
-					<th>Permission</th>
-				</tr>
-			</thead>
-			<tbody>
-				{#each row.cells as cell (cell.loop.id)}
+	{:else if !row}
+		<p class="refusal" role="alert">{refusal}</p>
+	{:else}
+		<header>
+			<h2>{row.role.name}</h2>
+			<p>
+				What this role may hear, say and command, one loop at a time. Each rung carries the ones
+				below it: <strong>control</strong> can emit, and
+				<strong>emit</strong> can monitor. Granting one person one extra loop costs a role — there is
+				no per-person exception anywhere in VoxLoop.
+			</p>
+		</header>
+
+		{#if refusal}
+			<p class="refusal" role="alert">{refusal}</p>
+		{/if}
+
+		{#if row.cells.length === 0}
+			<p class="quiet">No loops yet. A role reaches loops, so create one first.</p>
+		{:else}
+			<table>
+				<thead>
 					<tr>
-						<td>
-							{cell.loop.name}
-							<!-- An unreviewed loop is enforced as `none` on every rung whatever
-							     its cells say, so a value set here confers nothing until that
-							     loop is ruled on — which happens when every role's cell on it
-							     has been set, or when somebody dismisses the mark from the
-							     loop's own page. Either way it is per loop, never per cell. -->
-							{#if cell.loop.unreviewed}
-								<span class="meaning">
-									unreviewed — enforced as none until every role's cell on this loop is set, or the
-									mark is dismissed from its loop page
-								</span>
-							{/if}
-						</td>
-						<td>
-							<Rungs
-								held={cell.permission}
-								of="{role.name} on {cell.loop.name}"
-								busy={setting === cell.loop.id}
-								onset={(permission) => set(cell.loop, permission)}
-							/>
-						</td>
+						<th>Loop</th>
+						<th>Permission</th>
 					</tr>
-				{/each}
-			</tbody>
-		</table>
+				</thead>
+				<tbody>
+					{#each row.cells as cell (cell.loop.id)}
+						<tr>
+							<td>
+								{cell.loop.name}
+								<!-- An unreviewed loop is enforced as `none` on every rung whatever
+								     its cells say, so a value set here confers nothing until that
+								     loop is ruled on — which happens when every role's cell on it
+								     has been set, or when somebody dismisses the mark from the
+								     loop's own page. Either way it is per loop, never per cell. -->
+								{#if cell.loop.unreviewed}
+									<span class="meaning">
+										unreviewed — enforced as none until every role's cell on this loop is set, or
+										the mark is dismissed from its loop page
+									</span>
+								{/if}
+							</td>
+							<td>
+								<Rungs
+									held={cell.permission}
+									of="{row.role.name} on {cell.loop.name}"
+									busy={setting === cell.loop.id}
+									onset={(permission) => set(cell.loop, permission)}
+								/>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		{/if}
 	{/if}
 </section>
