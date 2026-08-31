@@ -4,6 +4,7 @@
 	// (ADR-0015) — the other hangs off the role. A user carries eligibility and nothing else:
 	// no permissions of their own, and no per-person exception anywhere.
 	import Confirm from './Confirm.svelte';
+	import Icon from './Icon.svelte';
 	import WhichRoles from './WhichRoles.svelte';
 	import {
 		createUser,
@@ -148,7 +149,7 @@
 				<input type="checkbox" bind:checked={creating.systemAdministration} />
 				System administration
 			</label>
-			<button type="submit">Create</button>
+			<button type="submit"><Icon name="plus" /> Create</button>
 		</form>
 
 		{#if reading}
@@ -197,7 +198,7 @@
 							<td class:quiet={!account.enrolled}>
 								{account.enrolled ? 'set' : 'awaiting enrolment'}
 								{#if account.enrolment_expires_at !== null}
-									<span class="outstanding">
+									<span class="meaning">
 										code outstanding until {until(account.enrolment_expires_at)}
 									</span>
 								{/if}
@@ -241,7 +242,7 @@
 											account,
 											() => deleteUser(account.id),
 											`${account.username} is deleted and signed out everywhere, and every role they were eligible for goes with them. Their audit entries stay, attributed.`
-										)}>Delete</button
+										)}><Icon name="trash-2" /> Delete</button
 								>
 							</td>
 						</tr>
@@ -276,16 +277,15 @@
 {/if}
 
 <style>
+	/* The cell says `locked` or `unlocked` in words; the colour is the second telling of it
+	   rather than the only one. */
 	.locked {
 		color: var(--refusal);
 	}
 
-	.outstanding {
-		display: block;
-		color: var(--quiet);
-		font-size: var(--type-1);
-	}
-
+	/* A code is read once, off this screen, and typed or pasted somewhere else. It is set on
+	   its own line and selects whole on a click, and it breaks anywhere rather than widening
+	   the panel it sits in — a code that ran off the edge would be a code nobody could read. */
 	.awaiting code {
 		display: block;
 		margin-bottom: var(--space-3);

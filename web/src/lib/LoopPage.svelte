@@ -126,10 +126,6 @@
 </section>
 
 <style>
-	.back {
-		margin: 0 0 var(--space-5);
-	}
-
 	.unreviewed {
 		display: flex;
 		align-items: center;

@@ -25,10 +25,11 @@
 //
 // ---
 //
-// Of the icons below, `arrow-left`, `check`, `chevron-down`, `chevron-right`, `plus`,
-// `trash-2`, `triangle-alert` and `x` are derived from the Feather project and carry its
-// licence as well. `triangle-alert` appears in Lucide's own LICENSE under its former name,
-// `alert-triangle`, which is why checking that list needs care rather than a text search.
+// Of the icons below, `arrow-down`, `arrow-left`, `arrow-up`, `check`, `chevron-down`,
+// `chevron-right`, `plus`, `trash-2`, `triangle-alert` and `x` are derived from the Feather
+// project and carry its licence as well. `triangle-alert` appears in Lucide's own LICENSE
+// under its former name, `alert-triangle`, which is why checking that list needs care rather
+// than a text search.
 //
 // The MIT License (MIT)
 //
@@ -146,10 +147,21 @@ export const icons = {
 		['path', { d: 'M8 6v8' }]
 	],
 
-	// The admin console: back out of a row or a column, rename, remove, add, commit.
+	// The admin console: back out of a row or a column, move a loop in the base order,
+	// rename, remove, add, commit.
 	'arrow-left': [
 		['path', { d: 'm12 19-7-7 7-7' }],
 		['path', { d: 'M19 12H5' }]
+	],
+	// Arrows rather than chevrons for reordering: the loop list moves a row one place, and a
+	// chevron is the console's mark for a list opening (ADR-0048's picker), not for travel.
+	'arrow-up': [
+		['path', { d: 'm5 12 7-7 7 7' }],
+		['path', { d: 'M12 19V5' }]
+	],
+	'arrow-down': [
+		['path', { d: 'M12 5v14' }],
+		['path', { d: 'm19 12-7 7-7-7' }]
 	],
 	pencil: [
 		[

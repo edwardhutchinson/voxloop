@@ -38,24 +38,24 @@
 	}
 </script>
 
-<form onsubmit={attempt}>
+<form class="wayin" onsubmit={attempt}>
 	<h1>Set your password</h1>
 	<p class="quiet">
 		An administrator issues an enrolment code and hands it over in person. It is good once. VoxLoop
 		has no mail path, so this is how a password is set and how one is reset.
 	</p>
 
-	<label>
+	<label class="field">
 		Enrolment code
 		<input bind:value={code} autocomplete="off" spellcheck="false" required />
 	</label>
 
-	<label>
+	<label class="field">
 		New password
 		<input type="password" bind:value={password} autocomplete="new-password" required />
 	</label>
 
-	<label>
+	<label class="field">
 		New password again
 		<input type="password" bind:value={again} autocomplete="new-password" required />
 	</label>
@@ -63,46 +63,9 @@
 	<p class="quiet">At least twelve characters. There are no other rules.</p>
 
 	<button type="submit" disabled={attempting}>{attempting ? 'Setting…' : 'Set password'}</button>
-	<button type="button" class="plain" onclick={onBack}>Back to signing in</button>
+	<button type="button" class="lesser" onclick={onBack}>Back to signing in</button>
 
 	{#if refusal}
 		<p class="refusal" role="alert">{refusal}</p>
 	{/if}
 </form>
-
-<style>
-	form {
-		display: grid;
-		gap: var(--space-4);
-		max-width: 22rem;
-		margin: var(--space-6) auto 0;
-	}
-
-	h1 {
-		margin: 0;
-		font-size: var(--type-5);
-		letter-spacing: 0.02em;
-	}
-
-	label {
-		display: grid;
-		gap: var(--space-1);
-		font-size: var(--type-2);
-		color: var(--quiet);
-	}
-
-	.quiet {
-		margin: 0;
-	}
-
-	.plain {
-		background: none;
-		border: 0;
-		color: var(--quiet);
-		text-decoration: underline dotted;
-	}
-
-	.refusal {
-		margin: 0;
-	}
-</style>

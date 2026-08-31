@@ -8,6 +8,7 @@
 	// A new loop lands at the end, because appending is the only honest placement for
 	// something VoxLoop has been told nothing about.
 	import Confirm from './Confirm.svelte';
+	import Icon from './Icon.svelte';
 	import LoopPage from './LoopPage.svelte';
 	import {
 		createLoop,
@@ -131,7 +132,7 @@
 
 		<form class="new" onsubmit={create}>
 			<input bind:value={creating.name} placeholder="Loop" required />
-			<button type="submit">Create</button>
+			<button type="submit"><Icon name="plus" /> Create</button>
 		</form>
 
 		{#if reading}
@@ -155,12 +156,12 @@
 								<button
 									aria-label="Move {held.name} up"
 									disabled={at === 0}
-									onclick={() => move(at, -1)}>↑</button
+									onclick={() => move(at, -1)}><Icon name="arrow-up" /></button
 								>
 								<button
 									aria-label="Move {held.name} down"
 									disabled={at === allLoops.length - 1}
-									onclick={() => move(at, 1)}>↓</button
+									onclick={() => move(at, 1)}><Icon name="arrow-down" /></button
 								>
 							</td>
 							<td>
@@ -183,7 +184,7 @@
 							<td class:quiet={!held.unreviewed}>
 								{#if held.unreviewed}
 									unreviewed
-									<span class="note">nobody has ruled on this loop's permissions yet</span>
+									<span class="meaning">nobody has ruled on this loop's permissions yet</span>
 								{:else}
 									ruled on
 								{/if}
@@ -203,7 +204,7 @@
 										(confirming = {
 											act: () => deleteLoop(held.id),
 											consequence: `${held.name} is deleted. Nothing can be said on it or heard from it again, and the loops around it keep their order.`
-										})}>Delete</button
+										})}><Icon name="trash-2" /> Delete</button
 								>
 							</td>
 						</tr>
@@ -214,7 +215,7 @@
 			{#if arranged}
 				<p class="unsaved" role="status">
 					This order has not been saved. Nothing has changed for anybody until it is.
-					<button onclick={save}>Save order</button>
+					<button onclick={save}><Icon name="check" /> Save order</button>
 					<button onclick={read}>Discard</button>
 				</p>
 			{/if}
@@ -231,14 +232,10 @@
 {/if}
 
 <style>
+	/* The two order buttons are one control and stay on one line: wrapped, the down arrow
+	   would read as belonging to the row below it. */
 	.place {
 		white-space: nowrap;
-	}
-
-	.note {
-		display: block;
-		color: var(--quiet);
-		font-size: var(--type-1);
 	}
 
 	.unsaved {

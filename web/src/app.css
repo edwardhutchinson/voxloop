@@ -68,13 +68,26 @@ button {
 	cursor: pointer;
 }
 
-input {
+/* A select is written with the input because it is one on these pages. The two eligibility
+   pickers are the only ones the console has, and a control left to the browser's own idea of
+   a form would be the one light thing on a dark page. */
+input,
+select {
 	font: inherit;
 	color: var(--ink);
 	background: var(--ground);
 	border: 1px solid var(--rule);
 	border-radius: var(--radius);
 	padding: var(--space-1) var(--space-2);
+}
+
+h1 {
+	margin: 0;
+	font-size: var(--type-5);
+	/* Tracked a little, because at this size the default sets tight. Two of the three h1s
+	   the console has are the product's name, and the third is the page that stands in for
+	   it. */
+	letter-spacing: 0.02em;
 }
 
 /* Three readings of one console, so a table that looked different per page would be saying
@@ -101,6 +114,8 @@ td {
 th {
 	font-size: var(--type-1);
 	text-transform: uppercase;
+	/* Uppercase at the smallest step needs the tracking to stay readable; the same value
+	   under mixed case would look broken. */
 	letter-spacing: 0.08em;
 	color: var(--quiet);
 }
@@ -152,13 +167,65 @@ th {
 	margin: 0 0 var(--space-3);
 }
 
-/* A name is edited by clicking it, so it is a button that reads as text. */
-.name {
+/* The two public acts — signing in, and redeeming an enrolment code — are the same moment
+   written twice: somebody at the door who is nobody yet. One form, centred, on an otherwise
+   empty page. */
+.wayin {
+	display: grid;
+	gap: var(--space-4);
+	/* A measure rather than a layout. The fields are short, and a box as wide as the window
+	   would read as a page to work in rather than as a door to get through. */
+	max-width: 22rem;
+	margin: var(--space-6) auto 0;
+}
+
+/* Every line in the form is a grid row, so the gap is the spacing and a paragraph's own
+   margin would be a second one on top of it. */
+.wayin p {
+	margin: 0;
+}
+
+/* A field is its label above its input. The label is the quiet half: the input is the thing
+   being looked for. */
+.field {
+	display: grid;
+	gap: var(--space-1);
+	font-size: var(--type-2);
+	color: var(--quiet);
+}
+
+/* The way back out of a row or a column. Every page under a list carries one, in the same
+   place, because a list is the only way in to the page below it. */
+.back {
+	margin: 0 0 var(--space-5);
+}
+
+/* A line under a value saying what the value means — a loop nobody has ruled on, a code
+   still outstanding. It qualifies the value rather than being a second one, so it is quiet,
+   smaller, and on its own line. */
+.meaning {
+	display: block;
+	color: var(--quiet);
+	font-size: var(--type-1);
+}
+
+/* Two buttons that read as text, for two different reasons. A name is edited by clicking it,
+   so the name itself is the control. The other way in — enrolment from sign-in, sign-in from
+   enrolment — is the lesser of the two acts on the page, and is offered as a sentence. */
+.name,
+.lesser {
 	background: none;
 	border: 0;
 	padding: 0;
-	color: inherit;
 	font: inherit;
 	text-decoration: underline dotted;
 	cursor: pointer;
+}
+
+.name {
+	color: inherit;
+}
+
+.lesser {
+	color: var(--quiet);
 }

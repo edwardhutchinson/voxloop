@@ -89,7 +89,7 @@
 							     has been set, or when somebody dismisses the mark from the
 							     loop's own page. Either way it is per loop, never per cell. -->
 							{#if cell.loop.unreviewed}
-								<span class="note">
+								<span class="meaning">
 									unreviewed — enforced as none until every role's cell on this loop is set, or the
 									mark is dismissed from its loop page
 								</span>
@@ -109,15 +109,3 @@
 		</table>
 	{/if}
 </section>
-
-<style>
-	.back {
-		margin: 0 0 var(--space-5);
-	}
-
-	.note {
-		display: block;
-		color: var(--quiet);
-		font-size: var(--type-1);
-	}
-</style>
