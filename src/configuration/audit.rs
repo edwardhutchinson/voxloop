@@ -46,6 +46,11 @@ pub(crate) enum AuditEvent {
     SignInSucceeded,
     SignInFailed,
     SignedOut,
+    /// A sign-in ended after 24 hours with no deliberate act (v1 §2). Nobody signed out:
+    /// the window ran out while the sign-in stood in the lobby, which is what the window is
+    /// for. It is a separate event from a sign-out because a log filtered to *what ended
+    /// somebody's shift* must not read a reaped tab as somebody leaving.
+    SignInExpired,
     /// The first system administrator, made by whoever could read the server's own log.
     BootstrapRedeemed,
     /// A bootstrap code presented and not accepted. Refused administration writes are
@@ -130,6 +135,7 @@ impl AuditEvent {
             Self::SignInSucceeded => "sign_in_succeeded",
             Self::SignInFailed => "sign_in_failed",
             Self::SignedOut => "signed_out",
+            Self::SignInExpired => "sign_in_expired",
             Self::BootstrapRedeemed => "bootstrap_redeemed",
             Self::BootstrapRefused => "bootstrap_refused",
             Self::UserCreated => "user_created",
@@ -163,6 +169,7 @@ impl AuditEvent {
             "sign_in_succeeded" => Some(Self::SignInSucceeded),
             "sign_in_failed" => Some(Self::SignInFailed),
             "signed_out" => Some(Self::SignedOut),
+            "sign_in_expired" => Some(Self::SignInExpired),
             "bootstrap_redeemed" => Some(Self::BootstrapRedeemed),
             "bootstrap_refused" => Some(Self::BootstrapRefused),
             "user_created" => Some(Self::UserCreated),
@@ -860,6 +867,7 @@ mod tests {
             AuditEvent::SignInSucceeded,
             AuditEvent::SignInFailed,
             AuditEvent::SignedOut,
+            AuditEvent::SignInExpired,
             AuditEvent::BootstrapRedeemed,
             AuditEvent::BootstrapRefused,
             AuditEvent::UserCreated,

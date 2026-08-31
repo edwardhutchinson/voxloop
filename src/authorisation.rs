@@ -62,17 +62,44 @@ pub(crate) enum Requirement {
     Grid { rung: Permission, on: LoopId },
 }
 
+/// A service principal's token, as the request presented it.
+///
+/// Nothing resolves one to a principal yet (#57). It is read and carried anyway, because the
+/// rule below is about what a request *presents* rather than about who it turns out to be:
+/// a token cannot be refused alongside a cookie by a server that never looked for one.
+#[derive(Clone)]
+// The value itself goes unread until a token resolves to a principal (#57). What this type
+// answers today is *was one presented*, which is the whole of the rule above.
+pub(crate) struct ServiceToken(#[allow(dead_code)] String);
+
+impl ServiceToken {
+    /// Take a token as a caller presented it.
+    pub(crate) fn presented(value: String) -> Self {
+        Self(value)
+    }
+}
+
+/// A token is a live credential, and a credential that turns up in a log is spent.
+impl std::fmt::Debug for ServiceToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ServiceToken(withheld)")
+    }
+}
+
 /// Everything a request offers about who is making it, before anything is read from the
 /// store.
 ///
-/// Two things and no more. The **sign-in** is what a browser presents. The **acting role** is
-/// resolved by whoever calls this rather than read here — it is a session's assumed role
-/// (#37) or a service token's bound role (#57), and both are live facts this module does not
-/// reach for. Nothing supplies one yet, so `Grid` is refused today for want of a principal to
-/// check, which is the same default everything else here has.
+/// Three things and no more. The **sign-in** is what a browser presents and the **service
+/// token** is what a script presents, and a request carrying both is refused rather than
+/// resolved by precedence (v1 §3). The **acting role** is resolved by whoever calls this
+/// rather than read here — it is a session's assumed role (#37) or a service token's bound
+/// role (#57), and both are live facts this module does not reach for. Nothing supplies one
+/// yet, so `Grid` is refused today for want of a principal to check, which is the same
+/// default everything else here has.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Presented {
     sign_in: Option<SignInToken>,
+    service_token: Option<ServiceToken>,
     acting_role: Option<RoleId>,
 }
 
@@ -81,7 +108,16 @@ impl Presented {
     pub(crate) fn cookie(sign_in: Option<SignInToken>) -> Self {
         Self {
             sign_in,
+            service_token: None,
             acting_role: None,
+        }
+    }
+
+    /// ...and whatever it carried in an `Authorization` header.
+    pub(crate) fn and_service_token(self, service_token: Option<ServiceToken>) -> Self {
+        Self {
+            service_token,
+            ..self
         }
     }
 
@@ -95,6 +131,11 @@ impl Presented {
             acting_role: Some(role),
             ..self
         }
+    }
+
+    /// Whether this request presented more than one kind of credential.
+    fn mixes_credentials(&self) -> bool {
+        self.sign_in.is_some() && self.service_token.is_some()
     }
 }
 
@@ -131,6 +172,16 @@ pub(crate) async fn evaluate(
     presented: Presented,
     store: &Store,
 ) -> Result<Outcome, StoreError> {
+    // **A request carries exactly one credential kind** (v1 §3). Both is refused before the
+    // requirement is so much as looked at, and deliberately not resolved by precedence: a
+    // confused deputy needs somewhere to be confused, and a precedence order is that place.
+    // It is refused on a `Public` operation too, because the rule is about what the request
+    // presented rather than about what the operation needs — and nothing legitimate presents
+    // two credentials to fetch a stylesheet.
+    if presented.mixes_credentials() {
+        return Ok(Outcome::Refused);
+    }
+
     match requirement {
         Requirement::Public => Ok(Outcome::Permitted(Caller::Nobody)),
 
@@ -516,6 +567,56 @@ mod tests {
                 "expected {requirement:?} to be refused"
             );
         }
+    }
+
+    /// **A request carries exactly one credential kind** (v1 §3). Presenting a cookie and a
+    /// token together is refused rather than resolved by precedence, whatever the operation
+    /// would have said about either one on its own.
+    #[tokio::test]
+    async fn a_request_presenting_both_a_cookie_and_a_token_is_refused() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let user = transaction
+            .create_user(NewUser {
+                username: "root".to_owned(),
+                password_hash: None,
+                is_system_administrator: true,
+            })
+            .await
+            .expect("an administrator");
+        let token = transaction
+            .open_sign_in(&user)
+            .await
+            .expect("the sign-in to open");
+        transaction.commit().await.expect("the sign-in to land");
+
+        for requirement in [
+            Requirement::Public,
+            Requirement::SignedIn,
+            Requirement::SystemAdministration,
+        ] {
+            let outcome = evaluate(
+                &requirement,
+                Presented::cookie(Some(token.clone()))
+                    .and_service_token(Some(ServiceToken::presented("a-service-token".to_owned()))),
+                &store,
+            )
+            .await
+            .expect("an answer");
+
+            assert!(
+                !is_permitted(&outcome),
+                "{requirement:?} resolved a request carrying two credentials"
+            );
+        }
+    }
+
+    /// A token is a live credential, and one that turns up in a log is spent.
+    #[test]
+    fn a_service_token_does_not_print_itself() {
+        let token = ServiceToken::presented("a-service-token".to_owned());
+
+        assert_eq!(format!("{token:?}"), "ServiceToken(withheld)");
     }
 
     /// A signed-in user, and a loop somebody has ruled on with this role's cell set to

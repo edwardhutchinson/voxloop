@@ -8,6 +8,8 @@
 //! deployment is obliged to back up, and a backup should not be a drawer full of usable
 //! sign-ins.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use sqlx::Row;
 
@@ -63,6 +65,31 @@ pub(crate) trait SignIns {
     /// waiting for it to expire (v1 §2's lifetime table), and a user may hold one per
     /// machine — so signing them out means all of them or none.
     async fn end_every_sign_in(&mut self, user: &UserId) -> Result<(), StoreError>;
+
+    /// Note that whoever holds this sign-in has just done something deliberate.
+    ///
+    /// It is what the 24-hour window is measured from (v1 §2). *Deliberate* is ADR-0016's
+    /// notion, unchanged: something the person did, never something their browser did on
+    /// their behalf and never the server pushing at them — a console left open on a desk
+    /// has done nothing, which is the whole point of the window.
+    async fn note_a_deliberate_act(&mut self, token: &SignInToken) -> Result<(), StoreError>;
+
+    /// End every sign-in that has seen no deliberate act for `idle_for`, except `spared`.
+    ///
+    /// The exceptions are the sign-ins that hold a session, which the state authority
+    /// answers for: **the clock runs only in the lobby** (ADR-0023), and this is where that
+    /// rule is applied. They are passed in as values rather than looked up, because live
+    /// state and durable state meet by handing each other data and never by reaching across
+    /// ([ADR-0039]).
+    ///
+    /// Answers with whoever was signed out, so the act can be recorded against them.
+    ///
+    /// [ADR-0039]: ../../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+    async fn end_sign_ins_idle_for(
+        &mut self,
+        idle_for: Duration,
+        spared: &[SignInToken],
+    ) -> Result<Vec<UserId>, StoreError>;
 }
 
 #[async_trait]
@@ -70,13 +97,20 @@ impl SignIns for Transaction {
     async fn open_sign_in(&mut self, user: &UserId) -> Result<SignInToken, StoreError> {
         let token = SignInToken(secrets::unguessable());
 
-        sqlx::query("INSERT INTO sign_ins (fingerprint, user_id, started_at) VALUES (?, ?, ?)")
-            .bind(secrets::fingerprint(&token.0))
-            .bind(user.as_str())
-            .bind(now())
-            .execute(self.connection())
-            .await
-            .map_err(unavailable)?;
+        // Starting is itself the first deliberate act, so the window opens from here rather
+        // than from nothing.
+        let at = now();
+        sqlx::query(
+            "INSERT INTO sign_ins (fingerprint, user_id, started_at, last_active_at) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(secrets::fingerprint(&token.0))
+        .bind(user.as_str())
+        .bind(at)
+        .bind(at)
+        .execute(self.connection())
+        .await
+        .map_err(unavailable)?;
 
         Ok(token)
     }
@@ -110,6 +144,89 @@ impl SignIns for Transaction {
 
         Ok(())
     }
+
+    async fn note_a_deliberate_act(&mut self, token: &SignInToken) -> Result<(), StoreError> {
+        sqlx::query("UPDATE sign_ins SET last_active_at = ? WHERE fingerprint = ?")
+            .bind(now())
+            .bind(secrets::fingerprint(&token.0))
+            .execute(self.connection())
+            .await
+            .map_err(unavailable)?;
+
+        Ok(())
+    }
+
+    async fn end_sign_ins_idle_for(
+        &mut self,
+        idle_for: Duration,
+        spared: &[SignInToken],
+    ) -> Result<Vec<UserId>, StoreError> {
+        let cutoff = now().saturating_sub(milliseconds(idle_for));
+        // The spared are matched the way every other sign-in is: by fingerprint, so a token
+        // held live in memory is compared against the store without either side handing the
+        // other something it could sign in with.
+        let held: Vec<String> = spared
+            .iter()
+            .map(|token| secrets::fingerprint(&token.0))
+            .collect();
+
+        // Read the idle ones, then end the ones nobody is sparing. The obvious statement is
+        // one `DELETE` with the exceptions in a `NOT IN`, which means building SQL around
+        // how many there are; this reads the same and is built out of literal statements.
+        // The set is every sign-in nobody has touched for a day, so it is small by
+        // construction.
+        let idle =
+            sqlx::query("SELECT fingerprint, user_id FROM sign_ins WHERE last_active_at <= ?")
+                .bind(cutoff)
+                .fetch_all(self.connection())
+                .await
+                .map_err(unavailable)?;
+
+        let mut ended = Vec::new();
+        for row in idle {
+            let fingerprint: String = row.get("fingerprint");
+            if held.contains(&fingerprint) {
+                continue;
+            }
+
+            sqlx::query("DELETE FROM sign_ins WHERE fingerprint = ?")
+                .bind(&fingerprint)
+                .execute(self.connection())
+                .await
+                .map_err(unavailable)?;
+            ended.push(UserId::known(row.get("user_id")));
+        }
+
+        Ok(ended)
+    }
+}
+
+#[cfg(test)]
+impl Transaction {
+    /// Push a sign-in's clock back, the way time passing would.
+    ///
+    /// Tests only, and there is deliberately no product operation like it: nothing moves a
+    /// clock backwards, and the store holds when a sign-in was last active and nothing else,
+    /// so this is the whole of what ageing one is.
+    pub(crate) async fn a_sign_in_has_been_idle_for(
+        &mut self,
+        token: &SignInToken,
+        since: Duration,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE sign_ins SET last_active_at = ? WHERE fingerprint = ?")
+            .bind(now() - milliseconds(since))
+            .bind(secrets::fingerprint(&token.0))
+            .execute(self.connection())
+            .await
+            .map_err(unavailable)?;
+
+        Ok(())
+    }
+}
+
+/// A window as the store holds time: milliseconds, saturating rather than wrapping.
+fn milliseconds(window: Duration) -> i64 {
+    i64::try_from(window.as_millis()).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
@@ -293,6 +410,134 @@ mod tests {
             Some(elsewhere),
             "somebody else was signed out too"
         );
+    }
+
+    /// The window is measured from the last deliberate act, and a sign-in that has done
+    /// nothing since it started is measured from starting.
+    #[tokio::test]
+    async fn a_sign_in_idle_past_the_window_ends_and_a_fresh_one_stands() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let abandoned = a_user(&mut transaction, "flight").await;
+        let working = a_user(&mut transaction, "capcom").await;
+        let stale = transaction
+            .open_sign_in(&abandoned)
+            .await
+            .expect("the sign-in to open");
+        let fresh = transaction
+            .open_sign_in(&working)
+            .await
+            .expect("the sign-in to open");
+        idle_for(&mut transaction, &stale, Duration::from_secs(25 * 60 * 60)).await;
+
+        let ended = transaction
+            .end_sign_ins_idle_for(Duration::from_secs(24 * 60 * 60), &[])
+            .await
+            .expect("the sweep to answer");
+
+        assert_eq!(ended, vec![abandoned]);
+        assert_eq!(
+            transaction
+                .holder_of(&stale)
+                .await
+                .expect("the read to answer"),
+            None
+        );
+        assert_eq!(
+            transaction
+                .holder_of(&fresh)
+                .await
+                .expect("the read to answer"),
+            Some(working),
+            "a sign-in that had done something recently was swept up with the abandoned one"
+        );
+    }
+
+    /// A deliberate act restarts the window, which is what keeps somebody who is using
+    /// VoxLoop signed in without anything having to be renewed.
+    #[tokio::test]
+    async fn a_deliberate_act_restarts_the_window() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let user = a_user(&mut transaction, "flight").await;
+        let token = transaction
+            .open_sign_in(&user)
+            .await
+            .expect("the sign-in to open");
+        idle_for(&mut transaction, &token, Duration::from_secs(25 * 60 * 60)).await;
+
+        transaction
+            .note_a_deliberate_act(&token)
+            .await
+            .expect("the act to be noted");
+
+        let ended = transaction
+            .end_sign_ins_idle_for(Duration::from_secs(24 * 60 * 60), &[])
+            .await
+            .expect("the sweep to answer");
+        assert!(ended.is_empty(), "a sign-in in use was ended");
+        assert_eq!(
+            transaction
+                .holder_of(&token)
+                .await
+                .expect("the read to answer"),
+            Some(user)
+        );
+    }
+
+    /// The clock runs only in the lobby (ADR-0023): a sign-in holding a session is spared
+    /// however long it has been since anybody touched it, so an operator holding a role
+    /// through a thirty-hour incident is not signed out for failing to click anything.
+    #[tokio::test]
+    async fn a_sign_in_holding_a_session_is_spared_however_long_it_has_been_idle() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let occupant = a_user(&mut transaction, "flight").await;
+        let elsewhere = a_user(&mut transaction, "capcom").await;
+        let holding_a_role = transaction
+            .open_sign_in(&occupant)
+            .await
+            .expect("the sign-in to open");
+        let in_the_lobby = transaction
+            .open_sign_in(&elsewhere)
+            .await
+            .expect("the sign-in to open");
+        let thirty_hours = Duration::from_secs(30 * 60 * 60);
+        idle_for(&mut transaction, &holding_a_role, thirty_hours).await;
+        idle_for(&mut transaction, &in_the_lobby, thirty_hours).await;
+
+        let ended = transaction
+            .end_sign_ins_idle_for(
+                Duration::from_secs(24 * 60 * 60),
+                std::slice::from_ref(&holding_a_role),
+            )
+            .await
+            .expect("the sweep to answer");
+
+        assert_eq!(ended, vec![elsewhere]);
+        assert_eq!(
+            transaction
+                .holder_of(&holding_a_role)
+                .await
+                .expect("the read to answer"),
+            Some(occupant)
+        );
+        assert_eq!(
+            transaction
+                .holder_of(&in_the_lobby)
+                .await
+                .expect("the read to answer"),
+            None,
+            "a sign-in standing in the lobby outlasted the window because another one held a \
+             session"
+        );
+    }
+
+    async fn idle_for(transaction: &mut Transaction, token: &SignInToken, since: Duration) {
+        transaction
+            .a_sign_in_has_been_idle_for(token, since)
+            .await
+            .expect("the clock to be moved back");
     }
 
     /// There is no state in which a deleted user is signed in. Deleting is #31's operation;

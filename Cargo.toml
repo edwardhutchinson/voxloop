@@ -17,7 +17,7 @@ embed-web = ["dep:rust-embed"]
 [dependencies]
 argon2 = "0.6.0"
 async-trait = "0.1.92"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws"] }
 axum-extra = { version = "0.12.6", features = ["cookie"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 figment = { version = "0.10.19", features = ["toml", "env"] }
@@ -25,6 +25,7 @@ getrandom = "0.4.0"
 rustls = { version = "0.23.43", default-features = false, features = ["aws-lc-rs"] }
 rust-embed = { version = "8.12.0", features = ["mime-guess"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.145"
 sha2 = "0.11.0"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 thiserror = "2.0.20"
@@ -34,9 +35,14 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
 figment = { version = "0.10.19", features = ["test"] }
+# The signalling channel, driven from the outside: `futures-util` is the sink and stream the
+# client half is written against, and `tokio-tungstenite` is the framing. Both are already in
+# the tree — axum's `ws` feature brings them — and neither is reached for by the product.
+futures-util = { version = "0.3", default-features = false }
 rcgen = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots"] }
 tempfile = "3.27.0"
+tokio-tungstenite = { version = "0.29", default-features = false }
 tower = { version = "0.5.3", features = ["util"] }
 
 # Argon2id is deliberately expensive, and an unoptimised build makes it expensive enough to

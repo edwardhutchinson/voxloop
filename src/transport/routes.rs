@@ -23,7 +23,7 @@ use axum::response::Response;
 use axum::routing::{MethodRouter, any, delete, get, patch, post, put};
 use tracing::Instrument;
 
-use super::{answers, cookies, name_as_it_stands};
+use super::{answers, credentials, name_as_it_stands};
 use crate::authorisation::{self, Outcome, Presented, Requirement};
 use crate::configuration::{
     AuditEntry, AuditEvent, AuditLog, SignInToken, SignIns, Store, StoreError,
@@ -215,13 +215,15 @@ where
                     path = %request.uri().path()
                 );
 
-                let presented = cookies::presented(&axum_extra::extract::CookieJar::from_headers(
-                    request.headers(),
-                ));
+                // Both kinds of credential are read, because a request presenting two is
+                // refused rather than resolved by precedence (v1 §3) — and a server that
+                // never looked for a token could not refuse one.
+                let presented = credentials::presented(request.headers());
+                let sign_in = presented.sign_in.clone();
 
                 let mut answer = match authorisation::evaluate(
                     &requirement,
-                    Presented::cookie(presented.clone()),
+                    Presented::cookie(presented.sign_in).and_service_token(presented.service_token),
                     &store,
                 )
                 .await
@@ -242,7 +244,7 @@ where
 
                         if let Some(attempted) = Attempt::of(&requirement, &request)
                             && let Err(error) =
-                                record_a_refused_write(&store, attempted, presented).await
+                                record_a_refused_write(&store, attempted, sign_in).await
                         {
                             return answers::unavailable(&error);
                         }
