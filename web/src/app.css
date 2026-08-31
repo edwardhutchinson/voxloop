@@ -68,9 +68,9 @@ button {
 	cursor: pointer;
 }
 
-/* A select is written with the input because it is one on these pages: the two enrolment
-   pickers sit in the same `.new` row as an input and a button, and a control that took the
-   browser's own idea of a form would be the one light thing on a dark page. */
+/* A select is written with the input because it is one on these pages. The two eligibility
+   pickers are the only ones the console has, and a control left to the browser's own idea of
+   a form would be the one light thing on a dark page. */
 input,
 select {
 	font: inherit;
