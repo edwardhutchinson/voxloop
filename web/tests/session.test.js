@@ -213,6 +213,36 @@ test('taking up a role and giving it up are the two things a tab says about its 
 	]);
 });
 
+// **The client drives the media path ladder** (ADR-0042), so this is the message that ends
+// up merged with the server's own reading. It is the machine talking rather than the person
+// — the server does not count it towards the window that reaps sign-ins nobody is sitting at
+// — and it is said on the one channel live state travels on, like everything else.
+test('a tab says where its own media path stands, in the ladder’s own words', () => {
+	const channel = openSignalling(listening());
+	lastSocket().happens('open');
+
+	channel.mediaPath('impaired');
+	channel.mediaPath('lost');
+
+	assert.deepEqual(lastSocket().sent.slice(1), [
+		'{"message":"media-path","state":"impaired"}',
+		'{"message":"media-path","state":"lost"}'
+	]);
+});
+
+// Reporting is not rendering (ADR-0016). What a tab says about its own transport is one of
+// two readings the server merges pessimistically, and the console shows the answer that
+// comes back in the presence document rather than the half it just sent.
+test('reporting a media path tells the console nothing on its own', () => {
+	const page = listening();
+	const channel = openSignalling(page);
+	lastSocket().happens('open');
+
+	channel.mediaPath('lost');
+
+	assert.deepEqual(page.told, []);
+});
+
 // A socket that has gone is not somewhere to shout into. Nothing is queued either: an assume
 // that arrived after a reconnection would be a role taken up seconds after somebody asked
 // for it, on a console they may have walked away from.

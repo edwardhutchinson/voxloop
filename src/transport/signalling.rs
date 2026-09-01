@@ -46,7 +46,7 @@ use crate::configuration::{
     AuditEntry, AuditEvent, AuditLog, Eligibilities, Grid, Occupancy, Permission, Role, RoleId,
     Roles, SignInToken, SignIns, StoreError, Transaction, UserId, Users,
 };
-use crate::state::{Assuming, Ended, InReach, Relinquished, SessionId};
+use crate::state::{Assuming, Ended, InReach, MediaPath, Relinquished, SessionId};
 use crate::telemetry::module;
 
 /// How often the lobby is worked out again and pushed if it has moved.
@@ -154,6 +154,20 @@ enum Incoming {
     /// It is a full stop rather than a transition (v1 §2). Nothing survives it, and the
     /// socket is told the session ended before it is told what the lobby holds.
     Relinquish,
+    /// Where the client's end of the media path stands, on the ladder's own words.
+    ///
+    /// **The client drives this ladder and the server is the backstop** ([ADR-0042]): a
+    /// browser tells a transient `disconnected` from a terminal `failed`, and mediasoup's
+    /// `iceState` has no `failed` at all and takes around thirty seconds of ICE consent
+    /// freshness to say anything — longer than the whole signalling ladder. A
+    /// server-authoritative reading would keep emission live over a dead audio path for
+    /// longer than a lost state channel is tolerated.
+    ///
+    /// The two ends merge pessimistically wherever the document is projected: green needs
+    /// both, red needs one.
+    ///
+    /// [ADR-0042]: ../../../docs/adr/0042-the-media-path-has-its-own-ladder.md
+    MediaPath { state: String },
 }
 
 impl Incoming {
@@ -167,7 +181,24 @@ impl Incoming {
     fn requirement(&self) -> Requirement {
         match self {
             Self::Hello | Self::Assume { .. } => Requirement::SignedIn,
-            Self::Relinquish => Requirement::Session,
+            Self::Relinquish | Self::MediaPath { .. } => Requirement::Session,
+        }
+    }
+
+    /// Whether a person did this, or the client did it on their own account.
+    ///
+    /// The 24-hour window is measured from deliberate acts, and **nothing the server pushes
+    /// counts** (v1 §2) — the point of the window is to reap consoles nobody is sitting at.
+    /// A media path report is a machine noticing something about its own transport, so a
+    /// laptop left open on a desk with a flapping network would otherwise renew its own
+    /// sign-in indefinitely, which is the exact failure the window exists to prevent.
+    ///
+    /// Exhaustive, like the requirement above and for the same reason: a message nobody has
+    /// ruled on does not compile.
+    fn was_a_deliberate_act(&self) -> bool {
+        match self {
+            Self::Hello | Self::Assume { .. } | Self::Relinquish => true,
+            Self::MediaPath { .. } => false,
         }
     }
 
@@ -177,6 +208,7 @@ impl Incoming {
             Self::Hello => "hello",
             Self::Assume { .. } => "assume",
             Self::Relinquish => "relinquish",
+            Self::MediaPath { .. } => "media-path",
         }
     }
 }
@@ -279,6 +311,15 @@ struct Presence {
     /// The role this session is bound to. Exactly one, always: reach is never composed
     /// across roles and authority never belongs to the person (v1 §1).
     role: AssumedRole,
+    /// Where this session stands with the audio transport ([ADR-0042]).
+    ///
+    /// It is here because **emission has two independent withdrawal conditions** and the
+    /// transmit bar has to say which one applies: a lost state channel and a lost audio path
+    /// are different problems with different fixes, and one wording for both would send an
+    /// operator to look at the wrong thing.
+    ///
+    /// [ADR-0042]: ../../../docs/adr/0042-the-media-path-has-its-own-ladder.md
+    media_path: &'static str,
     loops: Vec<Reachable>,
 }
 
@@ -381,15 +422,19 @@ impl Conversation {
             }]);
         }
 
-        // Every one of these is a deliberate act by a person in front of a console, so each
-        // is one of the things the 24-hour window is measured from (v1 §2). Nothing the
-        // server pushes counts, which is why this is here rather than on the tick.
-        self.note_a_deliberate_act().await?;
+        // A deliberate act by a person in front of a console is one of the things the
+        // 24-hour window is measured from (v1 §2). Nothing the server pushes counts, which
+        // is why this is here rather than on the tick — and neither does a message the
+        // client sent on its own account, which is why it is asked rather than assumed.
+        if message.was_a_deliberate_act() {
+            self.note_a_deliberate_act().await?;
+        }
 
         match message {
             Incoming::Hello => self.whatever_this_socket_renders().await,
             Incoming::Assume { role } => self.assume(RoleId::presented(role)).await,
             Incoming::Relinquish => self.relinquish().await,
+            Incoming::MediaPath { state } => self.the_client_reports(&state).await,
         }
     }
 
@@ -479,6 +524,13 @@ impl Conversation {
             }
         };
 
+        // The displaced session is over the instant the state authority said so, so its
+        // media path goes now rather than after the audit: keeping a transport open for a
+        // session nothing can name any more is a fan-out nobody can close.
+        if let Some(displaced) = &assumed.displaced {
+            self.api.media.close_the_path_of(&displaced.session);
+        }
+
         let mut transaction = self.api.store.begin().await?;
         let recorded = async {
             // The displaced session is recorded first, because that is the order the two
@@ -521,10 +573,20 @@ impl Conversation {
             Err(error) => {
                 transaction.roll_back().await?;
                 self.api.state.ended_by_its_own_holder(&assumed.session);
+                // Nothing to close: the path is opened below, after this point, precisely so
+                // that an assume taken back leaves no transport behind.
 
                 return Err(error);
             }
         }
+
+        // **The path is opened once the seat is genuinely taken**, for the same reason the
+        // audit comes first: a seat is not taken unless the taking was recorded, and a
+        // transport built for a session that is about to be undone is one nobody would ever
+        // close. The media plane cannot refuse and cannot be awaited (ADR-0062), so this
+        // returns nothing — the transport arriving, or failing to, shows up on the reports
+        // channel as a media path state and reaches this document on a later tick.
+        self.api.media.open_a_path_for(&assumed.session);
 
         self.session = Some(assumed.session);
         self.sent_presence = None;
@@ -545,6 +607,12 @@ impl Conversation {
         };
         self.sent_presence = None;
 
+        // Audio stops, and that is the whole of what a relinquish is (v1 §2). It goes before
+        // the audit for the same reason the ending itself does: somebody asked to stop,
+        // stopping is the safe direction, and a store that cannot be written to is no reason
+        // to leave a transport open for a seat nobody is in.
+        self.api.media.close_the_path_of(&session);
+
         // No tombstone: this socket is the one doing it and is answered directly, so a
         // reason left behind would be a message with no reader.
         let Some(ended) = self.api.state.ended_by_its_own_holder(&session) else {
@@ -561,6 +629,33 @@ impl Conversation {
         self.audit_that_it_ended(&ended).await?;
 
         self.back_to_the_lobby(ended.why.said()).await
+    }
+
+    /// Take the client's reading of its own media path.
+    ///
+    /// The document is pushed **straight away** rather than on the next tick. Emission is
+    /// withdrawn on this ladder, and two hundred milliseconds of a console still offering a
+    /// key control over a dead audio path is two hundred milliseconds of exactly the lie the
+    /// ladder exists to prevent.
+    ///
+    /// A rung this server does not know is refused rather than read as the nearest one:
+    /// guessing would let a client hold emission open by mistyping.
+    async fn the_client_reports(&mut self, state: &str) -> Result<Vec<Outgoing>, StoreError> {
+        let Some(session) = self.session.clone() else {
+            // Unreachable: `Session` was met a moment ago, and only this socket clears it.
+            return Ok(Vec::new());
+        };
+
+        let Some(is) = MediaPath::presented(state) else {
+            return Ok(vec![Outgoing::Refused {
+                was: "media-path".to_owned(),
+                reason: "VoxLoop has no media path state by that name.".to_owned(),
+            }]);
+        };
+
+        self.api.state.the_client_says(&session, is);
+
+        self.presence(Told::OnlyIfItMoved).await
     }
 
     /// The presence document, if this socket should be sent one.
@@ -629,6 +724,7 @@ impl Conversation {
                     id: named.id.as_str().to_owned(),
                     name: named.name,
                 },
+                media_path: presence.media_path.as_str(),
                 loops: presence
                     .loops
                     .into_iter()
@@ -906,6 +1002,7 @@ mod tests {
         a_temporary_store,
     };
     use crate::identity::Identity;
+    use crate::media_plane::{Instructed, Recording, Reports, a_recording_media_plane};
     use crate::state::StateAuthority;
     use std::sync::Arc;
 
@@ -915,6 +1012,11 @@ mod tests {
         api: Api,
         user: UserId,
         sign_in: SignInToken,
+        /// What the media plane was told. No worker runs in a test ([ADR-0064]), so the
+        /// question a test can ask about the audio path is the only one there is about a
+        /// sink: what was it told to do, and in what order.
+        recording: std::sync::Arc<Recording>,
+        _reports: Reports,
     }
 
     impl ALobby {
@@ -953,17 +1055,22 @@ mod tests {
             }
             transaction.commit().await.expect("the deployment to land");
 
+            let (media, reports, recording) = a_recording_media_plane();
+
             Self {
                 _directory: directory,
                 api: Api {
                     store,
                     state,
                     identity: Identity::local_passwords(),
+                    media,
                     limits: Arc::new(super::super::RateLimits::default()),
                     bootstrap: None,
                 },
                 user,
                 sign_in,
+                recording,
+                _reports: reports,
             }
         }
 
@@ -1786,9 +1893,20 @@ mod tests {
         assert_eq!(said["role"]["name"], "Flight Director");
         assert_eq!(said["loops"][0]["name"], "Air-to-ground");
         assert_eq!(said["loops"][0]["permission"], "emit");
+        assert_eq!(said["media_path"], "lost");
         let mut named: Vec<&String> = said.as_object().expect("a document").keys().collect();
         named.sort();
-        assert_eq!(named, ["loops", "message", "role", "session", "version"]);
+        assert_eq!(
+            named,
+            [
+                "loops",
+                "media_path",
+                "message",
+                "role",
+                "session",
+                "version"
+            ]
+        );
     }
 
     /// The wire is JSON for the lobby too, and the lobby is scoped to the one question it
@@ -1994,6 +2112,259 @@ mod tests {
         assert!(
             reaped(&lobby.api.store).await.is_empty(),
             "a displaced console's sign-in was reaped for the time it spent on the air"
+        );
+    }
+
+    // ---- #40: the media path -----------------------------------------------------------
+
+    const A_LOST_PATH: &str = r#"{"message":"media-path","state":"lost"}"#;
+    const A_CONNECTED_PATH: &str = r#"{"message":"media-path","state":"connected"}"#;
+
+    /// What the document says this socket's media path is.
+    fn the_media_path(said: &Outgoing) -> &str {
+        the_presence(said).1.media_path
+    }
+
+    /// A media path is a session's, so it is opened by the act that creates one and by
+    /// nothing else — never by opening a socket, and never by being signed in.
+    #[tokio::test]
+    async fn assuming_a_role_opens_a_media_path_bound_to_the_session_it_created() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let role = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+
+        all(&mut socket, HELLO).await;
+        assert_eq!(
+            lobby.recording.instructions(),
+            Vec::new(),
+            "a socket in the lobby holds no session, so there is nothing to carry"
+        );
+
+        let said = said(&mut socket, &assuming(&role)).await;
+        let (_, presence) = the_presence(&said);
+
+        assert_eq!(
+            lobby.recording.instructions(),
+            vec![Instructed::APathWasOpenedFor(SessionId::presented(
+                presence.session.clone()
+            ))],
+            "the path is opened for the session the assume minted, and for nothing else"
+        );
+    }
+
+    /// A session that has just been minted has a transport being built and nobody connected
+    /// to it, so no audio can cross it. `lost` is the honest word for that, and the console
+    /// showing an armed, keyable operator instead is the misrepresentation the ladder exists
+    /// to prevent.
+    #[tokio::test]
+    async fn a_session_starts_with_no_media_path_and_the_document_says_so() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let role = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+
+        let said = said(&mut socket, &assuming(&role)).await;
+
+        assert_eq!(the_media_path(&said), "lost");
+    }
+
+    /// **Green needs both ends** ([ADR-0042]). One end saying so is not a media path.
+    ///
+    /// [ADR-0042]: ../../../docs/adr/0042-the-media-path-has-its-own-ladder.md
+    #[tokio::test]
+    async fn one_end_alone_never_makes_the_path_connected() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let role = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        let assumed = said(&mut socket, &assuming(&role)).await;
+        let session = SessionId::presented(the_presence(&assumed).1.session.clone());
+
+        // The client, alone. It says nothing back, because the document has not moved —
+        // which is itself the point: one end agreeing changed nothing.
+        assert_eq!(all(&mut socket, A_CONNECTED_PATH).await, Vec::new());
+        let one_end = said(&mut socket, HELLO).await;
+        assert_eq!(the_media_path(&one_end), "lost");
+
+        // And now the server too.
+        lobby
+            .api
+            .state
+            .the_server_sees(&session, MediaPath::Connected);
+        let both_ends = said(&mut socket, HELLO).await;
+        assert_eq!(the_media_path(&both_ends), "connected");
+    }
+
+    /// **Red needs one.** The client is the driver, so its word alone withdraws emission —
+    /// which is the whole reason the ladder is client-driven rather than read off an
+    /// `iceState` that takes thirty seconds to say anything.
+    #[tokio::test]
+    async fn either_end_alone_takes_the_path_away() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let role = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        let assumed = said(&mut socket, &assuming(&role)).await;
+        let session = SessionId::presented(the_presence(&assumed).1.session.clone());
+
+        lobby
+            .api
+            .state
+            .the_server_sees(&session, MediaPath::Connected);
+        all(&mut socket, A_CONNECTED_PATH).await;
+
+        let gone = said(&mut socket, A_LOST_PATH).await;
+        assert_eq!(the_media_path(&gone), "lost");
+    }
+
+    /// The document goes out on the report rather than on the next tick. Emission is
+    /// withdrawn on this ladder, and two hundred milliseconds of a console still offering a
+    /// key over a dead audio path is two hundred milliseconds of the lie.
+    #[tokio::test]
+    async fn a_report_pushes_the_document_at_once_and_moves_its_version() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let role = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        let assumed = said(&mut socket, &assuming(&role)).await;
+        let (first, presence) = the_presence(&assumed);
+        let session = SessionId::presented(presence.session.clone());
+        lobby
+            .api
+            .state
+            .the_server_sees(&session, MediaPath::Connected);
+
+        let reported = said(&mut socket, A_CONNECTED_PATH).await;
+        let (then, presence) = the_presence(&reported);
+
+        assert_eq!(presence.media_path, "connected");
+        assert!(
+            then > first,
+            "the document moved, so the version has to: {first} then {then}"
+        );
+    }
+
+    /// A rung this server does not know is refused rather than read as the nearest one.
+    /// Guessing would let a client hold emission open by mistyping.
+    #[tokio::test]
+    async fn a_media_path_state_voxloop_has_no_name_for_is_refused() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let role = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&role)).await;
+
+        let said = said(
+            &mut socket,
+            r#"{"message":"media-path","state":"degraded"}"#,
+        )
+        .await;
+
+        assert!(
+            matches!(&said, Outgoing::Refused { was, .. } if was == "media-path"),
+            "expected a refusal naming the message, got {said:?}"
+        );
+    }
+
+    /// It is `Session` (`docs/spec/api-surface.md`), so a socket standing in the lobby has
+    /// no media path to report on and is told so rather than quietly ignored.
+    #[tokio::test]
+    async fn a_media_path_report_from_the_lobby_is_refused() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, HELLO).await;
+
+        let said = said(&mut socket, A_LOST_PATH).await;
+
+        assert!(
+            matches!(&said, Outgoing::Refused { was, .. } if was == "media-path"),
+            "expected a refusal naming the message, got {said:?}"
+        );
+    }
+
+    /// **Nothing the machine does counts** (v1 §2). The 24-hour window exists to reap
+    /// consoles nobody is sitting at, and a laptop left open on a desk with a flapping
+    /// network would otherwise renew its own sign-in indefinitely.
+    #[tokio::test]
+    async fn a_media_path_report_is_not_a_deliberate_act() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let role = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&role)).await;
+        // A relinquish puts the sign-in back in the lobby, where the clock runs at all.
+        all(&mut socket, RELINQUISH).await;
+        aged(
+            &lobby.api.store,
+            &lobby.sign_in,
+            Duration::from_secs(25 * 60 * 60),
+        )
+        .await;
+        all(&mut socket, &assuming(&role)).await;
+        aged(
+            &lobby.api.store,
+            &lobby.sign_in,
+            Duration::from_secs(25 * 60 * 60),
+        )
+        .await;
+        all(&mut socket, RELINQUISH).await;
+        // The relinquish above was deliberate and restarted the clock, so age it again and
+        // then report, which must not.
+        aged(
+            &lobby.api.store,
+            &lobby.sign_in,
+            Duration::from_secs(25 * 60 * 60),
+        )
+        .await;
+
+        all(&mut socket, A_LOST_PATH).await;
+
+        assert_eq!(
+            reaped(&lobby.api.store).await,
+            vec![lobby.user.clone()],
+            "a media path report kept a sign-in alive that nobody had touched for a day"
+        );
+    }
+
+    /// A relinquish is a full stop, and audio stopping is the whole of what it is (v1 §2).
+    #[tokio::test]
+    async fn relinquishing_takes_the_media_path_with_it() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let role = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        let said = said(&mut socket, &assuming(&role)).await;
+        let session = SessionId::presented(the_presence(&said).1.session.clone());
+
+        all(&mut socket, RELINQUISH).await;
+
+        assert_eq!(
+            lobby.recording.instructions(),
+            vec![
+                Instructed::APathWasOpenedFor(session.clone()),
+                Instructed::ThePathWasClosedFor(session),
+            ]
+        );
+    }
+
+    /// A user has at most one session, so assuming anywhere ends whatever they had — and a
+    /// transport left open for a session nothing can name any more is a fan-out nobody can
+    /// close.
+    #[tokio::test]
+    async fn assuming_elsewhere_closes_the_displaced_session_s_media_path() {
+        let lobby = ALobby::with(&[("Flight Director", None), ("Capcom", None)]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let capcom = lobby.role_named("Capcom").await;
+
+        let mut here = lobby.a_socket();
+        let assumed = said(&mut here, &assuming(&flight)).await;
+        let displaced = SessionId::presented(the_presence(&assumed).1.session.clone());
+
+        let mut elsewhere = lobby.another_machine().await;
+        let there = said(&mut elsewhere, &assuming(&capcom)).await;
+        let taken_up = SessionId::presented(the_presence(&there).1.session.clone());
+
+        assert_eq!(
+            lobby.recording.instructions(),
+            vec![
+                Instructed::APathWasOpenedFor(displaced.clone()),
+                Instructed::ThePathWasClosedFor(displaced),
+                Instructed::APathWasOpenedFor(taken_up),
+            ],
+            "the displaced path is closed before the new one is opened"
         );
     }
 

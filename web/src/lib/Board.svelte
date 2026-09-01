@@ -18,7 +18,7 @@
 	// then pays the two-view cost as it goes.
 	import TransmitBar from './TransmitBar.svelte';
 
-	let { loops } = $props();
+	let { loops, mediaPath } = $props();
 </script>
 
 <ul class="board">
@@ -34,7 +34,7 @@
      the cards are scanned rather than read, and the bar is the one thing on the page that is
      not a loop. The page's own `--space-page-bottom` is what keeps the last row clear of it. -->
 <div class="transmit">
-	<TransmitBar />
+	<TransmitBar {mediaPath} />
 </div>
 
 <style>

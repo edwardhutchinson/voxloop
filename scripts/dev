@@ -12,7 +12,8 @@
 #
 # There is still no default credential: the password is random per store. Set
 # VOXLOOP_DEV_PASSWORD in your shell to keep one across `--fresh` runs. VOXLOOP_DEV_PORT
-# moves the port; VOXLOOP_DEV_ADMINISTRATOR names the administrator.
+# moves the port and VOXLOOP_DEV_MEDIA_PORT the audio one; VOXLOOP_DEV_ADMINISTRATOR names
+# the administrator.
 
 set -euo pipefail
 
@@ -20,6 +21,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 DEV=.dev
 PORT="${VOXLOOP_DEV_PORT:-8443}"
+MEDIA_PORT="${VOXLOOP_DEV_MEDIA_PORT:-44444}"
 ADMINISTRATOR="${VOXLOOP_DEV_ADMINISTRATOR:-root}"
 # 127.0.0.1 rather than localhost, deliberately: `localhost` resolves to ::1 first on most
 # boxes, the binary listens on one address, and a browser that tries IPv6 loopback against an
@@ -82,6 +84,13 @@ address = "127.0.0.1:$PORT"
 [tls]
 certificate = "$HERE/certificate.pem"
 private_key = "$HERE/private-key.pem"
+
+# One port for audio, UDP with ICE-TCP on the same number. Loopback, because the browser
+# doing the talking is on this machine and nothing else has any business reaching it.
+[media]
+announced_address = "127.0.0.1"
+listen_address = "127.0.0.1"
+port = $MEDIA_PORT
 
 [store]
 path = "$HERE/voxloop.sqlite"

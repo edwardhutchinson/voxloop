@@ -29,9 +29,11 @@ mod authorisation;
 mod configuration;
 mod identity;
 mod lifetimes;
+mod media_plane;
 mod on_box;
 mod secrets;
 mod state;
+mod supervision;
 mod telemetry;
 mod transport;
 
@@ -42,6 +44,7 @@ use std::sync::Arc;
 
 use configuration::{Deployment, DeploymentError, Store, StoreError};
 use identity::{Bootstrap, Identity};
+use media_plane::{MediaPlane, MediaPlaneError};
 use on_box::{Invocation, OnBoxError};
 use state::StateAuthority;
 use telemetry::{TelemetryError, module};
@@ -74,6 +77,9 @@ enum StartupError {
 
     #[error(transparent)]
     Store(#[from] StoreError),
+
+    #[error(transparent)]
+    MediaPlane(#[from] MediaPlaneError),
 
     #[error(transparent)]
     Transport(#[from] TransportError),
@@ -143,11 +149,21 @@ async fn serve(deployment: &Path) -> Result<(), StartupError> {
     // survive, so everybody who was on console is signed in, in the lobby.
     let state = Arc::new(StateAuthority::empty());
 
+    // One Worker, one Router and one port, before anything is served. A deployment that
+    // cannot carry audio has lost its whole purpose, so it refuses to start rather than
+    // offering a console that will never make a sound (ADR-0006).
+    let (media, reports, carriageway) = MediaPlane::carrying(&deployment.media).await?;
+
+    // The media plane calls nothing and reports on a channel (ADR-0062), so this is what
+    // turns what it says into live state. It starts before the first session can exist.
+    let watching = supervision::watching(reports, Arc::clone(&state));
+
     let serving = transport::start(
         &deployment,
         Arc::clone(&store),
         Arc::clone(&state),
         Identity::local_passwords(),
+        media,
         bootstrap,
     )
     .await?;
@@ -163,7 +179,13 @@ async fn serve(deployment: &Path) -> Result<(), StartupError> {
 
     // A restart is indistinguishable from total network loss to every client, and it ends
     // every session, so the least this can do is put the store down cleanly.
+    //
+    // The order is sockets, then reports, then audio, then the store: a console still being
+    // answered may yet be told something, a report still in flight is still worth writing
+    // down, and nothing is owed to a port nobody is listening on.
     serving.stop().await;
+    watching.stop();
+    carriageway.stop();
     store.close().await;
     tracing::info!(target: module::TRANSPORT, "stopped");
 

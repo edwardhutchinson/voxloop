@@ -22,6 +22,16 @@ axum-extra = { version = "0.12.6", features = ["cookie"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 figment = { version = "0.10.19", features = ["toml", "env"] }
 getrandom = "0.4.0"
+# **Pinned exactly, and the `=` is load-bearing** (v1 §13). Cargo treats a `0.x` minor bump
+# as breaking, and this dependency is the audio path: an upgrade that arrived on its own
+# would change ICE, DTLS and RTP behaviour under a deployment nobody had tested it on.
+#
+# The upgrade rule: bump this line by hand, as its own commit, having read the changelog
+# between the two versions and ADR-0070 for what the crate promises about the worker's
+# lifetime. It is scheduled work with a load test behind it (ADR-0006), never a `cargo
+# update`. The worker is compiled from source by `mediasoup-sys`, so a bump is a long build
+# and a new `libmediasoup-worker` inside the binary rather than a file swap beside it.
+mediasoup = "=0.27.0"
 rustls = { version = "0.23.43", default-features = false, features = ["aws-lc-rs"] }
 rust-embed = { version = "8.12.0", features = ["mime-guess"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }

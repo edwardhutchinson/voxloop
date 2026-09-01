@@ -19,6 +19,12 @@
 // role.
 //
 // Resuming a session by name, and the gap events that come with it, are still to come (#50).
+//
+// **Not everything a tab says is a person saying it.** A media path report is this client
+// noticing something about its own transport, and the server does not count it towards the
+// window that reaps sign-ins nobody is sitting at (v1 §2) — which is why the two acts a
+// person performs and the one the machine performs sit side by side below without being
+// written the same way.
 
 const HELLO = JSON.stringify({ message: 'hello' });
 
@@ -47,7 +53,7 @@ function where() {
  * - `onLost()` — the channel went away without saying anything. Nothing has ended; the
  *   console simply cannot see any more, and says so rather than blanking.
  *
- * Answers with the two acts a tab can perform on its own session, and the way to close it.
+ * Answers with the acts a tab can perform on its own session, and the way to close it.
  */
 export function openSignalling({
 	onLobby,
@@ -97,6 +103,25 @@ export function openSignalling({
 		 * two are one thing.
 		 */
 		relinquish: () => say(socket, { message: 'relinquish' }),
+		/**
+		 * Say where this tab's media path stands: `connected`, `impaired` or `lost`.
+		 *
+		 * **The client drives this ladder** (ADR-0042), and the reason is in the two APIs. A
+		 * browser's `RTCPeerConnection` tells a transient `disconnected` — which routinely
+		 * heals itself in a second — from a terminal `failed`. mediasoup's server-side
+		 * `iceState` has no `failed` at all and takes around thirty seconds of ICE consent
+		 * freshness to say anything, which is longer than the whole signalling ladder, so a
+		 * server-authoritative reading would leave the key control live over a dead audio
+		 * path for longer than a lost channel is tolerated.
+		 *
+		 * The server merges this with its own end pessimistically — green needs both, red
+		 * needs one — and pushes the answer back in the presence document. **Nothing here
+		 * renders off what it just said**: this tab reports, and then reads the document like
+		 * everything else (ADR-0016).
+		 *
+		 * The peer connection that drives it is the Audio module's, and it is not built yet.
+		 */
+		mediaPath: (state) => say(socket, { message: 'media-path', state }),
 		close: () => {
 			told = true;
 			socket.close();

@@ -9,14 +9,32 @@ rather than why. [`docs/adr/`](docs/adr/) holds the reasoning.
 
 ## What runs
 
-One Rust binary — console, API, signalling, permission enforcement and TLS — beside the
-mediasoup worker, the text-to-speech sidecar and one SQLite file. No reverse proxy, no Node
+One Rust binary — console, API, signalling, permission enforcement, TLS and the mediasoup
+worker — beside the text-to-speech sidecar and one SQLite file. No reverse proxy, no Node
 runtime, and one systemd unit ([ADR-0040](docs/adr/0040-one-binary-one-unit-four-moving-parts.md)).
+
+The mediasoup worker is **linked into the binary and runs on a thread of it** rather than
+beside it as a child process
+([ADR-0070](docs/adr/0070-the-mediasoup-worker-is-a-thread-of-this-process.md)) — the Rust
+API works that way, where the Node.js one spawns a child. Its health is observed on a channel
+and reaches the console as **media path state**, and a worker that dies takes every session's
+audio path with it and ends no session.
 
 ## Building
 
-A bare `cargo build` needs nothing but Rust. It does not embed the console, and does not
-need Node or `web/dist` to exist.
+`cargo build` needs Rust, a **C++ toolchain** and **Python 3**. The last two are `mediasoup-sys`,
+which compiles `libmediasoup-worker` from source and bootstraps meson and ninja into a
+throwaway virtualenv to do it. It is a few minutes the first time and cached afterwards, and
+it is the price of the worker being inside the binary rather than beside it
+([ADR-0070](docs/adr/0070-the-mediasoup-worker-is-a-thread-of-this-process.md)).
+
+The mediasoup crate is **pinned exactly** — the `=` in `Cargo.toml` is load-bearing, because
+cargo treats every `0.x` minor bump as breaking and this is the audio path. Upgrading it is
+scheduled work: bump the line by hand as its own commit, having read the changelog between
+the two versions, and re-run the load test ([ADR-0006](docs/adr/0006-mediasoup-carries-the-audio.md)).
+Never a `cargo update`.
+
+That build does not embed the console, and does not need Node or `web/dist` to exist.
 
 A **release** build embeds the console, and has an ordering requirement:
 
@@ -72,6 +90,14 @@ cargo run
 `cargo run` takes the deployment file as its first argument, or from `VOXLOOP_CONFIG`, or
 as `voxloop.toml` in the working directory. Every value in it can be overridden from the
 environment: `VOXLOOP_LISTEN__ADDRESS=127.0.0.1:9443 cargo run`.
+
+The file's `[media]` section has **the one value with no default**: `announced_address`,
+which is what goes into every ICE candidate and so is the address a client dials rather than
+the one the box binds. Get it wrong and VoxLoop comes up, serves the console and fills its
+seats while no audio ever arrives, so a deployment that has not said where it is does not
+start. The rest of the section is one port carrying UDP with ICE-TCP on the same number, and
+there is no TURN server to configure
+([ADR-0006](docs/adr/0006-mediasoup-carries-the-audio.md)).
 
 ## First start
 
@@ -205,8 +231,8 @@ moment.
 
 **The document is the API.** Whatever the console renders is in it, and anything in it is
 something the server has committed to keeping true. It carries the session, the role it is
-bound to, and the loops in reach; subscriptions, arms, staffing state, loop health and the
-audience land in it one ticket at a time.
+bound to, its **media path state**, and the loops in reach; subscriptions, arms, staffing
+state, loop health and the audience land in it one ticket at a time.
 
 It is **scoped to reach** — only loops the session's role holds at least `monitor` on — and
 it is recomputed on every tick, so a grid edit narrows or widens a live session's document
@@ -219,6 +245,44 @@ same state* stays answerable. The wire is JSON at a ~5 Hz tick.
 `permessage-deflate` with context takeover is specified and **not yet built** — the WebSocket
 implementation underneath negotiates no extensions — which costs bandwidth and nothing else
 ([#78](https://github.com/edwardhutchinson/voxloop/issues/78)).
+
+## The media path
+
+A session gets a **WebRTC transport of its own, bound to it at creation**, opened by the
+assume that minted the session and closed by whatever ends it. One Worker, one Router and one
+shared `WebRtcServer` port carry all of them, because a loop is not a transport primitive: a
+transport belongs to one router, so a router per loop would give somebody monitoring six
+loops six ICE and DTLS sessions.
+
+**No audio is routed yet.** What exists is the pipe and a reading of its condition. The
+media plane's interface names domain operations only — open a path, close a path, make this
+audience hear this talker — and **it executes routing rather than computing it**
+([ADR-0063](docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md)): no
+subscription, arm set or permission rung crosses into it, and a loop crosses only as an
+opaque label. It is a **sink** ([ADR-0062](docs/adr/0062-the-call-graph-is-acyclic-and-effects-modules-are-sinks.md)):
+it calls nothing, every operation on it answers nothing, and what it has to say it says on a
+channel. mediasoup's callbacks fire on mediasoup's threads, so that channel is the whole of
+the bridge into axum — no blocking call, no borrowed tokio handle.
+
+**Media path state** is a session's standing with the audio transport: `connected`,
+`impaired` (a transient fault that routinely clears itself, through which emission stands) or
+`lost` (emission withdrawn)
+([ADR-0042](docs/adr/0042-the-media-path-has-its-own-ladder.md)). It is a **second, entirely
+independent axis** from the signalling channel — a session can be told everything and heard
+by nobody — and it is in the presence document because the transmit bar has to say **which**
+of the two withdrawal conditions applies.
+
+It is **client-driven and server-backstopped**. A browser tells a transient `disconnected`
+from a terminal `failed`; mediasoup's `iceState` has no `failed` at all and takes around
+thirty seconds of ICE consent freshness to say anything, which is longer than the whole
+signalling ladder — so the client reports over the socket and the server's
+`on_ice_state_change` and `on_dtls_state_change` cover the client that is wedged or lying.
+The two ends **merge pessimistically: green needs both, red needs one.** A session that has
+just been minted reads `lost` at both ends, because a transport nobody has connected to
+carries no audio, and that is what the bar says.
+
+The client half of the report exists on the socket and nothing drives it yet: the peer
+connection it would read is the Audio module's, and that arrives with the client's audio.
 
 ## The operating console
 
@@ -248,8 +312,9 @@ identically** and **never scrolled away**
 ([ADR-0034](docs/adr/0034-the-transmit-bar-is-always-visible-and-the-audience-is-a-count.md)):
 on the board it closes the field along the bottom edge, and in the ledger it rides above the
 rows rather than under a table of unknown length. It is one component so that it is one
-wording. **It is empty at this point and says so** — the armed set and the key state arrive
-with arming and keying, and the two audience counts after that.
+wording. The armed set and the key state arrive with arming and keying, and the two audience
+counts after that; what it carries today is **media path state**, because that is the first
+thing it has to say that withdraws emission.
 
 **Nothing renders optimistically**
 ([ADR-0016](docs/adr/0016-displayed-state-is-observed-or-asserted.md)). Neither view keeps any
@@ -468,3 +533,11 @@ cd web && npm test              # the console: the seam rule, the styling standa
 Tests run against the real store: each one opens a temporary SQLite file, migrates it and
 throws it away. There is no in-memory repository and there will not be one
 ([ADR-0064](docs/adr/0064-tests-run-against-the-real-store.md)).
+
+The **media plane** is one of exactly two seams with a fake, and the fake is a **recorder**
+rather than a simulation: it writes down what it was told and does nothing else, so a test
+asserts on the instructions rather than on a transport. That is what keeps every routing rule
+testable with no worker running — and it is why the fake must never grow an opinion about
+what it was handed. One test is the exception and runs a real Worker, Router and
+`WebRtcServer` on whatever port is free, because a seam with nothing real behind it is a
+reserved space rather than a proven boundary.
