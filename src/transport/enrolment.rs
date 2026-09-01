@@ -113,6 +113,7 @@ async fn enrol(
             // administrator issuing the code is the write.
             write: None,
             operation: None,
+            occupancy: None,
         })
         .await?;
     transaction.commit().await?;
@@ -148,6 +149,7 @@ async fn refuse(api: &Api, source: &SocketAddr) -> Result<Response, StoreError> 
             source: Some(source.ip()),
             write: None,
             operation: None,
+            occupancy: None,
         })
         .await?;
     transaction.commit().await?;

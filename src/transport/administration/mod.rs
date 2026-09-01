@@ -83,6 +83,7 @@ impl Administrator {
             source: None,
             write: Some(write),
             operation: None,
+            occupancy: None,
         }
     }
 }

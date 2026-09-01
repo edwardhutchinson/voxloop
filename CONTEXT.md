@@ -90,6 +90,14 @@ _Avoid_: occupancy (which belongs to roles), online/offline, presence, availabil
 A user's single live connection to the voice loops, created by assuming a role and bound to exactly one. A user has at most one at a time, though they may be signed in on several machines; assuming a role elsewhere ends the previous session and tells it why. Losing the signalling channel does not end it — the session is held for the reconnection window and resumed by name.
 _Avoid_: connection, client, device, login, sign-in (which is the outer act and outlives every session)
 
+**Session id**:
+The name a session is minted with, kept per tab and presented when a client reattaches. It is deliberately **not a credential**: it travels on a channel the sign-in has already authenticated and can only ever select among that user's own sessions, so holding somebody else's buys nothing. It exists because the cookie names the user and a reconnecting client has to say which session it means.
+_Avoid_: session token, session key, connection id
+
+**Tombstone**:
+The record of a session that has ended — its name, why it ended, and when — kept for a short while so a client that was not the one doing the ending is told what happened rather than merely that something did. It is live state, so it does not survive a restart, and once it is gone the honest answer is the generic one.
+_Avoid_: session history, audit entry (which is the durable record of the same act), error, notification
+
 **Resume**:
 Reattaching a client to a session it already holds, after losing and regaining the signalling channel. It is not an act the user performs and not a new session — everything the server holds simply becomes visible again — so it confers nothing, clears nothing, and is never evidence that a human came back to the chair.
 _Avoid_: reconnect (which is the channel's recovery, not the session's), rejoin, restore, re-assume

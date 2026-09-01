@@ -28,6 +28,7 @@ use crate::authorisation::{self, Caller, Outcome, Presented, Requirement};
 use crate::configuration::{
     AuditEntry, AuditEvent, AuditLog, SignInToken, SignIns, Store, StoreError,
 };
+use crate::state::StateAuthority;
 use crate::telemetry::module;
 
 /// Every route the server answers on, each with the requirement it was registered under.
@@ -38,17 +39,25 @@ pub(super) struct RouteTable<S = ()> {
     /// it was registered against is known.
     fallback: Option<MethodRouter<S>>,
     store: Arc<Store>,
+    /// Handed to the evaluator with the store, because two of the six requirements are about
+    /// a role somebody is occupying and that is live rather than durable. No route registered
+    /// here carries one today — every operation above `SignedIn` is a signalling-channel
+    /// message (`docs/spec/api-surface.md`) — and the guard is built the same way regardless,
+    /// because a requirement that could only be met on one transport would be a seventh rule
+    /// nobody wrote down.
+    state: Arc<StateAuthority>,
 }
 
 impl<S> RouteTable<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    pub(super) fn new(store: Arc<Store>) -> Self {
+    pub(super) fn new(store: Arc<Store>, state: Arc<StateAuthority>) -> Self {
         Self {
             router: Router::new(),
             fallback: None,
             store,
+            state,
         }
     }
 
@@ -109,7 +118,12 @@ where
         H: Handler<T, S>,
         T: 'static,
     {
-        self.fallback = Some(guarded(requirement, self.store.clone(), any(handler)));
+        self.fallback = Some(guarded(
+            requirement,
+            self.store.clone(),
+            self.state.clone(),
+            any(handler),
+        ));
         self
     }
 
@@ -188,7 +202,12 @@ where
         requirement: Requirement,
         method_router: MethodRouter<S>,
     ) -> Self {
-        let guarded = guarded(requirement, self.store.clone(), method_router);
+        let guarded = guarded(
+            requirement,
+            self.store.clone(),
+            self.state.clone(),
+            method_router,
+        );
         self.router = self.router.route(path, guarded);
         self
     }
@@ -198,6 +217,7 @@ where
 fn guarded<S>(
     requirement: Requirement,
     store: Arc<Store>,
+    state: Arc<StateAuthority>,
     method_router: MethodRouter<S>,
 ) -> MethodRouter<S>
 where
@@ -207,6 +227,7 @@ where
         move |mut request: Request, next: Next| {
             let requirement = requirement.clone();
             let store = Arc::clone(&store);
+            let state = Arc::clone(&state);
             async move {
                 let span = tracing::info_span!(
                     target: module::TRANSPORT,
@@ -225,6 +246,7 @@ where
                     &requirement,
                     Presented::cookie(presented.sign_in).and_service_token(presented.service_token),
                     &store,
+                    &state,
                 )
                 .await
                 {
@@ -363,6 +385,7 @@ async fn record_a_refused_write(
             // to be about. Which operation was attempted is the whole of the entry.
             write: None,
             operation: Some(attempted.operation),
+            occupancy: None,
         })
         .await?;
     transaction.commit().await?;
@@ -405,7 +428,10 @@ mod tests {
 
     async fn a_table() -> (tempfile::TempDir, RouteTable) {
         let (directory, store) = a_temporary_store().await;
-        (directory, RouteTable::new(Arc::new(store)))
+        (
+            directory,
+            RouteTable::new(Arc::new(store), Arc::new(StateAuthority::empty())),
+        )
     }
 
     async fn status_of(table: RouteTable, path: &str) -> StatusCode {
@@ -458,6 +484,7 @@ mod tests {
             router: Router::new().route("/sneaked", get(answer)),
             fallback: None,
             store: Arc::new(store),
+            state: Arc::new(StateAuthority::empty()),
         };
 
         assert_eq!(status_of(sneaked, "/sneaked").await, StatusCode::FORBIDDEN);

@@ -171,6 +171,24 @@ pub(crate) trait Grid {
     /// [ADR-0015]: ../../../docs/adr/0015-the-admin-console-reads-one-row-at-a-time.md
     async fn the_row_of(&mut self, role: &RoleId) -> Result<Option<(Role, Vec<Cell>)>, StoreError>;
 
+    /// A role's **reach**: every loop it holds at least `rung` on, in the base loop order.
+    ///
+    /// It is the row read that **decides** rather than reports, so it is [`Grid::held_by`]
+    /// over a whole row rather than [`Grid::the_row_of`] filtered — an unreviewed loop is
+    /// `none` here, exactly as it is to the evaluator. Reading the reporting row and
+    /// filtering it would put a loop nobody has ruled on into a session's presence document
+    /// while the evaluator refused every message about it.
+    ///
+    /// This is what scopes the presence document ([ADR-0019]): a session receives presence
+    /// only for loops its role holds at least `monitor` on.
+    ///
+    /// [ADR-0019]: ../../../docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md
+    async fn the_reach_of(
+        &mut self,
+        role: &RoleId,
+        rung: Permission,
+    ) -> Result<Vec<(Loop, Permission)>, StoreError>;
+
     /// A loop's column: the loop, and every role by name with what it holds on it.
     ///
     /// This is a loop page, and it answers *who may hear this loop*.
@@ -290,6 +308,39 @@ impl Grid for Transaction {
             .collect::<Result<_, StoreError>>()?;
 
         Ok(Some((role, cells)))
+    }
+
+    async fn the_reach_of(
+        &mut self,
+        role: &RoleId,
+        rung: Permission,
+    ) -> Result<Vec<(Loop, Permission)>, StoreError> {
+        let rows = sqlx::query(
+            // The same `CASE` `held_by` carries, for the same reason: a loop nobody has
+            // ruled on is `none` whatever its cells hold, and it is answered that way here
+            // rather than by a caller remembering to ask.
+            "SELECT loops.id AS id, loops.name AS name, loops.is_unreviewed AS is_unreviewed, \
+                    CASE WHEN loops.is_unreviewed <> 0 THEN 'none' \
+                         ELSE COALESCE(grid_cells.permission, 'none') END AS permission \
+             FROM loops \
+             LEFT JOIN grid_cells \
+               ON grid_cells.loop_id = loops.id AND grid_cells.role_id = ? \
+             ORDER BY loops.position, loops.created_at, loops.id",
+        )
+        .bind(role.as_str())
+        .fetch_all(self.connection())
+        .await
+        .map_err(unavailable)?;
+
+        rows.iter()
+            .map(|row| Ok((a_loop(row), a_permission(row, "permission")?)))
+            .collect::<Result<Vec<_>, StoreError>>()
+            .map(|reach| {
+                reach
+                    .into_iter()
+                    .filter(|(_held_on, permission)| permission.carries(rung))
+                    .collect()
+            })
     }
 
     async fn the_column_of(
@@ -990,5 +1041,142 @@ mod tests {
             Permission::None,
             "a loop nobody holds conferred reach"
         );
+    }
+
+    /// A role's reach is the loops it holds at least the named rung on, in the base order —
+    /// and it is the **deciding** read, so a rung short of the one asked for is not in it.
+    #[tokio::test]
+    async fn the_reach_of_a_role_is_the_loops_it_holds_the_rung_on() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let (role, air_to_ground) =
+            a_role_and_a_reviewed_loop(&mut transaction, "Flight Director", "Air-to-ground").await;
+        let flight = transaction
+            .create_loop("Flight Director")
+            .await
+            .expect("the loop to be created");
+        let surgeon = transaction
+            .create_loop("Surgeon")
+            .await
+            .expect("the loop to be created");
+        for held_on in [&flight, &surgeon] {
+            transaction
+                .dismiss_unreviewed(held_on)
+                .await
+                .expect("the loop to be ruled on");
+        }
+        transaction
+            .set_cell(&role, &air_to_ground, Permission::Emit)
+            .await
+            .expect("the cell to be set");
+        transaction
+            .set_cell(&role, &flight, Permission::Monitor)
+            .await
+            .expect("the cell to be set");
+        transaction
+            .set_cell(&role, &surgeon, Permission::None)
+            .await
+            .expect("the cell to be set");
+
+        let reach = transaction
+            .the_reach_of(&role, Permission::Monitor)
+            .await
+            .expect("the reach to be readable");
+
+        assert_eq!(
+            reach
+                .iter()
+                .map(|(held_on, permission)| (held_on.name.as_str(), *permission))
+                .collect::<Vec<_>>(),
+            [
+                ("Air-to-ground", Permission::Emit),
+                ("Flight Director", Permission::Monitor)
+            ]
+        );
+
+        let may_emit = transaction
+            .the_reach_of(&role, Permission::Emit)
+            .await
+            .expect("the reach to be readable");
+        assert_eq!(
+            may_emit
+                .iter()
+                .map(|(held_on, _permission)| held_on.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Air-to-ground"]
+        );
+
+        transaction.roll_back().await.expect("the read to close");
+    }
+
+    /// **A loop nobody has ruled on is out of reach**, whatever its cells hold — the same
+    /// answer `held_by` gives, because this is the same read over a whole row rather than a
+    /// second one that could disagree with it.
+    #[tokio::test]
+    async fn an_unreviewed_loop_is_out_of_reach_whatever_its_cells_hold() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let role = transaction
+            .create_role(NewRole {
+                name: "Flight Director".to_owned(),
+                max_occupants: Some(1),
+            })
+            .await
+            .expect("the role to be created");
+        let unreviewed = transaction
+            .create_loop("Air-to-ground")
+            .await
+            .expect("the loop to be created");
+        transaction
+            .set_cell(&role, &unreviewed, Permission::Control)
+            .await
+            .expect("the cell to be set");
+
+        let reach = transaction
+            .the_reach_of(&role, Permission::Monitor)
+            .await
+            .expect("the reach to be readable");
+
+        assert!(reach.is_empty());
+        assert_eq!(
+            transaction
+                .held_by(&role, &unreviewed)
+                .await
+                .expect("the lookup to answer"),
+            Permission::None,
+            "the deciding lookup and the reach disagreed about the same cell"
+        );
+
+        transaction.roll_back().await.expect("the read to close");
+    }
+
+    /// A role nobody has given anything reaches nothing, and a role that is not there
+    /// reaches nothing either — an id nobody holds is not a special case.
+    #[tokio::test]
+    async fn a_role_with_no_cells_reaches_nothing() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let (role, _held_on) =
+            a_role_and_a_reviewed_loop(&mut transaction, "Flight Director", "Air-to-ground").await;
+
+        assert!(
+            transaction
+                .the_reach_of(&role, Permission::Monitor)
+                .await
+                .expect("the reach to be readable")
+                .is_empty()
+        );
+        assert!(
+            transaction
+                .the_reach_of(
+                    &RoleId::presented("no-such-role".to_owned()),
+                    Permission::Monitor
+                )
+                .await
+                .expect("the reach to be readable")
+                .is_empty()
+        );
+
+        transaction.roll_back().await.expect("the read to close");
     }
 }

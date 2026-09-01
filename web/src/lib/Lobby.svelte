@@ -8,19 +8,28 @@
 	// in full rather than as a word: the lobby is read once and deliberately, by somebody
 	// about to be in a position to fix what it says.
 	//
-	// Assuming a role is the act this page is for and it is not built yet, so this page does
-	// not pretend otherwise: there is no button here that does nothing.
+	// **Assuming is the act this page is for**, and it is the only one on it. An occupied
+	// single-occupant seat is offered as unavailable and says so in words rather than being
+	// hidden: a role missing from this list would be indistinguishable from one nobody made
+	// this person eligible for, and those are different facts. Asking its occupant for it is
+	// a takeover request and arrives with #50.
 	//
 	// The document arrives from the frame rather than from a socket of this page's own,
 	// because the socket belongs to the tab and is opened at sign-in — an administrator
 	// reading the admin console has not left the lobby, and their socket has not closed.
-	let { lobby, lost, refused } = $props();
+	let { lobby, lost, refused, relinquished, onAssume } = $props();
 
 	// A seat nobody is in is the answer this page exists to give, so it is said in words
 	// rather than left as an empty cell.
 	const occupancy = (role) => (role.occupants.length ? role.occupants.join(', ') : 'Nobody');
 
 	const limit = (role) => (role.max_occupants === null ? 'No limit' : role.max_occupants);
+
+	// A seat is full when as many people are in it as it holds. A role with no limit is the
+	// limit left unset rather than a role that is never full (ADR-0068), so the same
+	// comparison answers both.
+	const isFull = (role) =>
+		role.max_occupants !== null && role.occupants.length >= role.max_occupants;
 </script>
 
 <section>
@@ -31,6 +40,13 @@
 			the roles you may assume, and who is in each.
 		</p>
 	</header>
+
+	{#if relinquished}
+		<!-- Said before the lobby was rendered, and shown here: a console that merely
+		     reappeared in the lobby would leave the operator to work out that their audio
+		     stopped and why (v1 §2). -->
+		<p class="ended" role="status">{relinquished}</p>
+	{/if}
 
 	{#if lost}
 		<p class="lost" role="alert">
@@ -57,6 +73,7 @@
 					<th>Role</th>
 					<th>Occupied by</th>
 					<th>Max occupants</th>
+					<th class="acts">Assume</th>
 				</tr>
 			</thead>
 			<tbody>
@@ -65,21 +82,16 @@
 						<td>{role.name}</td>
 						<td class:quiet={role.occupants.length === 0}>{occupancy(role)}</td>
 						<td class:quiet={role.max_occupants === null}>{limit(role)}</td>
+						<td class="acts">
+							{#if isFull(role)}
+								<span class="quiet">Occupied</span>
+							{:else}
+								<button onclick={() => onAssume(role.id)}>Assume</button>
+							{/if}
+						</td>
 					</tr>
 				{/each}
 			</tbody>
 		</table>
 	{/if}
 </section>
-
-<style>
-	/* Losing the signalling channel is not a refusal and not a destructive act, so it is not
-	   written like one: what is on screen is frozen and marked rather than blanked, because
-	   an empty page reads as *nothing is happening* when everything may be (ADR-0018). The
-	   sentence carries the state; the colour only makes it hard to walk past. The three-state
-	   ladder this is the first step of arrives with the console's connection state. */
-	.lost {
-		margin: 0 0 var(--space-4);
-		color: var(--warning);
-	}
-</style>
