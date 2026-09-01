@@ -154,19 +154,14 @@ enum Incoming {
     /// It is a full stop rather than a transition (v1 §2). Nothing survives it, and the
     /// socket is told the session ended before it is told what the lobby holds.
     Relinquish,
-    /// Where the client's end of the media path stands, on the ladder's own words.
+    /// Where the client's end of the media path stands, in the ladder's own words.
     ///
-    /// **The client drives this ladder and the server is the backstop** ([ADR-0042]): a
-    /// browser tells a transient `disconnected` from a terminal `failed`, and mediasoup's
-    /// `iceState` has no `failed` at all and takes around thirty seconds of ICE consent
-    /// freshness to say anything — longer than the whole signalling ladder. A
-    /// server-authoritative reading would keep emission live over a dead audio path for
-    /// longer than a lost state channel is tolerated.
+    /// **The client drives this ladder and the server is the backstop**, for the reason
+    /// [`StateAuthority::the_client_says`] gives. It is a report rather than an assertion:
+    /// the two ends merge pessimistically wherever the document is projected, so this alone
+    /// never makes a path green and always makes one red.
     ///
-    /// The two ends merge pessimistically wherever the document is projected: green needs
-    /// both, red needs one.
-    ///
-    /// [ADR-0042]: ../../../docs/adr/0042-the-media-path-has-its-own-ladder.md
+    /// [`StateAuthority::the_client_says`]: crate::state::StateAuthority::the_client_says
     MediaPath { state: String },
 }
 

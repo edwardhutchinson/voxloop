@@ -92,7 +92,7 @@ All `SystemAdministration`, all HTTP. Every **write** is audited, with before an
 | Create · read · edit · delete role presets | Shared across occupants of differing reach, so a preset narrows silently at use ([ADR-0013](../adr/0013-arming-is-independent-of-subscription.md)) |
 | Edit the deployment loop order | ([ADR-0053](../adr/0053-the-loop-order-is-complete-and-a-new-loop-lands-at-the-end.md)) |
 | Query the audit log | Filterable by actor and target. Reads are not themselves audited in v1 |
-| Read subprocess, disk and backup health | The mediasoup worker and the text-to-speech sidecar ([ADR-0040](../adr/0040-one-binary-one-unit-four-moving-parts.md)) |
+| Read worker, sidecar, disk and backup health | The mediasoup worker, which is a thread of this process ([ADR-0070](../adr/0070-the-mediasoup-worker-is-a-thread-of-this-process.md)), and the text-to-speech sidecar, which is a subprocess ([ADR-0040](../adr/0040-one-binary-one-unit-four-moving-parts.md)) |
 
 ## Service principal
 

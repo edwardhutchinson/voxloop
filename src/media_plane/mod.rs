@@ -57,9 +57,10 @@ pub(crate) type Reports = UnboundedReceiver<Reported>;
 pub(crate) enum Reported {
     /// The **server's** reading of one session's media path.
     ///
-    /// It is one of the two ends ADR-0042 merges, and it is the backstop rather than the
-    /// driver: the client is far better placed to tell a transient fault from a terminal
-    /// one, and this end is what covers the client that is wedged or lying.
+    /// One of the two ends ADR-0042 merges, and the backstop rather than the driver: the
+    /// client is far better placed to tell a transient fault from a terminal one, and this
+    /// end covers the client that is wedged or lying. [`crate::state::MediaPath`] carries
+    /// the argument in full.
     ThePath { of: SessionId, is: MediaPath },
     /// Nothing is carrying audio at all, and this is what happened.
     ///
@@ -99,12 +100,14 @@ pub(crate) struct Destination(String);
 
 impl Destination {
     /// Label a destination. The caller knows what it names; this does not.
-    #[allow(dead_code)] // The first caller is #39, which is the first ticket with an audience.
+    // Reserved for #39, which is the first ticket with an audience to hand down. The tests
+    // below exercise it, so this is allowed where it is genuinely dead and nowhere else.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn labelled(label: String) -> Self {
         Self(label)
     }
 
-    #[allow(dead_code)] // Read by the adapter that addresses a tap, which is #43's.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -136,7 +139,15 @@ trait Carriage: Send + Sync {
     /// It is the whole audience each time rather than a difference, because a difference
     /// would make the media plane hold an opinion about what it was told last, and the one
     /// thing this module must not do is have a view about who hears whom.
-    #[allow(dead_code)] // Nothing has an audience to hand down until #39 and #41.
+    ///
+    /// **Nothing hands one down until #39 and #41**, and the signature is here anyway
+    /// because it is the decision ([ADR-0063]): getting it the other way round would be
+    /// quietly fatal, and the shape is much harder to change once there are callers. What
+    /// stops that being a promise nobody checks is `an_audience_crosses_as_an_answer`, which
+    /// asserts that what the media plane is handed is what it records.
+    ///
+    /// [ADR-0063]: ../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
+    #[cfg_attr(not(test), allow(dead_code))]
     fn these_should_hear(&self, talker: &SessionId, audience: &Audience);
 }
 
@@ -207,7 +218,7 @@ impl MediaPlane {
     }
 
     /// See [`Carriage::these_should_hear`].
-    #[allow(dead_code)] // Nothing has an audience to hand down until #39 and #41.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn these_should_hear(&self, talker: &SessionId, audience: &Audience) {
         self.carriage.these_should_hear(talker, audience);
     }
@@ -215,3 +226,54 @@ impl MediaPlane {
 
 /// Where a report goes. Held by the adapters, which is why it is here rather than in one.
 type Reporting = UnboundedSender<Reported>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media_plane::recorder::a_recording_media_plane;
+
+    /// **The media plane executes routing and never computes it** ([ADR-0063]), and this is
+    /// the shape of that: an audience arrives as an answer and is recorded exactly as it
+    /// came. Nothing here narrows it, widens it or asks why it says what it says.
+    ///
+    /// Nothing hands one down until #39 and #41. It is asserted now because the signature
+    /// **is** the decision — if the fan-out lived below this seam the recorder would have to
+    /// reimplement VoxLoop's routing, and every test about who hears whom would be a test of
+    /// the reimplementation, passing while the product was broken.
+    ///
+    /// [ADR-0063]: ../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
+    #[test]
+    fn an_audience_crosses_as_an_answer_and_is_recorded_as_one() {
+        let (media, _reports, recording) = a_recording_media_plane();
+        let talker = SessionId::presented("alice".to_owned());
+        // Alice is armed on two loops and Bob monitors one of them. Working that out is the
+        // state authority's; this is the answer, on its way down.
+        let audience = Audience {
+            hearing: vec![Hearing {
+                listener: SessionId::presented("bob".to_owned()),
+                destination: Destination::labelled("flight".to_owned()),
+            }],
+        };
+
+        media.these_should_hear(&talker, &audience);
+
+        assert_eq!(
+            recording.instructions(),
+            vec![Instructed::TheseShouldHear {
+                talker,
+                audience: audience.clone()
+            }]
+        );
+    }
+
+    /// A destination is **a label and nothing else**. It carries the string it was given
+    /// back out unchanged, and there is nothing on it to ask what the label names — which is
+    /// the whole of why a `LoopId` does not cross this seam.
+    #[test]
+    fn a_destination_is_a_label_and_nothing_else() {
+        assert_eq!(
+            Destination::labelled("flight".to_owned()).as_str(),
+            "flight"
+        );
+    }
+}

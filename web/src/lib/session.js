@@ -106,13 +106,9 @@ export function openSignalling({
 		/**
 		 * Say where this tab's media path stands: `connected`, `impaired` or `lost`.
 		 *
-		 * **The client drives this ladder** (ADR-0042), and the reason is in the two APIs. A
-		 * browser's `RTCPeerConnection` tells a transient `disconnected` — which routinely
-		 * heals itself in a second — from a terminal `failed`. mediasoup's server-side
-		 * `iceState` has no `failed` at all and takes around thirty seconds of ICE consent
-		 * freshness to say anything, which is longer than the whole signalling ladder, so a
-		 * server-authoritative reading would leave the key control live over a dead audio
-		 * path for longer than a lost channel is tolerated.
+		 * **The client drives this ladder** (ADR-0042) because it is the end that can tell a
+		 * transient `RTCPeerConnection` `disconnected` from a terminal `failed`, which the
+		 * server cannot do in time. `disconnected` is `impaired` and `failed` is `lost`.
 		 *
 		 * The server merges this with its own end pessimistically — green needs both, red
 		 * needs one — and pushes the answer back in the presence document. **Nothing here

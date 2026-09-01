@@ -85,6 +85,8 @@ fn what_the_router_carries() -> Vec<RtpCodecCapability> {
 enum Instruction {
     Open(SessionId),
     Close(SessionId),
+    // Reserved for #39 and #41, like the seam method that builds it.
+    #[cfg_attr(not(test), allow(dead_code))]
     Hear {
         talker: SessionId,
         audience: Audience,
@@ -226,6 +228,14 @@ fn a_port_or_whatever_is_free(port: u16) -> Option<u16> {
 /// The `WorkerManager` is held for its whole life rather than dropped after the worker is
 /// made: it owns the executor thread every mediasoup future runs on, and dropping it stops
 /// that thread.
+/// **One at a time, in the order they were given**, and that is the guarantee rather than an
+/// oversight. Assuming elsewhere closes the displaced session's path and then opens the new
+/// one, and a loop that ran opens concurrently could reorder those two — leaving a transport
+/// for a session nothing can name any more, which is the exact hazard the close exists to
+/// avoid. The cost is that a queued close waits behind a transport being built, which is a
+/// local round trip to a worker on the next thread; if that round trip is not local and quick
+/// then the worker is wedged, and a close it cannot process is no better than a close it has
+/// not been given.
 async fn carry(
     mut taking: UnboundedReceiver<Instruction>,
     manager: WorkerManager,
@@ -383,7 +393,7 @@ fn say_if_it_moved(
     };
     change(&mut seen);
 
-    let now = the_worse_of(from_ice(seen.ice), from_dtls(seen.dtls));
+    let now = from_ice(seen.ice).pessimistically_with(from_dtls(seen.dtls));
     if seen.said == Some(now) {
         return;
     }
@@ -429,11 +439,6 @@ fn from_dtls(dtls: DtlsState) -> MediaPath {
             MediaPath::Lost
         }
     }
-}
-
-/// The worse of two readings. Red needs only one (ADR-0042).
-fn the_worse_of(one: MediaPath, other: MediaPath) -> MediaPath {
-    one.max(other)
 }
 
 impl Carriage for Carrying {
@@ -522,24 +527,18 @@ mod tests {
     #[test]
     fn the_server_reads_ice_and_dtls_together_and_takes_the_worse() {
         assert_eq!(
-            the_worse_of(
-                from_ice(IceState::Completed),
-                from_dtls(DtlsState::Connected)
-            ),
+            from_ice(IceState::Completed).pessimistically_with(from_dtls(DtlsState::Connected)),
             MediaPath::Connected
         );
         // ICE through, DTLS not: packets arrive and nothing can decrypt them.
         assert_eq!(
-            the_worse_of(
-                from_ice(IceState::Connected),
-                from_dtls(DtlsState::Connecting)
-            ),
+            from_ice(IceState::Connected).pessimistically_with(from_dtls(DtlsState::Connecting)),
             MediaPath::Lost
         );
         // A transport nobody has connected to yet is the same answer as one that has failed,
         // because the operator can do the same thing about both: nothing, yet.
         assert_eq!(
-            the_worse_of(from_ice(IceState::New), from_dtls(DtlsState::New)),
+            from_ice(IceState::New).pessimistically_with(from_dtls(DtlsState::New)),
             MediaPath::Lost
         );
         // mediasoup has no `failed`, and its `disconnected` is thirty seconds of ICE consent

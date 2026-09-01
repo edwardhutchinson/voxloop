@@ -17,8 +17,10 @@ The mediasoup worker is **linked into the binary and runs on a thread of it** ra
 beside it as a child process
 ([ADR-0070](docs/adr/0070-the-mediasoup-worker-is-a-thread-of-this-process.md)) — the Rust
 API works that way, where the Node.js one spawns a child. Its health is observed on a channel
-and reaches the console as **media path state**, and a worker that dies takes every session's
-audio path with it and ends no session.
+and reaches the console as **media path state**. A worker that dies takes every transport with
+it and cannot be replaced in place, so the binary **stops, non-zero**, and systemd brings the
+unit back — the ordinary restart path, rather than a console that works and will never make a
+sound again.
 
 ## Building
 
@@ -282,7 +284,16 @@ just been minted reads `lost` at both ends, because a transport nobody has conne
 carries no audio, and that is what the bar says.
 
 The client half of the report exists on the socket and nothing drives it yet: the peer
-connection it would read is the Audio module's, and that arrives with the client's audio.
+connection it would read is the Audio module's, and that arrives with the client's audio. So
+in a running deployment today the merged answer is `lost`, honestly.
+
+**One session's media path going is not the worker going**, and the two are opposite
+decisions. A session whose transport has failed keeps its role indefinitely: the operator is
+present, reading a working console that can say exactly what is wrong, and ending it for them
+takes the decision from the person best placed to make it, possibly mid-fix. The worker going
+is the deployment losing its purpose, with nobody left to leave the judgement with — so live
+state moves first, so the last thing every console is told about itself is true, and then the
+unit goes down.
 
 ## The operating console
 

@@ -35,13 +35,13 @@ const asShown = (body, names) =>
 
 const eachView = (props) => Promise.all(views.map((view) => rendered(view, props)));
 
-// The media path as the presence document carries it (ADR-0042). Every question below is
-// asked with one of these rather than with nothing, because the document always has one and
-// a view rendered without it would be a view no session ever sees.
+// A view as a session with a working audio path sees it. The media path is passed rather
+// than left out wherever a question is not about it, because the document always carries one
+// (ADR-0042) and a view rendered without it is a view no session ever sees.
 const carrying = { loops: inReach, mediaPath: 'connected' };
 
 test('both views render every loop in the document', async () => {
-	for (const [at, body] of (await eachView({ loops: inReach })).entries()) {
+	for (const [at, body] of (await eachView(carrying)).entries()) {
 		for (const name of namesOf(inReach)) {
 			assert.match(body, new RegExp(name), `${views[at]} left out ${name}`);
 		}
@@ -49,7 +49,7 @@ test('both views render every loop in the document', async () => {
 });
 
 test('both views hold the loops in one order', async () => {
-	for (const [at, body] of (await eachView({ loops: inReach })).entries()) {
+	for (const [at, body] of (await eachView(carrying)).entries()) {
 		assert.deepEqual(
 			asShown(body, namesOf(inReach)),
 			namesOf(inReach),
@@ -75,7 +75,7 @@ test('a loop that leaves reach leaves both views', async () => {
 	const [left] = namesOf(inReach);
 	const stillThere = inReach.slice(1);
 
-	for (const [at, body] of (await eachView({ loops: stillThere })).entries()) {
+	for (const [at, body] of (await eachView({ ...carrying, loops: stillThere })).entries()) {
 		assert.doesNotMatch(body, new RegExp(left), `${views[at]} still shows ${left}`);
 		for (const name of namesOf(stillThere)) assert.match(body, new RegExp(name));
 	}
@@ -94,7 +94,7 @@ test('an empty reach is a view with no loops rather than no view', async () => {
 // permission is the only state either view carries at this point, so it is where the division
 // of labour is established: the rung as a word on the board, what it confers in the ledger.
 test('the board says a word where the ledger says a sentence', async () => {
-	const [board, ledger] = await eachView({ loops: inReach });
+	const [board, ledger] = await eachView(carrying);
 
 	for (const { permission } of inReach) assert.match(board, new RegExp(permission));
 	assert.match(ledger, /speak on it/);

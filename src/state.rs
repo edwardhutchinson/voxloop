@@ -122,8 +122,12 @@ impl MediaPath {
 
     /// The worse of two readings. **Green needs both ends, red needs one** ([ADR-0042]).
     ///
+    /// It is `pub(crate)` because the media plane merges the two halves of the server's own
+    /// end — ICE and DTLS — by the same rule, and one rule written twice is one that can
+    /// come to disagree with itself.
+    ///
     /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
-    fn pessimistically_with(self, other: Self) -> Self {
+    pub(crate) fn pessimistically_with(self, other: Self) -> Self {
         self.max(other)
     }
 }
