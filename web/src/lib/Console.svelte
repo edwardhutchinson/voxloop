@@ -6,16 +6,33 @@
 	// the server has committed to keeping true — so this page never computes a state, never
 	// merges one document into another, and never renders optimistically.
 	//
-	// **What is here is #37's half of the console and no more**: the role, the session it is
-	// bound to, and the loops in reach. The board and ledger over that loop list is #38, the
-	// subscriptions are #39 and the transmit bar is #41. The list is deliberately plain
-	// rather than dressed as a console that does not exist yet.
+	// **Two views of one loop list** (ADR-0032), both complete, both driven by that one
+	// document, so they cannot disagree about anything except layout. The **board** is the
+	// glanceable view and the **ledger** is the reading view; which of them is on screen is
+	// the only thing this page remembers, because it is a fact about the reader rather than
+	// about the world. Every other fact on it is the server's, and arrives again on the next
+	// tick.
 	//
 	// **Changing role is a relinquish followed by an assume** (v1 §2), so there is no role
 	// picker here and no *switch*. Relinquishing lands in the lobby, and the lobby is where a
 	// role is taken up. Audio genuinely stops in between, and offering a control that hid
 	// that would be the class of lie this product exists to avoid.
+	import Board from './Board.svelte';
+	import Ledger from './Ledger.svelte';
+
 	let { presence, lost, refused, onRelinquish } = $props();
+
+	// The board is what a control room reads at a glance, so it is what a console opens on.
+	// Which view somebody lands in becomes theirs — personalisation per (user, role), from a
+	// role default — with #55.
+	let showing = $state('board');
+
+	// **One order, and both views are handed it.** Reordering it reorders both, because there
+	// is only one of it: two independent orders would put the same loop third in one view and
+	// eleventh in the other, which is the quiet kind of disagreement that teaches an operator
+	// to distrust the console (ADR-0032). It is the administered base order the document
+	// arrives in (ADR-0053), and this line is the one #55 changes to make it personal.
+	const inOrder = $derived(presence.loops);
 </script>
 
 <section>
@@ -38,28 +55,25 @@
 		<p class="refusal" role="alert">{refused}</p>
 	{/if}
 
-	{#if presence.loops.length === 0}
+	{#if inOrder.length === 0}
+		<!-- A fact about reach rather than about either view, so it is said here and once. The
+		     view still renders, because an empty reach is a console with no loops on it rather
+		     than a console that is not there. -->
 		<p class="quiet">
 			This role reaches no loops. Reach is one cell on the grid per loop, set by a system
 			administrator, and a role may be assumed with an empty row.
 		</p>
+	{/if}
+
+	<div class="views" role="group" aria-label="How the loops are shown">
+		<button aria-pressed={showing === 'board'} onclick={() => (showing = 'board')}>Board</button>
+		<button aria-pressed={showing === 'ledger'} onclick={() => (showing = 'ledger')}>Ledger</button>
+	</div>
+
+	{#if showing === 'board'}
+		<Board loops={inOrder} />
 	{:else}
-		<table>
-			<thead>
-				<tr>
-					<th>Loop</th>
-					<th>This role holds</th>
-				</tr>
-			</thead>
-			<tbody>
-				{#each presence.loops as reachable (reachable.id)}
-					<tr>
-						<td>{reachable.name}</td>
-						<td>{reachable.permission}</td>
-					</tr>
-				{/each}
-			</tbody>
-		</table>
+		<Ledger loops={inOrder} />
 	{/if}
 
 	<p class="relinquish">
@@ -68,6 +82,21 @@
 </section>
 
 <style>
+	/* Directly above the list it governs, rather than in the header: it is a control over what
+	   is under it and not a fact about the role. */
+	.views {
+		display: flex;
+		gap: var(--space-1);
+		margin: var(--space-5) 0 var(--space-4);
+	}
+
+	/* Which view is showing is carried by the view: a field of cards and a table are not
+	   mistakable for each other, so the mark on the button is a reminder rather than the state
+	   itself, and `aria-pressed` is what says it to a screen reader. */
+	.views button[aria-pressed='true'] {
+		border-color: var(--ink);
+	}
+
 	/* Below the loops rather than beside the heading. Relinquishing is a full stop and the
 	   one act on this page, and putting it in the header would place the way off the air
 	   next to the name of the role somebody just took. */

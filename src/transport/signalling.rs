@@ -902,7 +902,8 @@ async fn record_the_end_of(
 mod tests {
     use super::*;
     use crate::configuration::{
-        Eligibilities, Loops, NewRole, NewUser, RecordedEntry, Roles, Store, a_temporary_store,
+        Eligibilities, LoopId, Loops, NewRole, NewUser, RecordedEntry, Roles, Store,
+        a_temporary_store,
     };
     use crate::identity::Identity;
     use crate::state::StateAuthority;
@@ -1022,6 +1023,28 @@ mod tests {
                 .await
                 .expect("the column to be ruled on");
             transaction.commit().await.expect("the loop to land");
+        }
+
+        /// The deployment-wide base loop order, set whole as system administration sets it
+        /// (ADR-0053). Named rather than by id, because a test reads better that way.
+        async fn the_base_order_is(&self, names: &[&str]) {
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            let present = transaction.loops().await.expect("the loops to be readable");
+            let order: Vec<LoopId> = names
+                .iter()
+                .map(|name| {
+                    present
+                        .iter()
+                        .find(|held_on| held_on.name == *name)
+                        .map(|held_on| held_on.id.clone())
+                        .expect("a loop by that name")
+                })
+                .collect();
+            transaction
+                .set_the_loop_order(&order)
+                .await
+                .expect("the order to be set");
+            transaction.commit().await.expect("the order to land");
         }
 
         /// Somebody else, signed in and holding a seat.
@@ -1650,6 +1673,38 @@ mod tests {
             reached,
             [("Air-to-ground", "emit"), ("Flight Director", "monitor")],
             "a loop outside this role's reach was in the document"
+        );
+    }
+
+    /// **The console's two views share one order, and this document is where it comes from**
+    /// (ADR-0032). It is the administered base order, which is deliberately neither
+    /// alphabetical nor creation order (ADR-0053), and the document is the only place a
+    /// console may learn it — a document answering in some other order would leave the board
+    /// and the ledger to invent one each.
+    #[tokio::test]
+    async fn the_presence_document_holds_the_loops_in_the_administered_base_order() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        for name in ["Air-to-ground", "Flight Director", "Surgeon"] {
+            lobby
+                .a_loop_reachable_by(name, &flight, Permission::Monitor)
+                .await;
+        }
+        let administered = ["Surgeon", "Air-to-ground", "Flight Director"];
+        lobby.the_base_order_is(&administered).await;
+        let mut socket = lobby.a_socket();
+
+        let said = said(&mut socket, &assuming(&flight)).await;
+
+        let ordered: Vec<&str> = the_presence(&said)
+            .1
+            .loops
+            .iter()
+            .map(|held_on| held_on.name.as_str())
+            .collect();
+        assert_eq!(
+            ordered, administered,
+            "the document reordered the loops under the console"
         );
     }
 

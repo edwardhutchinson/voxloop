@@ -220,6 +220,50 @@ same state* stays answerable. The wire is JSON at a ~5 Hz tick.
 implementation underneath negotiates no extensions — which costs bandwidth and nothing else
 ([#78](https://github.com/edwardhutchinson/voxloop/issues/78)).
 
+## The operating console
+
+Assuming a role puts the **presence document** on screen as **two views of one loop list**,
+both complete, both driven by that one document, so they cannot disagree about anything
+except layout
+([ADR-0032](docs/adr/0032-the-console-is-two-views-of-one-loop-list.md)).
+
+The **board** is a card per loop in reach: the glanceable view, and what a control room reads
+at a glance. The **ledger** is a compact table row per loop: the reading view, and where state
+too long for a card lives. A card cannot hold a sentence, so anything the model requires fits
+the board as a word and may be a sentence only in the ledger — today that is the rung the role
+holds, `emit` on a card and *hear it, and speak on it* in a row. **From here on, a state that
+renders in only one view is a bug**, and `web/tests/board-and-ledger.test.js` asks every
+question of both views at once for that reason.
+
+**Order is shared.** Both views are handed one list, in the order the document arrives in,
+which is the **administered base loop order**
+([ADR-0053](docs/adr/0053-the-loop-order-is-complete-and-a-new-loop-lands-at-the-end.md)) —
+neither alphabetical nor creation order. Two independent orders would put the same loop third
+in one view and eleventh in the other, which is the quiet kind of disagreement that teaches an
+operator to distrust the console. A personal order, and a remembered default view, are
+personalisation and are still to come.
+
+The **transmit bar** is present in both views, placed differently in each, **worded
+identically** and **never scrolled away**
+([ADR-0034](docs/adr/0034-the-transmit-bar-is-always-visible-and-the-audience-is-a-count.md)):
+on the board it closes the field along the bottom edge, and in the ledger it rides above the
+rows rather than under a table of unknown length. It is one component so that it is one
+wording. **It is empty at this point and says so** — the armed set and the key state arrive
+with arming and keying, and the two audience counts after that.
+
+**Nothing renders optimistically**
+([ADR-0016](docs/adr/0016-displayed-state-is-observed-or-asserted.md)). Neither view keeps any
+state of its own: what is on screen came out of the last document and can be nothing else, so
+a toggle will visibly lag a round trip and switching views loses nothing. The console
+remembers exactly one thing, and it is which view is showing — a fact about the reader rather
+than about the world.
+
+**The console renders no motion.** Motion is permitted in exactly one place, the talking
+indicator ([ADR-0033](docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md)),
+which does not exist yet — so `npm test` refuses `animation`, `transition`, `@keyframes` and
+Svelte's motion directives outright, and the indicator will be written into that check rather
+than around it.
+
 ## The admin console
 
 Signing in as a system administrator opens the console, reachable from the lobby. It is
@@ -417,7 +461,8 @@ by `npm test`: no literal spacing, type or radius values, no colour outside `app
 cargo test                      # the binary, without the console embedded
 cargo test --features embed-web # the same, plus the embedded bundle (needs npm run build)
 cd web && npm test              # the console: the seam rule, the styling standard, the icons,
-                                # and what the client says over the signalling channel
+                                # the two views of the loop list, and what the client says
+                                # over the signalling channel
 ```
 
 Tests run against the real store: each one opens a temporary SQLite file, migrates it and
