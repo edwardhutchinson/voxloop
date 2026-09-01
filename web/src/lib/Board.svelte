@@ -42,7 +42,10 @@
 		display: grid;
 		/* Cards keep one width and the row holds as many as fit, rather than stretching to
 		   fill: an operator learns where a loop is by where it sits, and a list that reflows
-		   into two columns when one loop enters reach has moved every card in it. */
+		   into two columns when one loop enters reach has moved every card in it. The width is
+		   a loop name on one line — `Air-to-ground` and `Flight Director` are the long ones a
+		   pilot deployment writes — because a name wrapping is what makes a card unreadable at
+		   a glance, and the card is the glanceable view. */
 		grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
 		gap: var(--space-3);
 		margin: 0;
@@ -62,6 +65,9 @@
 		font-size: var(--type-3);
 	}
 
+	/* The ground is set on whichever element does the pinning, here and in the ledger, because
+	   that is the element the loops pass under: a bar drawing its own background would leave
+	   the padding around it transparent and the cards would show through the gap. */
 	.transmit {
 		position: fixed;
 		inset: auto 0 0;

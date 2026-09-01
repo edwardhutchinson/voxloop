@@ -25,6 +25,15 @@ function styleOf(path) {
 	return stripped([...blocks].map((block) => block[1]).join('\n'));
 }
 
+// A component without its style block, and without its comments: what the markup rules below
+// ask their question of. The comments go with the CSS because a component explains itself in
+// prose, and a sentence saying what arrives *in:* a later ticket is not a motion directive.
+function markupOf(path) {
+	return read(path)
+		.replaceAll(/<style[^>]*>[\s\S]*?<\/style>/g, '')
+		.replaceAll(/<!--[\s\S]*?-->/g, '');
+}
+
 // Declarations only: everything after the innermost `{`, so a selector never reads as a
 // property and an `@media` wrapper does not swallow the rule inside it.
 function declarations(css) {
@@ -166,8 +175,13 @@ test('the console renders no motion', () => {
 	const moves = /^(animation|transition)(-|$)/;
 	const directives = /\s(transition|in|out|animate):[a-z]/i;
 
-	for (const path of components()) {
-		for (const [property, value] of declarations(styleOf(path))) {
+	// `app.css` is in this one because the furniture is: a `transition` on the bare `button`
+	// rule would put motion under every control in the console at once, which is the largest
+	// version of what this refuses rather than an exception to it.
+	for (const path of [tokenFile, ...components()]) {
+		const css = path === tokenFile ? stripped(read(path)) : styleOf(path);
+
+		for (const [property, value] of declarations(css)) {
 			assert.ok(
 				!moves.test(property),
 				`${named(path)} sets ${property}: ${value} — motion is permitted in exactly one place, and it is the talking indicator`
@@ -175,17 +189,14 @@ test('the console renders no motion', () => {
 		}
 
 		assert.ok(
-			!styleOf(path).includes('@keyframes'),
+			!css.includes('@keyframes'),
 			`${named(path)} declares @keyframes — motion is permitted in exactly one place, and it is the talking indicator`
 		);
 
-		// The comments go with the style block: a component explains itself in its markup,
-		// and prose saying what arrives *in:* a later ticket is not a motion directive.
-		const markup = read(path)
-			.replaceAll(/<style[^>]*>[\s\S]*?<\/style>/g, '')
-			.replaceAll(/<!--[\s\S]*?-->/g, '');
+		if (path === tokenFile) continue;
+
 		assert.doesNotMatch(
-			markup,
+			markupOf(path),
 			directives,
 			`${named(path)} carries a Svelte motion directive — motion is permitted in exactly one place, and it is the talking indicator`
 		);
@@ -205,13 +216,8 @@ test('no styling reaches an element past its style block', () => {
 	// An inline `style` attribute is out of reach of every rule above, so it is refused
 	// outright rather than checked. Nothing in the console has ever needed one.
 	for (const path of components()) {
-		// The comments go with the style block: a component explains itself in its markup,
-		// and prose saying what arrives *in:* a later ticket is not a motion directive.
-		const markup = read(path)
-			.replaceAll(/<style[^>]*>[\s\S]*?<\/style>/g, '')
-			.replaceAll(/<!--[\s\S]*?-->/g, '');
 		assert.doesNotMatch(
-			markup,
+			markupOf(path),
 			/\sstyle=/,
 			`${named(path)} carries an inline style attribute — styling belongs in a style block`
 		);

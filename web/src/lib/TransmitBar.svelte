@@ -12,10 +12,13 @@
 	// **It is empty at this point**, and says so rather than rendering a strip that reads as a
 	// control room console with its transmitting lamp out. The armed set in words and the key
 	// state arrive with #41, the two audience counts with #49.
+	//
+	// The act it is about is **emission** rather than *transmit*, which `CONTEXT.md` avoids;
+	// the strip itself is the *transmit bar*, which is the glossary's own name for it.
 </script>
 
-<section aria-label="Transmit">
+<section aria-label="Transmit bar">
 	<p class="quiet">
-		VoxLoop cannot transmit yet. The armed set, the audience and the key control belong here.
+		VoxLoop cannot emit yet. The armed set, the audience and the key control belong here.
 	</p>
 </section>

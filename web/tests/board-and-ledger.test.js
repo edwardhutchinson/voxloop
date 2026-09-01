@@ -27,7 +27,7 @@ const inReach = [
 	{ id: 'l-2', name: 'GNC', permission: 'monitor' }
 ];
 
-const named = (loops) => loops.map((held_on) => held_on.name);
+const namesOf = (loops) => loops.map((reachable) => reachable.name);
 
 /** Where each of these names first appears, in the order the page has them. */
 const asShown = (body, names) =>
@@ -37,7 +37,7 @@ const eachView = (props) => Promise.all(views.map((view) => rendered(view, props
 
 test('both views render every loop in the document', async () => {
 	for (const [at, body] of (await eachView({ loops: inReach })).entries()) {
-		for (const name of named(inReach)) {
+		for (const name of namesOf(inReach)) {
 			assert.match(body, new RegExp(name), `${views[at]} left out ${name}`);
 		}
 	}
@@ -46,8 +46,8 @@ test('both views render every loop in the document', async () => {
 test('both views hold the loops in one order', async () => {
 	for (const [at, body] of (await eachView({ loops: inReach })).entries()) {
 		assert.deepEqual(
-			asShown(body, named(inReach)),
-			named(inReach),
+			asShown(body, namesOf(inReach)),
+			namesOf(inReach),
 			`${views[at]} shows the loops in an order of its own`
 		);
 	}
@@ -67,12 +67,12 @@ test('neither view has an order of its own to keep', async () => {
 });
 
 test('a loop that leaves reach leaves both views', async () => {
-	const [left] = named(inReach);
+	const [left] = namesOf(inReach);
 	const stillThere = inReach.slice(1);
 
 	for (const [at, body] of (await eachView({ loops: stillThere })).entries()) {
 		assert.doesNotMatch(body, new RegExp(left), `${views[at]} still shows ${left}`);
-		for (const name of named(stillThere)) assert.match(body, new RegExp(name));
+		for (const name of namesOf(stillThere)) assert.match(body, new RegExp(name));
 	}
 });
 

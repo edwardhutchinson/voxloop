@@ -30,21 +30,21 @@ const pointedBackAtTheSource = (code) =>
 		file.endsWith('.svelte') ? `'./${file}.js'` : JSON.stringify(join(lib, file))
 	);
 
-let done = false;
+let compiled = false;
 
 function compileTheLibrary() {
-	if (done) return;
+	if (compiled) return;
 	mkdirSync(built, { recursive: true });
 
 	for (const path of under(/\.svelte$/, lib)) {
 		const { js } = compile(read(path), { generate: 'server', filename: basename(path) });
 		writeFileSync(join(built, `${basename(path)}.js`), pointedBackAtTheSource(js.code));
 	}
-	done = true;
+	compiled = true;
 }
 
 /** One compiled component, by the name of its file. */
-export async function component(name) {
+async function component(name) {
 	compileTheLibrary();
 	return (await import(pathToFileURL(join(built, `${name}.js`)).href)).default;
 }
