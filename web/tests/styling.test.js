@@ -157,6 +157,41 @@ test('every token a component uses is one app.css defines', () => {
 	}
 });
 
+// v1 §8: motion is permitted in exactly one place, and that place is the talking indicator
+// (ADR-0033) — one fixed rate, one fixed shape, reading unambiguously as on or off. Cognitive
+// load is the thing being minimised, and a console that moves for any other reason spends the
+// operator's attention on something that is not an operation. The indicator arrives with #41,
+// and this is the check it will have to be written into rather than around.
+test('the console renders no motion', () => {
+	const moves = /^(animation|transition)(-|$)/;
+	const directives = /\s(transition|in|out|animate):[a-z]/i;
+
+	for (const path of components()) {
+		for (const [property, value] of declarations(styleOf(path))) {
+			assert.ok(
+				!moves.test(property),
+				`${named(path)} sets ${property}: ${value} — motion is permitted in exactly one place, and it is the talking indicator`
+			);
+		}
+
+		assert.ok(
+			!styleOf(path).includes('@keyframes'),
+			`${named(path)} declares @keyframes — motion is permitted in exactly one place, and it is the talking indicator`
+		);
+
+		// The comments go with the style block: a component explains itself in its markup,
+		// and prose saying what arrives *in:* a later ticket is not a motion directive.
+		const markup = read(path)
+			.replaceAll(/<style[^>]*>[\s\S]*?<\/style>/g, '')
+			.replaceAll(/<!--[\s\S]*?-->/g, '');
+		assert.doesNotMatch(
+			markup,
+			directives,
+			`${named(path)} carries a Svelte motion directive — motion is permitted in exactly one place, and it is the talking indicator`
+		);
+	}
+});
+
 test('a component declares nothing global', () => {
 	for (const path of components()) {
 		assert.ok(
@@ -170,7 +205,11 @@ test('no styling reaches an element past its style block', () => {
 	// An inline `style` attribute is out of reach of every rule above, so it is refused
 	// outright rather than checked. Nothing in the console has ever needed one.
 	for (const path of components()) {
-		const markup = read(path).replaceAll(/<style[^>]*>[\s\S]*?<\/style>/g, '');
+		// The comments go with the style block: a component explains itself in its markup,
+		// and prose saying what arrives *in:* a later ticket is not a motion directive.
+		const markup = read(path)
+			.replaceAll(/<style[^>]*>[\s\S]*?<\/style>/g, '')
+			.replaceAll(/<!--[\s\S]*?-->/g, '');
 		assert.doesNotMatch(
 			markup,
 			/\sstyle=/,

@@ -2,42 +2,22 @@
 // component author relies on without looking: an icon takes its size and colour from the
 // text beside it, and it is invisible to a screen reader unless somebody says otherwise.
 //
-// Rendering it means compiling it, because there is no component test runner in the console
-// and one whole dependency tree is a lot to buy for one component.
+// Rendering it means compiling it, which `render.js` is: there is no component test runner
+// in the console and a whole dependency tree is a lot to buy for one component.
 
-import { test, before } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { compile } from 'svelte/compiler';
-import { render } from 'svelte/server';
 import { components, named, read, src } from './console.js';
+import { rendered } from './render.js';
 
 const lib = join(src, 'lib');
 const source = read(join(lib, 'Icon.svelte'));
 
-let Icon;
+const drawn = (props) => rendered('Icon.svelte', props);
 
-before(async () => {
-	// `.svelte-kit/` is the generated directory: git, Prettier and ESLint all ignore it.
-	const built = join(src, '..', '.svelte-kit', 'tests');
-	mkdirSync(built, { recursive: true });
-
-	const { js } = compile(source, { generate: 'server', filename: 'Icon.svelte' });
-	// The compiled component is written outside `src/`, so its one relative import has to be
-	// pointed back at the file it means.
-	writeFileSync(
-		join(built, 'Icon.js'),
-		js.code.replace("'./icons.js'", JSON.stringify(join(lib, 'icons.js')))
-	);
-
-	Icon = (await import(join(built, 'Icon.js'))).default;
-});
-
-const drawn = (props) => render(Icon, { props }).body;
-
-test('an icon inherits its size and its colour', () => {
-	assert.match(drawn({ name: 'arrow-left' }), /stroke="currentColor"/);
+test('an icon inherits its size and its colour', async () => {
+	assert.match(await drawn({ name: 'arrow-left' }), /stroke="currentColor"/);
 
 	// Not `1rem`: `1em` is the font size of whatever the icon sits beside, so an icon in a
 	// heading and an icon in a table row need no token and no variant between them.
@@ -45,19 +25,19 @@ test('an icon inherits its size and its colour', () => {
 	assert.match(source, /height:\s*1em/);
 });
 
-test('an icon is hidden from a screen reader unless it is labelled', () => {
-	const beside = drawn({ name: 'arrow-left' });
+test('an icon is hidden from a screen reader unless it is labelled', async () => {
+	const beside = await drawn({ name: 'arrow-left' });
 	assert.match(beside, /aria-hidden="true"/);
 	assert.doesNotMatch(beside, /role="img"/);
 
-	const alone = drawn({ name: 'bell', label: 'Hail' });
+	const alone = await drawn({ name: 'bell', label: 'Hail' });
 	assert.match(alone, /role="img"/);
 	assert.match(alone, /aria-label="Hail"/);
 	assert.doesNotMatch(alone, /aria-hidden/);
 });
 
-test('an icon draws the shapes its entry holds', () => {
-	const settings = drawn({ name: 'settings' });
+test('an icon draws the shapes its entry holds', async () => {
+	const settings = await drawn({ name: 'settings' });
 	assert.match(settings, /<path d="M9.671/);
 	assert.match(settings, /<circle cx="12" cy="12" r="3"/);
 });
