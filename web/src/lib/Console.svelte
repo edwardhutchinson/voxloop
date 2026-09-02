@@ -58,11 +58,11 @@
 		</p>
 		<p class="quiet">
 			<!-- Said once, above both views, because it is a fact about the loop list rather
-			     than about either rendering of it. The lag is the design (ADR-0016) and an
-			     operator who has not been told about it reads it as a console that missed a
-			     click. -->
-			Clicking a loop starts or stops monitoring it. There is no confirmation, and the loop changes when
-			VoxLoop says it has rather than when you click.
+			     than about either rendering of it. It is here for the lag rather than for the
+			     gesture: nothing renders optimistically (ADR-0016), so a loop changes a round
+			     trip after the click, and an operator who has not been told reads that as a
+			     console that missed one. -->
+			A loop changes when VoxLoop confirms it, not when you click it.
 		</p>
 	</header>
 

@@ -201,8 +201,10 @@ test('the operating console remembers which view is on screen, and nothing else'
 test('both views say whether each loop is being monitored', async () => {
 	const [board, ledger] = await eachView(carrying);
 
-	assert.match(board, /Not monitoring/, 'the board does not say a loop is unmonitored');
-	assert.match(board, /Monitoring/, 'the board does not say a loop is monitored');
+	// Anchored on the tags, because `Not monitoring` contains `monitoring`: an unanchored
+	// match for the monitored state is satisfied by the unmonitored one and cannot fail.
+	assert.match(board, />Not monitoring</, 'the board does not say a loop is unmonitored');
+	assert.match(board, />Monitoring</, 'the board does not say a loop is monitored');
 	assert.match(ledger, /You are hearing this loop\./);
 	assert.match(ledger, /You are not hearing this loop\./);
 });

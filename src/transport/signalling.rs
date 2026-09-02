@@ -717,6 +717,13 @@ impl Conversation {
     /// Nothing is remembered for a session that ended between the requirement and here: an
     /// act nothing took is not a preference.
     ///
+    /// **The write is on the answer's path and not spawned beside it**, deliberately. Doing
+    /// it in the background would take the store off the round trip the operator is watching
+    /// — but two clicks in quick succession would then race, and the set that came back at
+    /// the next assume would be whichever write happened to land second. A memory that can
+    /// disagree with the acts it was following is worse than a write on a path that already
+    /// carries one: this message went through the store to be authorised at all.
+    ///
     /// [ADR-0050]: ../../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
     async fn monitoring(
         &mut self,

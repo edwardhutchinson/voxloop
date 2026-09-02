@@ -63,7 +63,11 @@ pub(crate) trait Personalisation {
     /// Idempotent, and deliberately: the live act it rides is applied to a set, so a second
     /// subscribe to a loop already held is the same state rather than a second one. The
     /// original time is left alone, because when somebody first put a loop up is the more
-    /// useful of the two answers and neither is read today.
+    /// useful of the two answers.
+    ///
+    /// Nothing reads that time. It is there because every record this store holds carries
+    /// when it was made, and the store is a file somebody reads by hand when a deployment is
+    /// behaving oddly — a row that cannot say when it appeared is one nobody can place.
     ///
     /// A triple naming a record that is not there writes nothing, exactly as every other
     /// write against an id nobody holds does.

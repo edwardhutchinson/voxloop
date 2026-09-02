@@ -19,6 +19,11 @@
 	// control added to this card is a sibling of the body by construction, and there is no
 	// `stopPropagation` for anybody to forget.
 	//
+	// **The loop name is not a heading**, and that changed when the body became a control: a
+	// heading announces a section of content, and a card is a control. The `<ul>` is what
+	// carries the structure — a list of twenty toggle buttons, each named for its loop and
+	// its state — and a heading inside a button is not valid markup anyway.
+	//
 	// The staffing marks are #48. Nothing here decides which act a click is: it says which
 	// loop was clicked, and `Console.svelte` reads the document to know the rest.
 	import TransmitBar from './TransmitBar.svelte';

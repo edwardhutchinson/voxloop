@@ -345,17 +345,22 @@ pub(crate) struct InReach {
     pub(crate) permission: Permission,
 }
 
-/// One loop on a session's console: the reach it stands in, and the live choice made within
-/// it.
+/// Where a loop stands on one session's console: the reach it sits in, and the live choices
+/// made within it.
 ///
 /// The two halves come from two seams and are composed here rather than inside either of
 /// them ([ADR-0039]): [`InReach`] is Configuration's, handed in as a value, and everything
 /// beside it is this module's. Arms (#41), mute (#44) and staffing state (#48) join the
-/// second half one ticket at a time.
+/// second half one ticket at a time, which is why this is a pair rather than a loop with a
+/// flag on it.
+///
+/// It is deliberately not called a subscription. **A subscription is the live choice to
+/// monitor a loop** (`CONTEXT.md`), and this is the loop the choice is about — most of them
+/// on most consoles have no subscription at all.
 ///
 /// [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Monitoring {
+pub(crate) struct Standing {
     pub(crate) held_on: InReach,
     /// Whether this session is monitoring this loop.
     ///
@@ -395,7 +400,7 @@ pub(crate) struct Presence {
     ///
     /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
     pub(crate) media_path: MediaPath,
-    pub(crate) loops: Vec<Monitoring>,
+    pub(crate) loops: Vec<Standing>,
 }
 
 impl StateAuthority {
@@ -641,7 +646,7 @@ impl StateAuthority {
                 // subscription outside it is inert rather than lost ([ADR-0051]).
                 loops: within
                     .into_iter()
-                    .map(|held_on| Monitoring {
+                    .map(|held_on| Standing {
                         subscribed: held.subscriptions.contains(&held_on.id),
                         held_on,
                     })
@@ -1197,7 +1202,7 @@ mod tests {
         assert_eq!(presence.role, role);
         assert_eq!(
             presence.loops,
-            vec![Monitoring {
+            vec![Standing {
                 held_on: a_loop("air-to-ground"),
                 // Nothing was remembered and nothing has been taken up, so the loop is on
                 // the console and not being heard.
