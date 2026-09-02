@@ -6,9 +6,10 @@
 // So every question here is asked of both views at once: does each loop in the document
 // appear, in the same order, and does the transmit bar say the same words in both.
 //
-// The one thing not asked here is what a click does, because at this point nothing is
-// clickable — subscription is #39 — and because it is what a browser does rather than what
-// a component renders.
+// What a click *does* is not asked here, because that is what a browser does rather than
+// what a component renders. What is asked is where the click target sits and who decides
+// what a click means, because both are structural and both are how the two views are kept
+// from coming to disagree.
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -21,10 +22,14 @@ const views = ['Board.svelte', 'Ledger.svelte'];
 
 // Deliberately neither alphabetical nor sorted by id: the base loop order is administered
 // rather than derived (ADR-0053), so a view quietly sorting what it was handed has to fail.
+//
+// Two of the three are being monitored and one is not, because **subscription is distinct
+// from permission** (v1 §5): every loop here is one the role may monitor, and that says
+// nothing about which of them it currently is.
 const inReach = [
-	{ id: 'l-3', name: 'THERMAL', permission: 'control' },
-	{ id: 'l-1', name: 'FLIGHT', permission: 'emit' },
-	{ id: 'l-2', name: 'GNC', permission: 'monitor' }
+	{ id: 'l-3', name: 'THERMAL', permission: 'control', subscribed: true },
+	{ id: 'l-1', name: 'FLIGHT', permission: 'emit', subscribed: false },
+	{ id: 'l-2', name: 'GNC', permission: 'monitor', subscribed: true }
 ];
 
 const namesOf = (loops) => loops.map((reachable) => reachable.name);
@@ -188,6 +193,92 @@ test('the operating console remembers which view is on screen, and nothing else'
 		1,
 		'the console keeps state beyond which view is showing — every other fact is the server’s'
 	);
+});
+
+// **A state that renders in only one view is a bug** (v1 §8), and subscription is the first
+// state after the rung to prove it. The board carries it as a word and the ledger as a
+// sentence, which is the division of labour ADR-0032 keeps both views for.
+test('both views say whether each loop is being monitored', async () => {
+	const [board, ledger] = await eachView(carrying);
+
+	assert.match(board, /Not monitoring/, 'the board does not say a loop is unmonitored');
+	assert.match(board, /Monitoring/, 'the board does not say a loop is monitored');
+	assert.match(ledger, /You are hearing this loop\./);
+	assert.match(ledger, /You are not hearing this loop\./);
+});
+
+// Colour is never the only thing carrying a state, and neither is a border or an attribute:
+// a view whose two states differ only in CSS says nothing to somebody reading it in a
+// photograph, in high contrast, or out loud.
+test('neither view carries the subscription in anything but words', async () => {
+	const every = (subscribed) => inReach.map((reachable) => ({ ...reachable, subscribed }));
+	const monitored = await eachView({ ...carrying, loops: every(true) });
+	const not = await eachView({ ...carrying, loops: every(false) });
+	// The markup with every attribute value taken out: what is left is what a person reads.
+	const words = (body) => body.replaceAll(/="[^"]*"/g, '');
+
+	for (const [at, body] of monitored.entries()) {
+		assert.notEqual(
+			words(body),
+			words(not[at]),
+			`${views[at]} reads identically whether or not the loops are monitored`
+		);
+	}
+});
+
+// **Clicking the card body toggles monitoring, and arm, mute and cog must not propagate that
+// click** (v1 §8, ADR-0032). The rule is kept structurally rather than by remembering to stop
+// propagation in two later tickets: the click target is a `<button>` inside the card rather
+// than the card itself, and a `<button>` cannot contain another control — so anything #41 and
+// #44 add to a card is a sibling of the body and never inside it.
+test('the board toggles from a control inside the card, not from the card', async () => {
+	const source = read(join(lib, 'Board.svelte'));
+	const card = source.slice(source.indexOf('<li'), source.indexOf('</li>'));
+
+	assert.doesNotMatch(
+		card.slice(0, card.indexOf('>')),
+		/onclick/,
+		'the card itself is the click target, so every control added to it will propagate'
+	);
+	assert.match(card, /<button[^>]*onclick=/, 'the card body is not a control');
+
+	const body = await rendered('Board.svelte', carrying);
+	assert.match(body, /<button[^>]*aria-pressed="true"/, 'a monitored card is not marked as on');
+	assert.match(
+		body,
+		/<button[^>]*aria-pressed="false"/,
+		'an unmonitored card is not marked as off'
+	);
+});
+
+// **Two acts on the wire, one decision, held above both views** (ADR-0016). Which of
+// subscribe and unsubscribe a click is comes from the document, so a view deciding for
+// itself would be reasoning from a state the server has not confirmed — and two views
+// deciding separately is how they come to disagree.
+test('neither view decides which act a click is', async () => {
+	for (const view of views) {
+		assert.doesNotMatch(
+			read(join(lib, view)),
+			/\bunsubscribe\b/i,
+			`${view} picks the act itself — the document is what says which one a click is`
+		);
+	}
+});
+
+test('the console hands both views the same toggle', async () => {
+	const source = read(join(lib, 'Console.svelte'));
+
+	assert.equal(
+		source.match(/onToggle=\{toggle\}/g)?.length,
+		2,
+		'the two views are not handed one toggle'
+	);
+	// The branch is on the document's own field, and both acts are named here and nowhere
+	// else — which is what makes *which act is this* one decision rather than two.
+	assert.match(source, /\.subscribed\b/, 'the toggle does not read the document');
+	for (const act of ['onSubscribe', 'onUnsubscribe']) {
+		assert.match(source, new RegExp(`${act}\\(`), `the console never calls ${act}`);
+	}
 });
 
 test('the console offers both views and opens on the board', async () => {

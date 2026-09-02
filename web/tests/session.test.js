@@ -176,7 +176,7 @@ test('hands the presence document out whole, as it arrived', () => {
 		version: 3,
 		session: 'a-session',
 		role: { id: 'a', name: 'Flight Director' },
-		loops: [{ id: 'b', name: 'Air-to-ground', permission: 'emit' }]
+		loops: [{ id: 'b', name: 'Air-to-ground', permission: 'emit', subscribed: true }]
 	};
 
 	lastSocket().says(presence);
@@ -211,6 +211,35 @@ test('taking up a role and giving it up are the two things a tab says about its 
 		'{"message":"assume","role":"a-role"}',
 		'{"message":"relinquish"}'
 	]);
+});
+
+// **Two acts rather than one toggle** (ADR-0016). The card lags the click, so a second click
+// on one that has not caught up says the same thing twice and lands on the same state; a
+// toggle would undo the first and leave somebody off a loop they had just taken up. Which of
+// the two a click is comes from the document, one level up.
+test('taking a loop up and dropping it are two things a tab says, not one', () => {
+	const channel = openSignalling(listening());
+	lastSocket().happens('open');
+
+	channel.subscribe('a-loop');
+	channel.unsubscribe('a-loop');
+
+	assert.deepEqual(lastSocket().sent.slice(1), [
+		'{"message":"subscribe","loop":"a-loop"}',
+		'{"message":"unsubscribe","loop":"a-loop"}'
+	]);
+});
+
+// Nothing renders off what a tab just said (ADR-0016). The card changes when the presence
+// document says it has, which is the whole reason the click visibly lags.
+test('taking a loop up tells the console nothing on its own', () => {
+	const page = listening();
+	const channel = openSignalling(page);
+	lastSocket().happens('open');
+
+	channel.subscribe('a-loop');
+
+	assert.deepEqual(page.told, []);
 });
 
 // **The client drives the media path ladder** (ADR-0042), so this is the message that ends

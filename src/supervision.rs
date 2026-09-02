@@ -157,6 +157,7 @@ mod tests {
                 occupant: user,
                 role,
                 limit: None,
+                subscribed_to: Vec::new(),
             })
             .expect("the seat to be free")
             .session

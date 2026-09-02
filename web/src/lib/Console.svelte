@@ -20,7 +20,7 @@
 	import Board from './Board.svelte';
 	import Ledger from './Ledger.svelte';
 
-	let { presence, lost, refused, onRelinquish } = $props();
+	let { presence, lost, refused, onRelinquish, onSubscribe, onUnsubscribe } = $props();
 
 	// The board is what a control room reads at a glance, so it is what a console opens on.
 	// Which view somebody lands in becomes theirs — personalisation per (user, role), from a
@@ -33,6 +33,20 @@
 	// to distrust the console (ADR-0032). It is the administered base order the document
 	// arrives in (ADR-0053), and this line is the one #55 changes to make it personal.
 	const inOrder = $derived(presence.loops);
+
+	// **Clicking a loop toggles monitoring**, and the toggle is decided here rather than in
+	// either view. It is two acts on the wire — subscribe and unsubscribe — and which one a
+	// click is comes from the document, which is the only thing that knows: the views are
+	// handed a click and say which loop it was on (v1 §8, ADR-0032).
+	//
+	// **There is no confirmation.** Optimistic rendering is banned (ADR-0016), so the card
+	// visibly lags the click, and a misclick on a loop the operator staffs announces itself
+	// by dropping it to `away` for everyone — which is the safety argument for making it one
+	// click rather than two.
+	function toggle(reachable) {
+		if (reachable.subscribed) onUnsubscribe(reachable.id);
+		else onSubscribe(reachable.id);
+	}
 </script>
 
 <section>
@@ -41,6 +55,14 @@
 		<p>
 			You have assumed this role and hold its authority. To take up another, relinquish this one
 			first — audio stops, and your subscriptions and arms go with it.
+		</p>
+		<p class="quiet">
+			<!-- Said once, above both views, because it is a fact about the loop list rather
+			     than about either rendering of it. The lag is the design (ADR-0016) and an
+			     operator who has not been told about it reads it as a console that missed a
+			     click. -->
+			Clicking a loop starts or stops monitoring it. There is no confirmation, and the loop changes when
+			VoxLoop says it has rather than when you click.
 		</p>
 	</header>
 
@@ -71,9 +93,9 @@
 	</div>
 
 	{#if showing === 'board'}
-		<Board loops={inOrder} mediaPath={presence.media_path} />
+		<Board loops={inOrder} mediaPath={presence.media_path} onToggle={toggle} />
 	{:else}
-		<Ledger loops={inOrder} mediaPath={presence.media_path} />
+		<Ledger loops={inOrder} mediaPath={presence.media_path} onToggle={toggle} />
 	{/if}
 
 	<p class="relinquish">

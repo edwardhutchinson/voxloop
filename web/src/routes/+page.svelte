@@ -23,6 +23,8 @@
 		lost={frame.lost}
 		refused={frame.refused}
 		onRelinquish={frame.relinquish}
+		onSubscribe={frame.subscribe}
+		onUnsubscribe={frame.unsubscribe}
 	/>
 {:else}
 	<Lobby

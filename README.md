@@ -233,8 +233,9 @@ moment.
 
 **The document is the API.** Whatever the console renders is in it, and anything in it is
 something the server has committed to keeping true. It carries the session, the role it is
-bound to, its **media path state**, and the loops in reach; subscriptions, arms, staffing
-state, loop health and the audience land in it one ticket at a time.
+bound to, its **media path state**, and the loops in reach with **which of them the session
+is monitoring**; arms, staffing state, loop health and the audience land in it one ticket at
+a time.
 
 It is **scoped to reach** — only loops the session's role holds at least `monitor` on — and
 it is recomputed on every tick, so a grid edit narrows or widens a live session's document
@@ -305,10 +306,12 @@ except layout
 The **board** is a card per loop in reach: the glanceable view, and what a control room reads
 at a glance. The **ledger** is a compact table row per loop: the reading view, and where state
 too long for a card lives. A card cannot hold a sentence, so anything the model requires fits
-the board as a word and may be a sentence only in the ledger — today that is the rung the role
-holds, `emit` on a card and *hear it, and speak on it* in a row. **From here on, a state that
-renders in only one view is a bug**, and `web/tests/board-and-ledger.test.js` asks every
-question of both views at once for that reason.
+the board as a word and may be a sentence only in the ledger — the rung the role holds is
+`emit` on a card and *hear it, and speak on it* in a row, and whether the loop is being
+monitored is `Monitoring` on a card and *you are hearing this loop* under the row's control.
+**From here on, a state that renders in only one view is a bug**, and
+`web/tests/board-and-ledger.test.js` asks every question of both views at once for that
+reason.
 
 **Order is shared.** Both views are handed one list, in the order the document arrives in,
 which is the **administered base loop order**
@@ -339,6 +342,58 @@ indicator ([ADR-0033](docs/adr/0033-the-console-shows-that-someone-is-talking-ne
 which does not exist yet — so `npm test` refuses `animation`, `transition`, `@keyframes` and
 Svelte's motion directives outright, and the indicator will be written into that check rather
 than around it.
+
+## Monitoring a loop
+
+**Subscription is the live choice to monitor a loop, and it is distinct from permission**
+(v1 §5): the grid says which loops a role *may* monitor, and the subscription says which of
+them it currently is. Every loop in reach is on the console whether or not it is being heard,
+so an operator sees what they could hear and picks.
+
+**Clicking a loop toggles it, with no confirmation.** On the board that is the card body; in
+the ledger it is a control in the row, because a table row is not a control and one that
+swallowed clicks would take the mute and the cog down with it. **Arm, mute and cog must not
+propagate the card's click**, and that is kept structurally rather than by remembering to
+stop propagation later: the card body is a `<button>`, which cannot contain another control,
+so anything added to a card is its sibling.
+
+Nothing renders optimistically, so **the loop changes when the server says it has**. The
+click visibly lags a round trip, and that is the design rather than a cost of it — a misclick
+on a loop the operator staffs announces itself by dropping that loop to `away` for everyone.
+It is **two messages rather than one toggle** for the same reason: a second click on a card
+that has not caught up yet says the same thing twice and lands on the same state, where a
+toggle would undo the first.
+
+It is gated on `Grid(monitor, loop)` — **the first live consumer of that requirement**, and
+the first message whose requirement is a function of what it carries rather than of who sent
+it, so it is built per message rather than registered once.
+
+**The set is remembered per (user, role) and restored on assume.** That is what makes a
+restart survivable: a restart ends every session and every operator must assume again, and if
+the set persists, assuming rebuilds their console instead of every operator rebuilding their
+loop set by hand during whatever incident caused the restart
+([ADR-0050](docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md)). The set is
+the memory of a live act rather than the act: a subscription itself ends with the session.
+
+**The write rides the live act and is best effort.** There is consequently **no
+personalisation configuration endpoint** — the signalling channel still carries no
+configuration API, and the endpoint list stays enumerable. The write **can never fail a live
+act**: if the live change lands and the write does not, the console is correct and the
+preference is lost, which is the right way round. A failure is logged loudly, because a
+deployment whose personalisation writes are failing is one whose operators will rebuild their
+consoles by hand after the next restart.
+
+**The grid overrules personalisation silently and always, and keeps it inert rather than
+dropping it**
+([ADR-0051](docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md)). A
+remembered subscription to a loop the role has since lost `monitor` on is not rendered and
+not deleted, so a temporary revocation does not destroy somebody's console arrangement and a
+loop that leaves reach and comes back comes back where it was.
+
+A pair with nothing remembered starts with nothing up. Seeding a first assume from the
+**role's default console** is [#27](https://github.com/edwardhutchinson/voxloop/issues/27)'s,
+along with the rest of the personalisation rules — per-loop volume, loop order and the
+default view.
 
 ## The admin console
 
@@ -544,6 +599,13 @@ cd web && npm test              # the console: the seam rule, the styling standa
 Tests run against the real store: each one opens a temporary SQLite file, migrates it and
 throws it away. There is no in-memory repository and there will not be one
 ([ADR-0064](docs/adr/0064-tests-run-against-the-real-store.md)).
+
+**A rule about what happens when a write fails is tested by making that write fail.** The
+personalisation write is best effort and must never be able to fail a live act, and there is
+no in-memory store to break — so the test installs a trigger on the real one that refuses
+that one table, the way the audit log's own triggers refuse an amendment. It is the only hole
+in Configuration's seam, it is `#[cfg(test)]`, and it lives inside the module because the
+connection it needs is that module's alone.
 
 The **media plane** is one of exactly two seams with a fake, and the fake is a **recorder**
 rather than a simulation: it writes down what it was told and does nothing else, so a test
