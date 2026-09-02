@@ -39,6 +39,9 @@ use axum::response::Response;
 
 use crate::configuration::{Deployment, Store, StoreError, Transaction, UserId, Users};
 use crate::identity::{Bootstrap, Identity, PasswordRefused};
+use crate::media_plane::MediaPlane;
+#[cfg(test)]
+use crate::media_plane::{Recording, a_recording_media_plane};
 use crate::state::StateAuthority;
 use crate::telemetry::module;
 use rate_limit::{Admission, RateLimits};
@@ -60,6 +63,12 @@ struct Api {
     /// [ADR-0039]: ../../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
     state: Arc<StateAuthority>,
     identity: Identity,
+    /// A handle to the one thing carrying audio ([ADR-0006]). It is here rather than beside
+    /// the state authority because the acts that open and close a media path — assuming a
+    /// role, giving it up — are signalling acts, and this is the module that answers them.
+    ///
+    /// [ADR-0006]: ../../../docs/adr/0006-mediasoup-carries-the-audio.md
+    media: MediaPlane,
     limits: Arc<RateLimits>,
     /// The code this run of the process minted, where nobody administers this deployment
     /// yet. `None` is the ordinary state, and it is what leaves the redemption route
@@ -188,6 +197,7 @@ pub(crate) async fn start(
     store: Arc<Store>,
     state: Arc<StateAuthority>,
     identity: Identity,
+    media: MediaPlane,
     bootstrap: Option<Bootstrap>,
 ) -> Result<Serving, TransportError> {
     install_cryptography();
@@ -196,6 +206,7 @@ pub(crate) async fn start(
         store,
         state,
         identity,
+        media,
         limits: Arc::new(RateLimits::default()),
         bootstrap: bootstrap.map(Arc::new),
     };
@@ -408,6 +419,8 @@ mod tests {
             format!(
                 "[listen]\naddress = \"127.0.0.1:0\"\n\n\
                  [tls]\ncertificate = \"{}\"\nprivate_key = \"{}\"\n\n\
+                 [media]\nannounced_address = \"127.0.0.1\"\nlisten_address = \"127.0.0.1\"\n\
+                 port = 0\n\n\
                  [store]\npath = \"{}\"\n\n\
                  [log]\nlevel = \"warn\"\n",
                 certificate.display(),
@@ -437,12 +450,18 @@ mod tests {
                 .await
                 .expect("the store to answer");
 
+            // No worker runs in a test ([ADR-0064]). Nothing reached over HTTP touches the
+            // media plane — assuming and relinquishing are signalling acts, and that is
+            // where what it was told is asserted on.
+            let (media, _reports, _recording) = a_recording_media_plane();
+
             Self {
                 _directory: directory,
                 api: Api {
                     store,
                     state: Arc::new(StateAuthority::empty()),
                     identity: Identity::local_passwords(),
+                    media,
                     limits: Arc::new(RateLimits::default()),
                     bootstrap: bootstrap.map(Arc::new),
                 },
@@ -1119,7 +1138,9 @@ mod tests {
 
     /// A server on a fresh store, a client that trusts its certificate, the URL it is
     /// serving on, and the bootstrap code it minted on the way up.
-    async fn a_server_in(directory: &Path) -> (Serving, reqwest::Client, String, String) {
+    async fn a_server_in(
+        directory: &Path,
+    ) -> (Serving, reqwest::Client, String, String, Arc<Recording>) {
         let deployment = a_deployment_in(directory);
         let store = Arc::new(
             Store::open(&deployment.store.path)
@@ -1133,11 +1154,17 @@ mod tests {
             .as_ref()
             .and_then(Bootstrap::code)
             .expect("a bootstrap code");
+        // The recorder rather than a worker, even here where everything else is real: the
+        // real adapter binds a UDP port, and a test suite that ran several of these at once
+        // would be testing whether they collided (ADR-0064). Nothing reads the reports —
+        // what the server's own end says is exercised in `supervision`, where it is decided.
+        let (media, _reports, recording) = a_recording_media_plane();
         let serving = start(
             &deployment,
             store,
             Arc::new(StateAuthority::empty()),
             Identity::local_passwords(),
+            media,
             bootstrap,
         )
         .await
@@ -1155,13 +1182,13 @@ mod tests {
 
         let at = format!("https://localhost:{}", serving.address().port());
 
-        (serving, client, at, code)
+        (serving, client, at, code, recording)
     }
 
     #[tokio::test]
     async fn answers_liveness_over_tls_and_says_nothing_else() {
         let directory = tempfile::tempdir().expect("a temporary directory");
-        let (serving, client, at, _code) = a_server_in(directory.path()).await;
+        let (serving, client, at, _code, _media) = a_server_in(directory.path()).await;
 
         let answer = client
             .get(format!("{at}/api/liveness"))
@@ -1177,7 +1204,7 @@ mod tests {
     #[tokio::test]
     async fn stops_answering_once_it_is_asked_to_stop() {
         let directory = tempfile::tempdir().expect("a temporary directory");
-        let (serving, client, at, _code) = a_server_in(directory.path()).await;
+        let (serving, client, at, _code, _media) = a_server_in(directory.path()).await;
         let liveness = format!("{at}/api/liveness");
         client.get(&liveness).send().await.expect("an answer");
 
@@ -1194,7 +1221,7 @@ mod tests {
     #[tokio::test]
     async fn bootstraps_and_signs_a_browser_in_over_tls() {
         let directory = tempfile::tempdir().expect("a temporary directory");
-        let (serving, client, at, code) = a_server_in(directory.path()).await;
+        let (serving, client, at, code, _media) = a_server_in(directory.path()).await;
 
         let redeemed = client
             .post(format!("{at}/api/bootstrap"))
@@ -1248,7 +1275,7 @@ mod tests {
         use tokio_tungstenite::tungstenite::protocol::Role;
 
         let directory = tempfile::tempdir().expect("a temporary directory");
-        let (serving, client, at, code) = a_server_in(directory.path()).await;
+        let (serving, client, at, code, _media) = a_server_in(directory.path()).await;
         client
             .post(format!("{at}/api/bootstrap"))
             .header("content-type", "application/json")
@@ -1381,7 +1408,7 @@ mod tests {
         use tokio_tungstenite::tungstenite::protocol::Role;
 
         let directory = tempfile::tempdir().expect("a temporary directory");
-        let (serving, client, at, code) = a_server_in(directory.path()).await;
+        let (serving, client, at, code, _media) = a_server_in(directory.path()).await;
         client
             .post(format!("{at}/api/bootstrap"))
             .header("content-type", "application/json")

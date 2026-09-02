@@ -21,6 +21,22 @@ address = "0.0.0.0:8443"
 certificate = "/etc/voxloop/tls/certificate.pem"
 private_key = "/etc/voxloop/tls/private-key.pem"
 
+[media]
+# Where the audio goes. **One** port carries every transport, UDP primarily with ICE-TCP
+# fallback on the same number where UDP is blocked (ADR-0006) — a materially simpler firewall
+# conversation than an ephemeral range, and there is no TURN server to configure because the
+# box sits at a fixed address inside the network with remote users already on the VPN.
+#
+# `announced_address` is what goes into every ICE candidate, so it is the address a client
+# dials rather than the one the box binds. It is the one value in this file with no default:
+# get it wrong and VoxLoop comes up, serves the console and fills its seats while no audio
+# ever arrives. Required.
+announced_address = "10.0.0.4"
+# What the worker binds. Optional; this is the default.
+listen_address = "0.0.0.0"
+# Optional; this is the default.
+port = 44444
+
 [store]
 # The one SQLite file. The box is the database: there is no replica and no network
 # endpoint, so backing this up is a real deployment obligation. Required.

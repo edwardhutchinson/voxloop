@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use figment::Figment;
@@ -19,6 +19,7 @@ pub(crate) struct Deployment {
     #[serde(default)]
     pub(crate) listen: Listen,
     pub(crate) tls: Tls,
+    pub(crate) media: Media,
     pub(crate) store: StoreFile,
     #[serde(default)]
     pub(crate) log: Log,
@@ -37,6 +38,63 @@ pub(crate) struct Listen {
 pub(crate) struct Tls {
     pub(crate) certificate: PathBuf,
     pub(crate) private_key: PathBuf,
+}
+
+/// Where the audio goes: one port, and the address to put in an ICE candidate.
+///
+/// **`announced_address` has no default and never will.** Everything else in this file falls
+/// back to something a box can run on; this cannot, because the wrong value here is the one
+/// failure that looks like success — the console signs in, the loops render, the seats fill,
+/// and no audio ever arrives, because every candidate VoxLoop offered named an address the
+/// client cannot reach. A deployment that has not said where it is does not start.
+///
+/// There is **no TURN server** ([ADR-0006]): the box sits at a fixed address inside the
+/// customer's network with remote users already on the VPN, so host candidates are expected
+/// to work. That is a revisitable assumption rather than a finding.
+///
+/// [ADR-0006]: ../../../docs/adr/0006-mediasoup-carries-the-audio.md
+#[derive(Debug, Deserialize)]
+pub(crate) struct Media {
+    /// The address a client dials, which is the one that goes into every ICE candidate.
+    ///
+    /// A hostname is accepted as well as an address, because mediasoup accepts one.
+    pub(crate) announced_address: String,
+    /// What the worker binds. Optional; every interface, which is what a box with one
+    /// address and a firewall in front of it wants.
+    #[serde(default = "Media::every_interface")]
+    pub(crate) listen_address: IpAddr,
+    /// **One** port, carrying UDP primarily and ICE-TCP where UDP is blocked ([ADR-0006]).
+    ///
+    /// One number rather than an ephemeral range, on both protocols rather than two, because
+    /// the firewall conversation is a real cost of deploying this and a range is a much
+    /// worse one.
+    ///
+    /// [ADR-0006]: ../../../docs/adr/0006-mediasoup-carries-the-audio.md
+    #[serde(default = "Media::the_usual_port")]
+    pub(crate) port: u16,
+}
+
+impl Media {
+    fn every_interface() -> IpAddr {
+        IpAddr::from([0, 0, 0, 0])
+    }
+
+    /// Nothing depends on the number; it is out of the ephemeral range, out of the way of
+    /// anything registered, and the same on every deployment that does not say otherwise so
+    /// that a firewall rule is one number somebody can recognise.
+    fn the_usual_port() -> u16 {
+        44444
+    }
+
+    /// Media on loopback, on whatever port is free. What a test asks for.
+    #[cfg(test)]
+    pub(crate) fn on_loopback() -> Self {
+        Self {
+            announced_address: "127.0.0.1".to_owned(),
+            listen_address: IpAddr::from([127, 0, 0, 1]),
+            port: 0,
+        }
+    }
 }
 
 /// Where the one SQLite file lives.
@@ -104,7 +162,7 @@ impl Deployment {
 #[allow(clippy::result_large_err)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
+    use std::net::{IpAddr, SocketAddr};
 
     const A_WHOLE_FILE: &str = r#"
         [listen]
@@ -113,6 +171,11 @@ mod tests {
         [tls]
         certificate = "/etc/voxloop/tls/fullchain.pem"
         private_key = "/etc/voxloop/tls/privkey.pem"
+
+        [media]
+        announced_address = "10.0.0.4"
+        listen_address = "10.0.0.4"
+        port = 45000
 
         [store]
         path = "/var/lib/voxloop/voxloop.sqlite"
@@ -144,6 +207,12 @@ mod tests {
                 deployment.store.path,
                 PathBuf::from("/var/lib/voxloop/voxloop.sqlite")
             );
+            assert_eq!(deployment.media.announced_address, "10.0.0.4");
+            assert_eq!(
+                deployment.media.listen_address,
+                "10.0.0.4".parse::<IpAddr>().unwrap()
+            );
+            assert_eq!(deployment.media.port, 45000);
             assert_eq!(deployment.log.level, "warn");
             Ok(())
         });
@@ -177,6 +246,9 @@ mod tests {
                 certificate = "/etc/voxloop/tls/fullchain.pem"
                 private_key = "/etc/voxloop/tls/privkey.pem"
 
+                [media]
+                announced_address = "10.0.0.4"
+
                 [store]
                 path = "/var/lib/voxloop/voxloop.sqlite"
                 "#,
@@ -189,6 +261,13 @@ mod tests {
                 "0.0.0.0:8443".parse::<SocketAddr>().unwrap()
             );
             assert_eq!(deployment.log.level, "info");
+            // Every interface and one recognisable port, so a box with one address and a
+            // firewall in front of it needs to say only where it is.
+            assert_eq!(
+                deployment.media.listen_address,
+                "0.0.0.0".parse::<IpAddr>().unwrap()
+            );
+            assert_eq!(deployment.media.port, 44444);
             Ok(())
         });
     }
@@ -205,6 +284,36 @@ mod tests {
             assert!(
                 matches!(refusal, DeploymentError::Missing { .. }),
                 "expected a refusal naming the missing file, got {refusal:?}"
+            );
+            Ok(())
+        });
+    }
+
+    /// The one value with no fallback. A box that has not said where it is would come up,
+    /// serve the console, fill its seats and carry no audio, and every ICE candidate it
+    /// offered would name an address no client can reach.
+    #[test]
+    fn refuses_a_file_that_does_not_say_where_the_audio_is() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "voxloop.toml",
+                r#"
+                [tls]
+                certificate = "/etc/voxloop/tls/fullchain.pem"
+                private_key = "/etc/voxloop/tls/privkey.pem"
+
+                [store]
+                path = "/var/lib/voxloop/voxloop.sqlite"
+                "#,
+            )?;
+
+            let Err(refusal) = Deployment::load(Path::new("voxloop.toml")) else {
+                panic!("expected a refusal to start");
+            };
+
+            assert!(
+                matches!(refusal, DeploymentError::Unreadable { .. }),
+                "expected a refusal, got {refusal:?}"
             );
             Ok(())
         });

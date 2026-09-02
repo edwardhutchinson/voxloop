@@ -45,7 +45,7 @@ const TOMBSTONES_ARE_KEPT_FOR: Duration = Duration::from_secs(15 * 60);
 /// that can be enumerated is a way to ask which sessions exist.
 ///
 /// [ADR-0041]: ../../docs/adr/0041-a-session-is-resumed-by-name.md
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct SessionId(String);
 
 impl SessionId {
@@ -57,6 +57,78 @@ impl SessionId {
 
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// A session's standing with the audio transport ([ADR-0042]).
+///
+/// The second of the three axes any console state has to be read against, and the mirror of
+/// connection state rather than a version of it: the two fail independently in both
+/// directions, and a session can be told everything while being heard by nobody.
+///
+/// **The order of these lines is the ladder**, and it is what makes the merge a `max`.
+/// `Ord` is derived from declaration order, so moving one of them silently changes which
+/// reading wins when the two ends disagree.
+///
+/// **A session with no media path has no emission path.** `lost` is where emission is
+/// withdrawn, and it covers a transport that has failed and a transport nobody has connected
+/// to yet alike — both carry no audio, and a console that drew them differently would be
+/// making a distinction the operator cannot act on.
+///
+/// `impaired` exists for the same reason connection state's `unconfirmed` does: a binary
+/// reading would flap on every ICE consent hiccup and cut audio for a reroute that heals
+/// itself in a second.
+///
+/// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum MediaPath {
+    /// Audio is crossing, or would if there were any.
+    Connected,
+    /// A transient fault, of the kind that routinely heals itself. Emission stands.
+    Impaired,
+    /// Emission is withdrawn. It is the default because it is what is true before anybody
+    /// has said otherwise: a session that has just been minted has no path yet.
+    #[default]
+    Lost,
+}
+
+impl MediaPath {
+    /// The word the presence document carries, and the one the client reports back.
+    ///
+    /// The client sends these too, so they are one vocabulary rather than two that have to
+    /// agree — a ladder whose two ends spelled a rung differently would fail in the direction
+    /// nobody tests.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::Impaired => "impaired",
+            Self::Lost => "lost",
+        }
+    }
+
+    /// A rung as a client named it, or nothing where it named something else.
+    ///
+    /// Nothing defaults here either. A word this server does not know is refused rather than
+    /// read as the nearest rung, because guessing would let a client hold emission open by
+    /// mistyping.
+    pub(crate) fn presented(said: &str) -> Option<Self> {
+        match said {
+            "connected" => Some(Self::Connected),
+            "impaired" => Some(Self::Impaired),
+            "lost" => Some(Self::Lost),
+            _ => None,
+        }
+    }
+
+    /// The worse of two readings. **Green needs both ends, red needs one** ([ADR-0042]).
+    ///
+    /// It is `pub(crate)` because the media plane merges the two halves of the server's own
+    /// end — ICE and DTLS — by the same rule, and one rule written twice is one that can
+    /// come to disagree with itself.
+    ///
+    /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
+    pub(crate) fn pessimistically_with(self, other: Self) -> Self {
+        self.max(other)
     }
 }
 
@@ -125,6 +197,24 @@ struct Session {
     /// [ADR-0019]: ../../docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md
     version: u64,
     last: Option<Presence>,
+    /// The two ends of the media path, kept apart because the merge is pessimistic and a
+    /// single merged field would have nowhere to put the reading that is currently losing.
+    ///
+    /// **The client is the driver and the server is the backstop** ([ADR-0042]). Both start
+    /// at `lost`, which is the truth about a session minted a moment ago: the transport is
+    /// being built, nobody has connected to it, and no audio can cross it yet.
+    ///
+    /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
+    said_by_the_client: MediaPath,
+    seen_by_the_server: MediaPath,
+}
+
+impl Session {
+    /// What the two ends amount to. Green needs both, red needs one.
+    fn media_path(&self) -> MediaPath {
+        self.said_by_the_client
+            .pessimistically_with(self.seen_by_the_server)
+    }
 }
 
 /// A session that is over, and why.
@@ -254,6 +344,15 @@ pub(crate) struct InReach {
 pub(crate) struct Presence {
     pub(crate) session: SessionId,
     pub(crate) role: RoleId,
+    /// Where this session stands with the audio transport, both ends merged ([ADR-0042]).
+    ///
+    /// It is in the document because the document is the API and the transmit bar renders
+    /// it: emission has two independent withdrawal conditions, and the bar has to be able to
+    /// say **which** one applies, because a lost state channel and a lost audio path are
+    /// different problems with different fixes.
+    ///
+    /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
+    pub(crate) media_path: MediaPath,
     pub(crate) loops: Vec<InReach>,
 }
 
@@ -325,6 +424,8 @@ impl StateAuthority {
                 role: assuming.role,
                 version: 0,
                 last: None,
+                said_by_the_client: MediaPath::default(),
+                seen_by_the_server: MediaPath::default(),
             });
 
             Ok(Assumed { session, displaced })
@@ -437,6 +538,7 @@ impl StateAuthority {
             let presence = Presence {
                 session: held.id.clone(),
                 role: held.role.clone(),
+                media_path: held.media_path(),
                 loops: within,
             };
 
@@ -447,6 +549,67 @@ impl StateAuthority {
 
             Some((held.version, presence))
         })
+    }
+
+    /// What the client says about its own media path.
+    ///
+    /// **The client drives this ladder** ([ADR-0042]), and the reason is in the two APIs: a
+    /// browser's `RTCPeerConnection` tells a transient `disconnected` from a terminal
+    /// `failed`, and mediasoup's server-side `iceState` has no `failed` at all and takes
+    /// around thirty seconds of consent freshness to say anything — longer than the whole
+    /// signalling ladder. A server-authoritative reading would keep emission live over a dead
+    /// audio path for longer than a lost state channel is tolerated.
+    ///
+    /// It is taken as said and merged rather than trusted outright: this end can be wedged or
+    /// lying, and [`StateAuthority::the_server_sees`] is what covers that.
+    ///
+    /// Nothing where the id names no session, which is what a client reporting into a session
+    /// that ended under it finds.
+    ///
+    /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
+    pub(crate) fn the_client_says(&self, session: &SessionId, is: MediaPath) {
+        self.write(|live| {
+            if let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) {
+                held.said_by_the_client = is;
+            }
+        });
+    }
+
+    /// What the server's own end of the media path looks like.
+    ///
+    /// The **backstop** rather than the driver ([ADR-0042]): it is worse at telling a blip
+    /// from a failure and better at the one thing the other end cannot do, which is notice
+    /// that the client has stopped telling the truth. The two are merged pessimistically
+    /// wherever the document is projected — green needs both, red needs one.
+    ///
+    /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
+    pub(crate) fn the_server_sees(&self, session: &SessionId, is: MediaPath) {
+        self.write(|live| {
+            if let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) {
+                held.seen_by_the_server = is;
+            }
+        });
+    }
+
+    /// Nothing is carrying audio: the worker is gone, and every media path with it.
+    ///
+    /// A worker's death is not one session's problem and is not recorded as one. It is
+    /// **only ever the server's end** that moves — the client is still holding whatever it
+    /// last saw, and a browser whose transport has quietly stopped receiving will say so on
+    /// its own schedule.
+    ///
+    /// The sessions themselves stand. A permanently dead media path does not end a session
+    /// ([ADR-0042]): the operator is present, reading a working console that can say exactly
+    /// what is wrong, and taking the decision off them — possibly mid-fix — is the wrong way
+    /// round.
+    ///
+    /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
+    pub(crate) fn nothing_is_carried(&self) {
+        self.write(|live| {
+            for held in &mut live.sessions {
+                held.seen_by_the_server = MediaPath::Lost;
+            }
+        });
     }
 
     /// Who occupies this role, now.
@@ -977,6 +1140,198 @@ mod tests {
             .expect("a document");
 
         assert_eq!(theirs, 1, "one session's version counted the other's");
+    }
+
+    // ---- #40: the media path ladder ----------------------------------------------------
+
+    /// Where the merged ladder stands, as the document would carry it.
+    fn the_media_path(live: &StateAuthority, session: &SessionId) -> MediaPath {
+        live.presence(session, Vec::new())
+            .expect("a live session")
+            .1
+            .media_path
+    }
+
+    /// The rungs are ordered green to red, and the order is what makes the merge a `max`.
+    /// A test rather than a comment because reordering the declaration would silently invert
+    /// which reading wins when the two ends disagree.
+    #[test]
+    fn the_ladder_runs_from_connected_down_to_lost() {
+        assert!(MediaPath::Connected < MediaPath::Impaired);
+        assert!(MediaPath::Impaired < MediaPath::Lost);
+        assert_eq!(MediaPath::default(), MediaPath::Lost);
+    }
+
+    /// A session that has just been minted has a transport being built and nobody connected
+    /// to it. `lost` is the truth about that, and it is the truth the transmit bar has to be
+    /// able to say.
+    #[tokio::test]
+    async fn a_session_starts_with_no_media_path_at_either_end() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(Assuming {
+                sign_in,
+                occupant: user,
+                role,
+                limit: None,
+            })
+            .expect("the seat to be free");
+
+        assert_eq!(
+            the_media_path(&live, &assumed.session),
+            MediaPath::Lost,
+            "a session was given a media path nobody had established"
+        );
+    }
+
+    /// **Green needs both, red needs one** ([ADR-0042]). Every combination, because the two
+    /// ends disagree routinely and which one wins is the whole of the rule.
+    ///
+    /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
+    #[tokio::test]
+    async fn the_two_ends_merge_pessimistically() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(Assuming {
+                sign_in,
+                occupant: user,
+                role,
+                limit: None,
+            })
+            .expect("the seat to be free");
+
+        for (client, server, merged) in [
+            (
+                MediaPath::Connected,
+                MediaPath::Connected,
+                MediaPath::Connected,
+            ),
+            (
+                MediaPath::Connected,
+                MediaPath::Impaired,
+                MediaPath::Impaired,
+            ),
+            (
+                MediaPath::Impaired,
+                MediaPath::Connected,
+                MediaPath::Impaired,
+            ),
+            (MediaPath::Connected, MediaPath::Lost, MediaPath::Lost),
+            (MediaPath::Lost, MediaPath::Connected, MediaPath::Lost),
+            (MediaPath::Impaired, MediaPath::Lost, MediaPath::Lost),
+            (MediaPath::Lost, MediaPath::Impaired, MediaPath::Lost),
+        ] {
+            live.the_client_says(&assumed.session, client);
+            live.the_server_sees(&assumed.session, server);
+
+            assert_eq!(
+                the_media_path(&live, &assumed.session),
+                merged,
+                "the client said {client:?} and the server saw {server:?}"
+            );
+        }
+    }
+
+    /// A media path moving moves the document, because the document is the API and the
+    /// transmit bar renders this.
+    #[tokio::test]
+    async fn the_version_moves_when_the_media_path_does() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(Assuming {
+                sign_in,
+                occupant: user,
+                role,
+                limit: None,
+            })
+            .expect("the seat to be free");
+        let (first, _) = live
+            .presence(&assumed.session, Vec::new())
+            .expect("a document");
+
+        live.the_client_says(&assumed.session, MediaPath::Connected);
+        live.the_server_sees(&assumed.session, MediaPath::Connected);
+        let (then, _) = live
+            .presence(&assumed.session, Vec::new())
+            .expect("a document");
+
+        assert!(then > first, "the document moved and the version did not");
+
+        // And it does not move for a reading that changes nothing.
+        live.the_client_says(&assumed.session, MediaPath::Connected);
+        let (again, _) = live
+            .presence(&assumed.session, Vec::new())
+            .expect("a document");
+        assert_eq!(again, then);
+    }
+
+    /// The worker's death is the server's end everywhere at once, and it ends nothing. The
+    /// operator is present, reading a working console that can say exactly what is wrong.
+    #[tokio::test]
+    async fn nothing_being_carried_takes_every_session_off_the_air_and_ends_none() {
+        let (_directory, store) = a_temporary_store().await;
+        let (one_sign_in, one_user, one_role) = a_seat(&store, "flight", "Flight Director").await;
+        let (two_sign_in, two_user, two_role) = a_seat(&store, "capcom", "Capcom").await;
+        let live = StateAuthority::empty();
+        let one = live
+            .assume(Assuming {
+                sign_in: one_sign_in,
+                occupant: one_user,
+                role: one_role,
+                limit: None,
+            })
+            .expect("the seat to be free");
+        let two = live
+            .assume(Assuming {
+                sign_in: two_sign_in,
+                occupant: two_user,
+                role: two_role,
+                limit: None,
+            })
+            .expect("the seat to be free");
+        for session in [&one.session, &two.session] {
+            live.the_client_says(session, MediaPath::Connected);
+            live.the_server_sees(session, MediaPath::Connected);
+        }
+
+        live.nothing_is_carried();
+
+        for session in [&one.session, &two.session] {
+            assert_eq!(the_media_path(&live, session), MediaPath::Lost);
+            assert!(
+                live.the_role_of(session).is_some(),
+                "a session was ended for a dead media path"
+            );
+        }
+    }
+
+    /// A reading for a session that ended under it is nothing, rather than a panic or a
+    /// resurrection. It is what a client reporting into a seat it no longer holds finds.
+    #[tokio::test]
+    async fn a_reading_about_a_session_that_is_over_lands_nowhere() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(Assuming {
+                sign_in,
+                occupant: user,
+                role,
+                limit: None,
+            })
+            .expect("the seat to be free");
+        live.ended_by_its_own_holder(&assumed.session);
+
+        live.the_client_says(&assumed.session, MediaPath::Connected);
+        live.the_server_sees(&assumed.session, MediaPath::Connected);
+
+        assert!(live.presence(&assumed.session, Vec::new()).is_none());
     }
 
     /// One loop in reach, named the way a grid row hands it over.

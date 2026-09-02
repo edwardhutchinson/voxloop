@@ -12,7 +12,7 @@
 	// and eleventh in the other.
 	import TransmitBar from './TransmitBar.svelte';
 
-	let { loops } = $props();
+	let { loops, mediaPath } = $props();
 
 	// A rung is a word on the board and a sentence here. A rung this does not know is shown
 	// as the word the document used: the grid is the only thing entitled to say what a role
@@ -28,7 +28,7 @@
      ledger is read top-down from its header, and a bar under a table of unknown length reads
      as that table's footer rather than as a fixture of the console. -->
 <div class="transmit">
-	<TransmitBar />
+	<TransmitBar {mediaPath} />
 </div>
 
 <table>

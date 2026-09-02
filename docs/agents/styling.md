@@ -74,7 +74,7 @@ fail the build, and a third copy in this file would be prose that quietly goes o
 | | `--space-page-bottom` — clears the transmit bar, which is never scrolled away |
 | **Type** | `--type-1` to `--type-5`, smallest to largest |
 | **Radius** | `--radius`, the only one |
-| **Colour** | `--ground` the page · `--raised` a surface on it · `--ink` text · `--quiet` secondary text · `--rule` a border · `--refusal` a denial or a destructive act · `--warning` v1 §8's `0 hearing` |
+| **Colour** | `--ground` the page · `--raised` a surface on it · `--ink` text · `--quiet` secondary text · `--rule` a border · `--refusal` a denial or a destructive act · `--warning` *this is true and you should look at it* — v1 §8's `0 hearing`, a frozen lobby, a media path that is impaired or lost |
 
 Nothing else has a value to reach for: widths, `letter-spacing` and border widths are decided
 per rule and carry a comment when they are not obvious.

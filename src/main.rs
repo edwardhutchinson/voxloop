@@ -29,9 +29,11 @@ mod authorisation;
 mod configuration;
 mod identity;
 mod lifetimes;
+mod media_plane;
 mod on_box;
 mod secrets;
 mod state;
+mod supervision;
 mod telemetry;
 mod transport;
 
@@ -42,6 +44,7 @@ use std::sync::Arc;
 
 use configuration::{Deployment, DeploymentError, Store, StoreError};
 use identity::{Bootstrap, Identity};
+use media_plane::{MediaPlane, MediaPlaneError};
 use on_box::{Invocation, OnBoxError};
 use state::StateAuthority;
 use telemetry::{TelemetryError, module};
@@ -63,9 +66,15 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Everything that stops VoxLoop before it has started.
+/// Everything that stops VoxLoop.
+///
+/// Almost all of it is startup: a deployment file that is not there, a certificate that
+/// cannot be read, a store that will not open, a worker that will not start. The one
+/// exception is [`Fatal::TheAudioStopped`], which happens long afterwards and is here for the
+/// same reason as the rest — it is a reason this process is over, and the operator gets it on
+/// stderr and systemd gets it as an exit code.
 #[derive(Debug, thiserror::Error)]
-enum StartupError {
+enum Fatal {
     #[error(transparent)]
     Deployment(#[from] DeploymentError),
 
@@ -74,6 +83,12 @@ enum StartupError {
 
     #[error(transparent)]
     Store(#[from] StoreError),
+
+    #[error(transparent)]
+    MediaPlane(#[from] MediaPlaneError),
+
+    #[error("the mediasoup worker stopped, so nothing was carrying audio any more")]
+    TheAudioStopped,
 
     #[error(transparent)]
     Transport(#[from] TransportError),
@@ -89,7 +104,7 @@ enum StartupError {
 /// out of the deployment — which is the only moment it is ever run ([ADR-0025]).
 ///
 /// [ADR-0025]: ../../docs/adr/0025-credentials-are-administered-because-there-is-no-email.md
-async fn run() -> Result<(), StartupError> {
+async fn run() -> Result<(), Fatal> {
     match on_box::invoked(std::env::args().skip(1))? {
         Invocation::Serve { deployment } => serve(&deployment).await,
         Invocation::MakeAnAdministrator {
@@ -121,13 +136,13 @@ async fn run() -> Result<(), StartupError> {
 ///
 /// No telemetry subscriber is started: the operator ran a command and is owed its answer on
 /// stdout, not the deployment's configured log level poured over the top of it.
-async fn on_the_box(deployment: &Path) -> Result<Store, StartupError> {
+async fn on_the_box(deployment: &Path) -> Result<Store, Fatal> {
     let deployment = Deployment::load(deployment)?;
 
     Ok(Store::open(&deployment.store.path).await?)
 }
 
-async fn serve(deployment: &Path) -> Result<(), StartupError> {
+async fn serve(deployment: &Path) -> Result<(), Fatal> {
     let deployment = Deployment::load(deployment)?;
     telemetry::start(&deployment.log.level)?;
 
@@ -143,11 +158,21 @@ async fn serve(deployment: &Path) -> Result<(), StartupError> {
     // survive, so everybody who was on console is signed in, in the lobby.
     let state = Arc::new(StateAuthority::empty());
 
+    // One Worker, one Router and one port, before anything is served. A deployment that
+    // cannot carry audio has lost its whole purpose, so it refuses to start rather than
+    // offering a console that will never make a sound (ADR-0006).
+    let (media, reports, carriageway) = MediaPlane::carrying(&deployment.media).await?;
+
+    // The media plane calls nothing and reports on a channel (ADR-0062), so this is what
+    // turns what it says into live state. It starts before the first session can exist.
+    let watching = supervision::watching(reports, Arc::clone(&state));
+
     let serving = transport::start(
         &deployment,
         Arc::clone(&store),
         Arc::clone(&state),
         Identity::local_passwords(),
+        media,
         bootstrap,
     )
     .await?;
@@ -157,17 +182,37 @@ async fn serve(deployment: &Path) -> Result<(), StartupError> {
     // only while it stands in the lobby (v1 §2).
     let sweeping = lifetimes::sweeping(Arc::clone(&store), state);
 
-    wait_to_be_stopped().await;
+    // Two things stop VoxLoop. One is somebody asking. The other is the worker dying, which
+    // takes every transport with it and cannot be recovered in place ([ADR-0070]) — so the
+    // honest end is the one every deployment already exercises: go down, let systemd bring
+    // the unit back, and end every session rather than serving consoles that will never
+    // make a sound again.
+    let carrying_audio = tokio::select! {
+        () = wait_to_be_stopped() => true,
+        () = watching.until_nothing_is_carried() => false,
+    };
 
     sweeping.stop();
 
     // A restart is indistinguishable from total network loss to every client, and it ends
     // every session, so the least this can do is put the store down cleanly.
+    //
+    // The order is sockets, then reports, then audio, then the store: a console still being
+    // answered may yet be told something, a report still in flight is still worth writing
+    // down, and nothing is owed to a port nobody is listening on.
     serving.stop().await;
+    watching.stop();
+    carriageway.stop();
     store.close().await;
     tracing::info!(target: module::TRANSPORT, "stopped");
 
-    Ok(())
+    // A deliberate stop is a success and a worker's death is not, so the exit code tells
+    // them apart: systemd restarts what failed, and a unit that came down on purpose stays
+    // down.
+    match carrying_audio {
+        true => Ok(()),
+        false => Err(Fatal::TheAudioStopped),
+    }
 }
 
 /// Wait for systemd to stop the unit, or for someone at a terminal to interrupt it.

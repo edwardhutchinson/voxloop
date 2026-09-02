@@ -35,8 +35,13 @@ const asShown = (body, names) =>
 
 const eachView = (props) => Promise.all(views.map((view) => rendered(view, props)));
 
+// A view as a session with a working audio path sees it. The media path is passed rather
+// than left out wherever a question is not about it, because the document always carries one
+// (ADR-0042) and a view rendered without it is a view no session ever sees.
+const carrying = { loops: inReach, mediaPath: 'connected' };
+
 test('both views render every loop in the document', async () => {
-	for (const [at, body] of (await eachView({ loops: inReach })).entries()) {
+	for (const [at, body] of (await eachView(carrying)).entries()) {
 		for (const name of namesOf(inReach)) {
 			assert.match(body, new RegExp(name), `${views[at]} left out ${name}`);
 		}
@@ -44,7 +49,7 @@ test('both views render every loop in the document', async () => {
 });
 
 test('both views hold the loops in one order', async () => {
-	for (const [at, body] of (await eachView({ loops: inReach })).entries()) {
+	for (const [at, body] of (await eachView(carrying)).entries()) {
 		assert.deepEqual(
 			asShown(body, namesOf(inReach)),
 			namesOf(inReach),
@@ -70,15 +75,18 @@ test('a loop that leaves reach leaves both views', async () => {
 	const [left] = namesOf(inReach);
 	const stillThere = inReach.slice(1);
 
-	for (const [at, body] of (await eachView({ loops: stillThere })).entries()) {
+	for (const [at, body] of (await eachView({ ...carrying, loops: stillThere })).entries()) {
 		assert.doesNotMatch(body, new RegExp(left), `${views[at]} still shows ${left}`);
 		for (const name of namesOf(stillThere)) assert.match(body, new RegExp(name));
 	}
 });
 
 test('an empty reach is a view with no loops rather than no view', async () => {
-	for (const [at, body] of (await eachView({ loops: [] })).entries()) {
-		assert.ok(body.includes(await rendered('TransmitBar.svelte')), `${views[at]} lost its bar`);
+	for (const [at, body] of (await eachView({ ...carrying, loops: [] })).entries()) {
+		assert.ok(
+			body.includes(await rendered('TransmitBar.svelte', { mediaPath: 'connected' })),
+			`${views[at]} lost its bar`
+		);
 	}
 });
 
@@ -86,20 +94,61 @@ test('an empty reach is a view with no loops rather than no view', async () => {
 // permission is the only state either view carries at this point, so it is where the division
 // of labour is established: the rung as a word on the board, what it confers in the ledger.
 test('the board says a word where the ledger says a sentence', async () => {
-	const [board, ledger] = await eachView({ loops: inReach });
+	const [board, ledger] = await eachView(carrying);
 
 	for (const { permission } of inReach) assert.match(board, new RegExp(permission));
 	assert.match(ledger, /speak on it/);
 });
 
-test('the transmit bar is in both views, worded identically', async () => {
-	const bar = await rendered('TransmitBar.svelte');
+// Every state the bar has, in both views, rather than one of them: the bar is the whole of
+// VoxLoop's compensation for emitting to several places at once, and a board and a ledger
+// disagreeing about whether an operator can be heard would be worse than neither saying
+// anything.
+test('the transmit bar is in both views, worded identically, in every state it has', async () => {
+	for (const mediaPath of ['connected', 'impaired', 'lost']) {
+		const bar = await rendered('TransmitBar.svelte', { mediaPath });
 
-	// The same bytes, because it is the same component: two views cannot word one bar
-	// differently if neither of them writes the wording.
-	for (const [at, body] of (await eachView({ loops: inReach })).entries()) {
-		assert.ok(body.includes(bar), `${views[at]} does not carry the transmit bar`);
+		// The same bytes, because it is the same component: two views cannot word one bar
+		// differently if neither of them writes the wording.
+		for (const [at, body] of (await eachView({ loops: inReach, mediaPath })).entries()) {
+			assert.ok(body.includes(bar), `${views[at]} does not carry the ${mediaPath} bar`);
+		}
 	}
+});
+
+// **Emission has two independent withdrawal conditions and the bar must say which**
+// (ADR-0042, v1 §6): a lost state channel and a lost audio path are different problems with
+// different fixes, and one wording for both sends an operator to look at the wrong thing.
+test('the bar tells a lost audio path apart from a lost connection, in both views', async () => {
+	for (const [at, body] of (await eachView({ loops: inReach, mediaPath: 'lost' })).entries()) {
+		assert.match(body, /audio path/, `${views[at]} does not say what is missing`);
+		assert.match(body, /will not emit/, `${views[at]} does not say emission is withdrawn`);
+	}
+});
+
+// Three rungs, three things to say. `impaired` is a transient fault that routinely clears
+// itself and emission stands through it, so a bar that read it the same way as `lost` would
+// cut audio for a reroute that heals — which is the whole reason the middle rung exists.
+test('each rung of the media path says something the others do not', async () => {
+	const said = await Promise.all(
+		['connected', 'impaired', 'lost'].map((mediaPath) =>
+			rendered('TransmitBar.svelte', { mediaPath })
+		)
+	);
+
+	assert.equal(new Set(said).size, 3, 'two rungs of the media path read alike');
+	assert.match(said[1], /still stands/);
+	assert.match(said[2], /will not emit/);
+});
+
+// The document always carries one of the three, so anything else is not a state the console
+// has been told about — and a bar that cannot tell what the audio path is doing has no
+// business offering a key control over it.
+test('a media path the console has no reading of withdraws emission', async () => {
+	assert.equal(
+		await rendered('TransmitBar.svelte', { mediaPath: undefined }),
+		await rendered('TransmitBar.svelte', { mediaPath: 'lost' })
+	);
 });
 
 test('the transmit bar cannot be scrolled away in either view', async () => {
@@ -143,12 +192,17 @@ test('the operating console remembers which view is on screen, and nothing else'
 
 test('the console offers both views and opens on the board', async () => {
 	const body = await rendered('Console.svelte', {
-		presence: { session: 'a-session', role: { id: 'r-1', name: 'Flight Director' }, loops: inReach }
+		presence: {
+			session: 'a-session',
+			role: { id: 'r-1', name: 'Flight Director' },
+			media_path: 'connected',
+			loops: inReach
+		}
 	});
 
 	assert.match(body, /Board/);
 	assert.match(body, /Ledger/);
 	// The board is the view a control room reads at a glance, and it is what the operator
 	// wanted; which view somebody lands in becomes theirs with #55.
-	assert.ok(body.includes(await rendered('Board.svelte', { loops: inReach })));
+	assert.ok(body.includes(await rendered('Board.svelte', carrying)));
 });

@@ -71,9 +71,9 @@
 	</div>
 
 	{#if showing === 'board'}
-		<Board loops={inOrder} />
+		<Board loops={inOrder} mediaPath={presence.media_path} />
 	{:else}
-		<Ledger loops={inOrder} />
+		<Ledger loops={inOrder} mediaPath={presence.media_path} />
 	{/if}
 
 	<p class="relinquish">
