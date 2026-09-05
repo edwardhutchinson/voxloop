@@ -905,6 +905,13 @@ impl StateAuthority {
     /// **Taken rather than read**, because it exists to be executed once — two sockets
     /// asking on the same tick must not both carry it down.
     ///
+    /// **It is computed from the reach each session was last projected within**, which is
+    /// [`Session::reach`] and is written by [`StateAuthority::presence`]. That is the
+    /// ordering to hold onto: a session nobody has asked for a document about reaches nothing
+    /// and is reached by nothing, which is the truthful answer for a seat nobody has been
+    /// told about yet — and every live session has a socket asking five times a second, so it
+    /// is at most one tick old.
+    ///
     /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
     /// [ADR-0063]: ../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
     pub(crate) fn the_routing_if_it_moved(&self) -> Option<Vec<WhoHears>> {

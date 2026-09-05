@@ -25,14 +25,15 @@
 	// that means in a sentence.
 	import Talking from './Talking.svelte';
 	import TransmitBar from './TransmitBar.svelte';
+	import { carries } from './rungs.js';
 
-	let { loops, mediaPath, armed, keyed, onToggle, onArm, onKeyDown, onKeyUp } = $props();
+	let { loops, mediaPath, armedOn, keyed, mayKey, onToggle, onArm, onKeyDown, onKeyUp } = $props();
 
-	// Which loops carry an arm control at all — the same rule the board applies, because it is
-	// the grid's rule rather than either view's: a role that may hear a loop and not speak on
-	// it is offered nothing to press.
-	const mayEmit = (reachable) =>
-		reachable.permission === 'emit' || reachable.permission === 'control';
+	// Which loops carry an arm control at all. **Reach is the grid and only the grid**: a role
+	// that may hear a loop and not speak on it gets no control, rather than one that is
+	// refused when pressed (ADR-0016). The rung is read through `rungs.js`, which both views
+	// share, because it is the grid's rule rather than either view's.
+	const mayEmit = (reachable) => carries(reachable.permission, 'emit');
 
 	// A rung is a word on the board and a sentence here. A rung this does not know is shown
 	// as the word the document used: the grid is the only thing entitled to say what a role
@@ -48,7 +49,7 @@
      ledger is read top-down from its header, and a bar under a table of unknown length reads
      as that table's footer rather than as a fixture of the console. -->
 <div class="transmit">
-	<TransmitBar {mediaPath} {armed} {keyed} onDown={onKeyDown} onUp={onKeyUp} />
+	<TransmitBar {mediaPath} {armedOn} {keyed} {mayKey} onDown={onKeyDown} onUp={onKeyUp} />
 </div>
 
 <table>

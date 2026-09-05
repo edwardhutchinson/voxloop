@@ -409,6 +409,23 @@ struct Path {
     hearing: HashMap<SessionId, Consumer>,
 }
 
+impl Path {
+    /// Stop carrying one talker to this session, and say so.
+    ///
+    /// Both halves together, in one place, because they are one act said twice over: dropping
+    /// the `Consumer` closes it at this end, and the client is told so that it is not left
+    /// holding a carriage it will never be sent audio on again. It is the same act whether the
+    /// audience withdrew somebody or the talker went, which is why it is not written out in
+    /// each of them.
+    fn stop_hearing(&mut self, talker: &SessionId) {
+        if let Some(carriage) = self.hearing.remove(talker) {
+            let _ = self.telling.send(Negotiated::OneFewerTalker(Carried(
+                carriage.id().to_string(),
+            )));
+        }
+    }
+}
+
 /// Everything the task holds that is not one of the deployment's singletons.
 struct Paths {
     paths: HashMap<SessionId, Path>,
@@ -812,13 +829,8 @@ async fn these_hear(router: &Router, held: &mut Paths, talker: &SessionId, audie
     }
 
     for (listener, path) in held.paths.iter_mut() {
-        if named.contains(listener) {
-            continue;
-        }
-        if let Some(carriage) = path.hearing.remove(talker) {
-            let _ = path.telling.send(Negotiated::OneFewerTalker(Carried(
-                carriage.id().to_string(),
-            )));
+        if !named.contains(listener) {
+            path.stop_hearing(talker);
         }
     }
 
@@ -930,11 +942,7 @@ async fn one_more_talker(
 /// Nobody hears this talker any more, because there is no longer a talker to hear.
 fn nobody_hears(held: &mut Paths, talker: &SessionId) {
     for path in held.paths.values_mut() {
-        if let Some(carriage) = path.hearing.remove(talker) {
-            let _ = path.telling.send(Negotiated::OneFewerTalker(Carried(
-                carriage.id().to_string(),
-            )));
-        }
+        path.stop_hearing(talker);
     }
 }
 

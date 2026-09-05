@@ -66,7 +66,13 @@ const eachView = (props) => Promise.all(views.map((view) => rendered(view, props
 // A view as a session with a working audio path sees it. The media path is passed rather
 // than left out wherever a question is not about it, because the document always carries one
 // (ADR-0042) and a view rendered without it is a view no session ever sees.
-const carrying = { loops: inReach, mediaPath: 'connected', armed: ['FLIGHT'], keyed: false };
+const carrying = {
+	loops: inReach,
+	mediaPath: 'connected',
+	armedOn: ['FLIGHT'],
+	keyed: false,
+	mayKey: true
+};
 
 test('both views render every loop in the document', async () => {
 	for (const [at, body] of (await eachView(carrying)).entries()) {
@@ -110,9 +116,9 @@ test('a loop that leaves reach leaves both views', async () => {
 });
 
 test('an empty reach is a view with no loops rather than no view', async () => {
-	for (const [at, body] of (await eachView({ ...carrying, loops: [], armed: [] })).entries()) {
+	for (const [at, body] of (await eachView({ ...carrying, loops: [], armedOn: [] })).entries()) {
 		assert.ok(
-			body.includes(await rendered('TransmitBar.svelte', { mediaPath: 'connected' })),
+			body.includes(await rendered('TransmitBar.svelte', { mediaPath: 'connected', mayKey: true })),
 			`${views[at]} lost its bar`
 		);
 	}
@@ -134,11 +140,12 @@ test('the board says a word where the ledger says a sentence', async () => {
 // anything.
 test('the transmit bar is in both views, worded identically, in every state it has', async () => {
 	for (const mediaPath of ['connected', 'impaired', 'lost']) {
-		const bar = await rendered('TransmitBar.svelte', { mediaPath });
+		const mayKey = mediaPath !== 'lost';
+		const bar = await rendered('TransmitBar.svelte', { mediaPath, mayKey });
 
 		// The same bytes, because it is the same component: two views cannot word one bar
 		// differently if neither of them writes the wording.
-		for (const [at, body] of (await eachView({ loops: inReach, mediaPath })).entries()) {
+		for (const [at, body] of (await eachView({ loops: inReach, mediaPath, mayKey })).entries()) {
 			assert.ok(body.includes(bar), `${views[at]} does not carry the ${mediaPath} bar`);
 		}
 	}
@@ -148,7 +155,9 @@ test('the transmit bar is in both views, worded identically, in every state it h
 // (ADR-0042, v1 §6): a lost state channel and a lost audio path are different problems with
 // different fixes, and one wording for both sends an operator to look at the wrong thing.
 test('the bar tells a lost audio path apart from a lost connection, in both views', async () => {
-	for (const [at, body] of (await eachView({ loops: inReach, mediaPath: 'lost' })).entries()) {
+	for (const [at, body] of (
+		await eachView({ loops: inReach, mediaPath: 'lost', mayKey: false })
+	).entries()) {
 		assert.match(body, /audio path/, `${views[at]} does not say what is missing`);
 		assert.match(body, /will not emit/, `${views[at]} does not say emission is withdrawn`);
 	}
@@ -160,7 +169,7 @@ test('the bar tells a lost audio path apart from a lost connection, in both view
 test('each rung of the media path says something the others do not', async () => {
 	const said = await Promise.all(
 		['connected', 'impaired', 'lost'].map((mediaPath) =>
-			rendered('TransmitBar.svelte', { mediaPath })
+			rendered('TransmitBar.svelte', { mediaPath, mayKey: mediaPath !== 'lost' })
 		)
 	);
 
@@ -176,6 +185,13 @@ test('a media path the console has no reading of withdraws emission', async () =
 	assert.equal(
 		await rendered('TransmitBar.svelte', { mediaPath: undefined }),
 		await rendered('TransmitBar.svelte', { mediaPath: 'lost' })
+	);
+	// And the console reads it the same way, because there is one derivation above both views
+	// rather than one in each — a rung nobody has a reading of leaves emission withdrawn.
+	assert.match(
+		read(join(lib, 'Console.svelte')),
+		/media_path === 'connected' \|\| presence\.media_path === 'impaired'/,
+		'the console decides whether emission stands somewhere other than from the ladder'
 	);
 });
 
@@ -392,12 +408,15 @@ test('a loop being spoken on is marked whether or not this console is hearing it
 test('the transmit bar carries the armed set in words, identically in both views', async () => {
 	const bar = await rendered('TransmitBar.svelte', {
 		mediaPath: 'connected',
-		armed: ['FLIGHT', 'SIM']
+		mayKey: true,
+		armedOn: ['FLIGHT', 'SIM']
 	});
 
 	assert.match(bar, /Armed on FLIGHT and SIM\./);
 
-	for (const [at, body] of (await eachView({ ...carrying, armed: ['FLIGHT', 'SIM'] })).entries()) {
+	for (const [at, body] of (
+		await eachView({ ...carrying, armedOn: ['FLIGHT', 'SIM'] })
+	).entries()) {
 		assert.ok(body.includes(bar), `${views[at]} does not carry the armed set as the other does`);
 	}
 });
@@ -406,10 +425,15 @@ test('the transmit bar carries the armed set in words, identically in both views
 // revocation can empty the arm set under somebody mid-sentence, and taking the control out of
 // their hand is a bigger lie than showing them that it reaches nobody.
 test('the key control says so when it reaches nobody, and still keys', async () => {
-	const nothing = await rendered('TransmitBar.svelte', { mediaPath: 'connected', armed: [] });
+	const nothing = await rendered('TransmitBar.svelte', {
+		mediaPath: 'connected',
+		mayKey: true,
+		armedOn: []
+	});
 	const something = await rendered('TransmitBar.svelte', {
 		mediaPath: 'connected',
-		armed: ['FLIGHT']
+		mayKey: true,
+		armedOn: ['FLIGHT']
 	});
 
 	assert.match(nothing, /Armed on nothing\./);
@@ -425,17 +449,21 @@ test('the key control says so when it reaches nobody, and still keys', async () 
 test('the transmitting lamp is the document’s answer and nothing else', async () => {
 	const lit = await rendered('TransmitBar.svelte', {
 		mediaPath: 'connected',
-		armed: ['FLIGHT'],
+		mayKey: true,
+		armedOn: ['FLIGHT'],
 		keyed: true
 	});
 	const unlit = await rendered('TransmitBar.svelte', {
 		mediaPath: 'connected',
-		armed: ['FLIGHT'],
+		mayKey: true,
+		armedOn: ['FLIGHT'],
 		keyed: false
 	});
 
-	assert.match(lit, />\s*Transmitting\s*</);
-	assert.match(unlit, />\s*Not transmitting\s*</);
+	// `Keyed`, not `Transmitting`: the glossary avoids the second for the act (CONTEXT.md,
+	// Keying), and the console speaks the glossary's language.
+	assert.match(lit, />\s*Keyed\s*</);
+	assert.match(unlit, />\s*Not keyed\s*</);
 	assert.match(lit, /<button[^>]*aria-pressed="true"/);
 	assert.match(unlit, /<button[^>]*aria-pressed="false"/);
 
@@ -447,10 +475,35 @@ test('the transmitting lamp is the document’s answer and nothing else', async 
 
 // Emission is withdrawn on a lost audio path (ADR-0042), so there is no key control over one.
 test('a lost audio path leaves no key control to press', async () => {
-	const lost = await rendered('TransmitBar.svelte', { mediaPath: 'lost', armed: ['FLIGHT'] });
+	const lost = await rendered('TransmitBar.svelte', {
+		mediaPath: 'lost',
+		mayKey: false,
+		armedOn: ['FLIGHT']
+	});
 
 	assert.doesNotMatch(lost, /<button/, 'a console with no audio path was offered a key control');
 	assert.match(lost, /will not emit/);
+	// **The armed set stands whatever the audio path is doing** (ADR-0034). The bar answers
+	// *who am I about to talk to*, and an operator whose path has just dropped is owed that
+	// answer more than anybody: it is what they are coming back to.
+	assert.match(lost, /Armed on FLIGHT\./, 'a withdrawn path took the armed set with it');
+});
+
+// **The control going is the source dying** (ADR-0021), and this is what makes that true: the
+// console tells Input whether the control is on screen, from the same answer the bar draws it
+// from. Without it a path that dropped under a held pointer would deliver no release, and the
+// key would hang — the open mic the level was chosen to prevent.
+test('the console tells Input when the key control is not on screen', async () => {
+	const source = read(join(lib, 'Console.svelte'));
+
+	assert.match(
+		source,
+		/input\.onScreen\.present\(mayKey\)/,
+		'the key control can vanish under a held pointer without Input hearing about it'
+	);
+	// One derivation, handed to both the views and the seam, so the control the operator sees
+	// and the source Input reads can never disagree about whether it is there.
+	assert.equal(source.match(/\{mayKey\}/g)?.length, 2, 'the two views are not handed one answer');
 });
 
 // **Two acts rather than one toggle, and the decision is held above both views**, exactly as

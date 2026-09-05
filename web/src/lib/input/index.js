@@ -27,13 +27,6 @@ export function keying({ onIntent }) {
 
 	return {
 		/** The on-screen key control. #42 puts the keyboard bindings beside it. */
-		onScreen: onScreen(reading),
-		/**
-		 * Which sources are live right now, by name.
-		 *
-		 * It is what lets the console say *nothing here can key* in words instead of drawing
-		 * a control that does nothing, which is what ADR-0016 asks of every state on screen.
-		 */
-		live: reading.live
+		onScreen: onScreen(reading)
 	};
 }

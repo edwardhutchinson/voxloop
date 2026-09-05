@@ -65,7 +65,6 @@ export function openAudio({ say, onMediaPath }) {
 	// different place for the mixing to happen.
 	const playing = new Map();
 
-	let uplink = null;
 	let microphone = null;
 	// The `produce` callback, held between asking the server to carry the uplink and being
 	// told its name. mediasoup-client will not call a producer published until it has one.
@@ -129,10 +128,10 @@ export function openAudio({ say, onMediaPath }) {
 		// about.
 		microphone.enabled = false;
 
-		uplink = await sending.produce({
-			track: microphone,
-			codecOptions: HOW_IT_IS_ENCODED
-		});
+		// The `Producer` is not held here. The transport it was made on holds it, and closing
+		// that transport is what ends it — so a second reference would only be a second thing
+		// to remember to let go of.
+		await sending.produce({ track: microphone, codecOptions: HOW_IT_IS_ENCODED });
 		// A microphone unplugged is a source that has died, and it is reported as this end of
 		// the path going rather than being left to be discovered by nobody hearing anything.
 		microphone.addEventListener('ended', () => reading('up', 'failed'));
@@ -213,9 +212,6 @@ export function openAudio({ say, onMediaPath }) {
 			if (microphone) microphone.enabled = wants;
 		},
 
-		/** Whether there is a microphone to key at all, which the console says in words. */
-		canBeHeard: () => Boolean(uplink),
-
 		/** The session is over. Everything opened here goes with it. */
 		close() {
 			closed = true;
@@ -228,7 +224,6 @@ export function openAudio({ say, onMediaPath }) {
 			microphone?.stop();
 			sending?.close();
 			receiving?.close();
-			uplink = null;
 			microphone = null;
 		}
 	};

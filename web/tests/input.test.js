@@ -23,6 +23,7 @@ function watching() {
 
 test('a control held down wants to emit, and a control released does not', () => {
 	const { wanted, input } = watching();
+	input.onScreen.present(true);
 
 	input.onScreen.down();
 	input.onScreen.up();
@@ -30,11 +31,53 @@ test('a control held down wants to emit, and a control released does not', () =>
 	assert.deepEqual(wanted, [true, false]);
 });
 
+// **A control that is not on screen is a source that is not there.** Emission is withdrawn on
+// a lost audio path (ADR-0042), so the key control goes — and a source that is not live is not
+// in the OR, whatever a pointer happens to be doing over the space it left.
+test('a control that is not on screen cannot key', () => {
+	const { wanted, input } = watching();
+
+	input.onScreen.down();
+
+	assert.deepEqual(wanted, [], 'a control nobody can see keyed');
+});
+
+// **The failure the level exists to prevent.** A key control that vanishes under a held
+// pointer delivers no release: under an event-shaped interface the transmission hangs, the
+// microphone stays open, and the server goes on telling everybody that a session with no audio
+// path is transmitting. Here the source stops being live, leaves the OR, and the key drops.
+test('a control that goes while it is held drops the key', () => {
+	const { wanted, input } = watching();
+	input.onScreen.present(true);
+	input.onScreen.down();
+	assert.deepEqual(wanted, [true]);
+
+	input.onScreen.present(false);
+
+	assert.deepEqual(wanted, [true, false], 'a control that vanished left the key held');
+});
+
+// **And it does not come back on its own.** v1 §7's rule for the other end of an outage is
+// that a source which was high across a withdrawal contributes nothing until it goes low and
+// high again; a control that returned still holding what it held would be a transmission
+// starting at a moment nobody chose.
+test('a control that comes back is not still holding what it held', () => {
+	const { wanted, input } = watching();
+	input.onScreen.present(true);
+	input.onScreen.down();
+	input.onScreen.present(false);
+
+	input.onScreen.present(true);
+
+	assert.deepEqual(wanted, [true, false], 'the key came back without a hand on it');
+});
+
 // **The answer moves when it moves.** A level is sampled rather than counted, so a caller
 // told the same thing twice would be a caller that had to remember what it was last told in
 // order to act on it — which is how a signal ends up sent per sample.
 test('saying the same thing twice is said once', () => {
 	const { wanted, input } = watching();
+	input.onScreen.present(true);
 
 	input.onScreen.down();
 	input.onScreen.down();
@@ -81,30 +124,19 @@ test('a source that is not live wants nothing, whatever it last said', () => {
 	assert.deepEqual(wanted, [], 'a dead source keyed');
 });
 
-// **A source that dies while keyed forces an unkey.** The failure this prevents is the whole
-// reason the seam is a level: under an event-shaped interface there is no release to deliver,
-// and the transmission hangs.
-test('a source that dies while it is held drops the key', () => {
+// **A source that dies while it is held drops the key**, said of the seam's own rule rather
+// than of the one source that has it today. There is no `gone` to call: a source that has left
+// publishes that it is not live, which is both what is true and what takes it out of the OR.
+test('a source that stops being live drops a key it was holding', () => {
 	const wanted = [];
 	const reading = levels({ onIntent: (wants) => wanted.push(wants) });
 	const footswitch = reading.add('a footswitch');
 	footswitch.publish(true, true);
 	assert.deepEqual(wanted, [true]);
 
-	footswitch.gone();
+	footswitch.publish(true, false);
 
 	assert.deepEqual(wanted, [true, false], 'a source that vanished left the key held');
-});
-
-// The console asks Input which sources are live so it can say **why** keying is unavailable,
-// rather than drawing a control that does nothing (ADR-0016).
-test('Input says which sources are live, by name', () => {
-	const { input } = watching();
-
-	assert.deepEqual(input.live(), ['the key control']);
-
-	input.onScreen.gone();
-	assert.deepEqual(input.live(), []);
 });
 
 // **A source never knows which emission mode it serves** (ADR-0021, ADR-0022). Mode logic is
@@ -140,5 +172,5 @@ test('nothing under the seam mentions a mode', async () => {
 test('the seam hands out no way to register a source', () => {
 	const { input } = watching();
 
-	assert.deepEqual(Object.keys(input).sort(), ['live', 'onScreen']);
+	assert.deepEqual(Object.keys(input), ['onScreen']);
 });

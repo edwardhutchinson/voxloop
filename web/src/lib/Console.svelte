@@ -64,9 +64,31 @@
 	// **The armed set in words, worked out once and handed to both views** (ADR-0034). Two
 	// views computing it separately is exactly how a board and a ledger come to disagree about
 	// where somebody's voice is going, which is the one thing the transmit bar may not do.
-	const armed = $derived(
+	const armedOn = $derived(
 		inOrder.filter((reachable) => reachable.armed).map((reachable) => reachable.name)
 	);
+
+	// **Whether emission stands at all**, decided once here rather than in the bar, because
+	// two things read it: the bar, which draws the key control, and Input, which is told
+	// whether that control is on screen. `impaired` is a transient fault that routinely clears
+	// itself and emission stands through it; `lost` is where emission is withdrawn
+	// (ADR-0042). Anything the console has no reading of is read as `lost`, which is the safe
+	// direction — a console that cannot tell what the audio path is doing has no business
+	// offering a key control over it. The rest of the emission predicate is #43's.
+	const mayKey = $derived(
+		presence.media_path === 'connected' || presence.media_path === 'impaired'
+	);
+
+	// **The control going is the source dying, and a source that dies while keyed forces an
+	// unkey** (ADR-0021). This is the case that makes liveness load-bearing rather than
+	// reserved: a key control that vanished under a held pointer delivers no release, so
+	// without this the level would stay high, the microphone would stay open, and the server
+	// would go on telling everybody a session with no audio path was transmitting. Publishing
+	// presence drops the source out of the OR, which unkeys through the same path a release
+	// does.
+	$effect(() => {
+		input.onScreen.present(mayKey);
+	});
 
 	// **Clicking a loop toggles monitoring**, and the toggle is decided here rather than in
 	// either view. It is two acts on the wire — subscribe and unsubscribe — and which one a
@@ -139,7 +161,8 @@
 		<Board
 			loops={inOrder}
 			mediaPath={presence.media_path}
-			{armed}
+			{armedOn}
+			{mayKey}
 			keyed={presence.keyed}
 			onToggle={toggle}
 			onArm={arming}
@@ -150,7 +173,8 @@
 		<Ledger
 			loops={inOrder}
 			mediaPath={presence.media_path}
-			{armed}
+			{armedOn}
+			{mayKey}
 			keyed={presence.keyed}
 			onToggle={toggle}
 			onArm={arming}

@@ -34,23 +34,20 @@
 	// one — a console that cannot tell what the audio path is doing has no business offering
 	// a key control over it.
 	//
-	// `armed` is the loops this session has armed, in the document's order and by name;
-	// `keyed` is the server's answer about this session; `onDown` and `onUp` are what the key
-	// control publishes to Input, which is where the mode logic will live (#42).
-	let { mediaPath, armed = [], keyed = false, onDown, onUp } = $props();
+	// `armedOn` is the loops this session has armed, in the document's order and by name;
+	// `keyed` is the server's answer about this session; `mayKey` is whether emission stands
+	// at all, decided once above both views because Input's liveness is decided from the same
+	// answer; `onDown` and `onUp` are what the key control publishes to Input, which is where
+	// the mode logic will live (#42).
+	let { mediaPath, armedOn = [], keyed = false, mayKey = false, onDown, onUp } = $props();
 
 	// **The armed set in words** (ADR-0034), and the same words in both views. It is a list
 	// rather than a count because this is the half of the bar an operator acts on: the second
 	// before keying is spent reading where their voice is about to go, and *three loops* does
 	// not answer that.
 	const destinations = $derived(
-		armed.length === 0 ? 'nothing' : new Intl.ListFormat('en').format(armed)
+		armedOn.length === 0 ? 'nothing' : new Intl.ListFormat('en').format(armedOn)
 	);
-
-	// Emission is withdrawn on a lost path (ADR-0042), so there is no key control over one.
-	// `impaired` keeps it: a transient fault clears itself in a second or two, and a binary
-	// reading would cut audio for a reroute that heals.
-	const mayKey = $derived(mediaPath === 'connected' || mediaPath === 'impaired');
 </script>
 
 <section aria-label="Transmit bar">
@@ -68,9 +65,12 @@
 		</p>
 	{/if}
 
-	{#if mayKey}
-		<p class="armed">Armed on {destinations}.</p>
+	<!-- **The armed set stands whatever the audio path is doing** (ADR-0034). The bar answers
+	     *who am I about to talk to*, and an operator whose path has dropped is owed that answer
+	     more than anybody: it is what they are coming back to. Only the key control goes. -->
+	<p class="armed">Armed on {destinations}.</p>
 
+	{#if mayKey}
 		<p class="keying">
 			<!-- **The key control renders differently at zero armed** (v1 §8) rather than being
 			     disabled: a revocation can empty the arm set under somebody who is mid-sentence,
@@ -84,15 +84,15 @@
 				onpointercancel={onUp}
 				onpointerleave={onUp}
 			>
-				<Icon name={armed.length === 0 ? 'mic-off' : 'mic'} />
-				{armed.length === 0 ? 'Key — reaching nobody' : 'Key'}
+				<Icon name={armedOn.length === 0 ? 'mic-off' : 'mic'} />
+				{armedOn.length === 0 ? 'Key — reaching nobody' : 'Key'}
 			</button>
 
 			<!-- The lamp, in words, and lit by the document alone. It is a separate thing from
 			     the control that asks for it, because *I pressed this* and *VoxLoop says you are
 			     on the air* are two facts and only the second one is worth showing. -->
 			<span class="lamp" role="status">
-				{keyed ? 'Transmitting' : 'Not transmitting'}
+				{keyed ? 'Keyed' : 'Not keyed'}
 			</span>
 		</p>
 	{/if}

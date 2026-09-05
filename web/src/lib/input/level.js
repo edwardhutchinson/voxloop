@@ -37,11 +37,12 @@ export function levels({ onIntent }) {
 
 	return {
 		/**
-		 * Register a source, and answer with the two calls a source makes.
+		 * Register a source, and answer with the one call a source makes.
 		 *
-		 * `publish` is the whole interface: this is what I want, and this is whether I am
-		 * here. `gone` is the source leaving, said as its own act because a source that has
-		 * gone has nothing left to publish with.
+		 * **Two things across one interface and no third** (ADR-0021): this is what I want,
+		 * and this is whether I am here. A source leaving needs no act of its own — it
+		 * publishes that it is not live, which is both what is true and what drops it out of
+		 * the OR.
 		 */
 		add(named) {
 			sources.set(named, { level: false, live: false });
@@ -50,15 +51,8 @@ export function levels({ onIntent }) {
 				publish: (level, live) => {
 					sources.set(named, { level, live });
 					settle();
-				},
-				gone: () => {
-					sources.delete(named);
-					settle();
 				}
 			};
-		},
-
-		/** Which sources are live right now, by name. */
-		live: () => [...sources].filter(([, source]) => source.live).map(([named]) => named)
+		}
 	};
 }
