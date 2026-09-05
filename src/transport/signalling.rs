@@ -43,8 +43,9 @@ use serde::{Deserialize, Serialize};
 use super::{Api, answers, unmet};
 use crate::authorisation::{self, Caller, Outcome, Presented, Requirement};
 use crate::configuration::{
-    AuditEntry, AuditEvent, AuditLog, Eligibilities, Grid, Occupancy, Permission, Role, RoleId,
-    Roles, SignInToken, SignIns, StoreError, Transaction, UserId, Users,
+    AuditEntry, AuditEvent, AuditLog, Eligibilities, Grid, LoopId, Occupancy, Permission,
+    Personalisation, Role, RoleId, Roles, SignInToken, SignIns, StoreError, Transaction, UserId,
+    Users,
 };
 use crate::state::{Assuming, Ended, InReach, MediaPath, Relinquished, SessionId};
 use crate::telemetry::module;
@@ -154,6 +155,34 @@ enum Incoming {
     /// It is a full stop rather than a transition (v1 §2). Nothing survives it, and the
     /// socket is told the session ended before it is told what the lobby holds.
     Relinquish,
+    /// Monitor a loop, or stop monitoring it.
+    ///
+    /// `Grid(monitor, loop)` (`docs/spec/api-surface.md`), which is what makes these the
+    /// first two messages whose requirement is a function of what they carry: the loop is
+    /// the caller's, so the requirement is built per message rather than registered once.
+    ///
+    /// **Two acts rather than one toggle**, deliberately. Optimistic rendering is banned, so
+    /// the card lags the click ([ADR-0016]); a second click on a card that has not caught up
+    /// yet says the same thing twice and lands on the same state, where a toggle would undo
+    /// the first click and leave the operator off a loop they had just taken up.
+    ///
+    /// [ADR-0016]: ../../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+    Subscribe {
+        #[serde(rename = "loop")]
+        held_on: String,
+    },
+    /// Stop monitoring a loop. `Grid(monitor, loop)`, the same cell as taking it up.
+    ///
+    /// It is the same rung because it is the same relationship being changed, and a rung of
+    /// its own would be a second lookup that could disagree with the first. A role that has
+    /// lost `monitor` cannot drop the loop either, which costs nothing: the subscription is
+    /// already inert and out of the document ([ADR-0051]).
+    ///
+    /// [ADR-0051]: ../../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
+    Unsubscribe {
+        #[serde(rename = "loop")]
+        held_on: String,
+    },
     /// Where the client's end of the media path stands, in the ladder's own words.
     ///
     /// **The client drives this ladder and the server is the backstop**, for the reason
@@ -177,6 +206,13 @@ impl Incoming {
         match self {
             Self::Hello | Self::Assume { .. } => Requirement::SignedIn,
             Self::Relinquish | Self::MediaPath { .. } => Requirement::Session,
+            // The **first live consumer of `Grid`**, and the shape every later one takes:
+            // the rung is the operation's and the loop is the caller's, so the requirement
+            // is a value built here rather than a registration.
+            Self::Subscribe { held_on } | Self::Unsubscribe { held_on } => Requirement::Grid {
+                rung: Permission::Monitor,
+                on: LoopId::presented(held_on.clone()),
+            },
         }
     }
 
@@ -192,7 +228,11 @@ impl Incoming {
     /// ruled on does not compile.
     fn was_a_deliberate_act(&self) -> bool {
         match self {
-            Self::Hello | Self::Assume { .. } | Self::Relinquish => true,
+            Self::Hello
+            | Self::Assume { .. }
+            | Self::Relinquish
+            | Self::Subscribe { .. }
+            | Self::Unsubscribe { .. } => true,
             Self::MediaPath { .. } => false,
         }
     }
@@ -203,6 +243,8 @@ impl Incoming {
             Self::Hello => "hello",
             Self::Assume { .. } => "assume",
             Self::Relinquish => "relinquish",
+            Self::Subscribe { .. } => "subscribe",
+            Self::Unsubscribe { .. } => "unsubscribe",
             Self::MediaPath { .. } => "media-path",
         }
     }
@@ -291,8 +333,8 @@ struct Seat {
 /// ([ADR-0048]): the hail picker fetches a roster when it opens rather than riding along at
 /// this document's tick rate.
 ///
-/// Subscriptions (#39), arms (#41), staffing state (#48), loop health (#46) and the audience
-/// (#49) land in here one ticket at a time.
+/// Arms (#41), staffing state (#48), loop health (#46) and the audience (#49) land in here
+/// one ticket at a time.
 ///
 /// [ADR-0019]: ../../../docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md
 /// [ADR-0048]: ../../../docs/adr/0048-the-hail-picker-is-the-only-place-the-console-names-a-person.md
@@ -334,6 +376,18 @@ struct Reachable {
     /// console needs it to know which loops it may ever speak on, and the document is the
     /// only place it may learn that from.
     permission: &'static str,
+    /// Whether this session is monitoring it.
+    ///
+    /// **Subscription is distinct from permission** (v1 §5), so it is a second field beside
+    /// the rung rather than a value within it: the rung says what this role may ever hear,
+    /// and this says what it is hearing now.
+    ///
+    /// It is here rather than computed anywhere on the client, because the console renders
+    /// the document and never optimistically ([ADR-0016]) — the card changes when this
+    /// field does and not when somebody clicks.
+    ///
+    /// [ADR-0016]: ../../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+    subscribed: bool,
 }
 
 impl Conversation {
@@ -429,6 +483,14 @@ impl Conversation {
             Incoming::Hello => self.whatever_this_socket_renders().await,
             Incoming::Assume { role } => self.assume(RoleId::presented(role)).await,
             Incoming::Relinquish => self.relinquish().await,
+            Incoming::Subscribe { held_on } => {
+                self.monitoring(&LoopId::presented(held_on), Remembered::Subscribed)
+                    .await
+            }
+            Incoming::Unsubscribe { held_on } => {
+                self.monitoring(&LoopId::presented(held_on), Remembered::Unsubscribed)
+                    .await
+            }
             Incoming::MediaPath { state } => self.the_client_reports(&state).await,
         }
     }
@@ -481,13 +543,25 @@ impl Conversation {
                 Some(role) => transaction.is_eligible(&self.user, &role.id).await?,
                 None => false,
             };
+            let Some(role) = role.filter(|_| eligible) else {
+                return Ok(None);
+            };
 
-            Ok(role.filter(|_| eligible))
+            // **The console this pair last had** ([ADR-0050]), read in the same transaction
+            // the eligibility was: a restart ends every session, so this is what makes
+            // assuming rebuild somebody's loops rather than leaving them to do it by hand
+            // during whatever incident caused the restart. It is handed to the live side as
+            // a value, which is the only way the two seams ever meet.
+            let remembered = transaction
+                .the_subscriptions_of(&self.user, &role.id)
+                .await?;
+
+            Ok(Some((role, remembered)))
         }
         .await;
         transaction.roll_back().await?;
 
-        let Some(role) = read? else {
+        let Some((role, subscribed_to)) = read? else {
             return Ok(vec![Outgoing::Refused {
                 was: "assume".to_owned(),
                 reason: "That is not a role you may assume.".to_owned(),
@@ -501,6 +575,7 @@ impl Conversation {
             occupant: self.user.clone(),
             role: role.id.clone(),
             limit: role.max_occupants,
+            subscribed_to,
         });
 
         let assumed = match assumed {
@@ -626,6 +701,116 @@ impl Conversation {
         self.back_to_the_lobby(ended.why.said()).await
     }
 
+    /// Monitor a loop, or stop monitoring it — the same act in two directions.
+    ///
+    /// **The live act lands first and the memory of it second**, and the order is the whole
+    /// of [ADR-0050]'s write path: the state authority applies the change, and the durable
+    /// consequence rides along behind it. A store that will not take the write leaves the
+    /// operator with a correct console and a lost preference, which is the right way round
+    /// — refusing to subscribe somebody because SQLite is unhappy is the worst available
+    /// ordering of those two concerns.
+    ///
+    /// The document goes out **whether or not it moved**. Somebody clicked a card and is
+    /// waiting for it to change; a click on a loop already up is answered with the state it
+    /// is already in rather than with silence, and the version does not move for that.
+    ///
+    /// Nothing is remembered for a session that ended between the requirement and here: an
+    /// act nothing took is not a preference.
+    ///
+    /// **The write is on the answer's path and not spawned beside it**, deliberately. Doing
+    /// it in the background would take the store off the round trip the operator is watching
+    /// — but two clicks in quick succession would then race, and the set that came back at
+    /// the next assume would be whichever write happened to land second. A memory that can
+    /// disagree with the acts it was following is worse than a write on a path that already
+    /// carries one: this message went through the store to be authorised at all.
+    ///
+    /// [ADR-0050]: ../../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
+    async fn monitoring(
+        &mut self,
+        held_on: &LoopId,
+        now: Remembered,
+    ) -> Result<Vec<Outgoing>, StoreError> {
+        let Some(session) = self.session.clone() else {
+            // Unreachable: `Grid` resolved a session a moment ago, and only this socket
+            // clears it.
+            return Ok(Vec::new());
+        };
+
+        let applied = match now {
+            Remembered::Subscribed => self.api.state.subscribe(&session, held_on),
+            Remembered::Unsubscribed => self.api.state.unsubscribe(&session, held_on),
+        };
+
+        if applied {
+            self.remember(&session, held_on, now).await;
+        }
+
+        self.presence(Told::WhetherOrNotItMoved).await
+    }
+
+    /// Remember the set this act leaves behind. **Best effort, and it answers nothing.**
+    ///
+    /// It cannot fail the live act, and the shape is what says so: it returns no error for a
+    /// caller to propagate, because the act it rides has already landed by the time this
+    /// runs. **There is no personalisation endpoint** for the same reason — the write is a
+    /// consequence of a live act rather than something anybody configures, which is what
+    /// keeps `docs/spec/api-surface.md` enumerable ([ADR-0050]).
+    ///
+    /// A failure is **shouted about rather than swallowed**. A deployment whose
+    /// personalisation writes are failing is one whose operators will rebuild their consoles
+    /// by hand after the next restart, and the log is where that is noticed before then.
+    ///
+    /// The role is read from the session rather than remembered on the socket: a session is
+    /// bound to exactly one role for its whole life, and reading it is what makes this write
+    /// land against the seat the act was performed in.
+    ///
+    /// [ADR-0050]: ../../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
+    async fn remember(&self, session: &SessionId, held_on: &LoopId, now: Remembered) {
+        let Some(role) = self.api.state.the_role_of(session) else {
+            return;
+        };
+
+        if let Err(error) = self.write_down(&role, held_on, now).await {
+            tracing::error!(
+                target: module::TRANSPORT,
+                %error,
+                "a subscription could not be remembered, and the preference is lost"
+            );
+        }
+    }
+
+    /// The write itself, in its own transaction. Nothing else rides with it: personalisation
+    /// is not audited (v1 §10), so there is no second write for it to land beside.
+    async fn write_down(
+        &self,
+        role: &RoleId,
+        held_on: &LoopId,
+        now: Remembered,
+    ) -> Result<(), StoreError> {
+        let mut transaction = self.api.store.begin().await?;
+        let written = match now {
+            Remembered::Subscribed => {
+                transaction
+                    .remember_a_subscription(&self.user, role, held_on)
+                    .await
+            }
+            Remembered::Unsubscribed => {
+                transaction
+                    .forget_a_subscription(&self.user, role, held_on)
+                    .await
+            }
+        };
+
+        match written {
+            Ok(()) => transaction.commit().await,
+            Err(error) => {
+                transaction.roll_back().await?;
+
+                Err(error)
+            }
+        }
+    }
+
     /// Take the client's reading of its own media path.
     ///
     /// The document is pushed **straight away** rather than on the next tick. Emission is
@@ -723,10 +908,11 @@ impl Conversation {
                 loops: presence
                     .loops
                     .into_iter()
-                    .map(|held_on| Reachable {
-                        id: held_on.id.as_str().to_owned(),
-                        name: held_on.name,
-                        permission: held_on.permission.as_str(),
+                    .map(|monitoring| Reachable {
+                        id: monitoring.held_on.id.as_str().to_owned(),
+                        name: monitoring.held_on.name,
+                        permission: monitoring.held_on.permission.as_str(),
+                        subscribed: monitoring.subscribed,
                     })
                     .collect(),
             },
@@ -949,6 +1135,17 @@ impl Conversation {
             .await
             .map_err(|_| ())
     }
+}
+
+/// Which way the subscription set moved, so the memory of it moves the same way.
+///
+/// It is named for the durable half rather than the live one because that is the only place
+/// the two directions are told apart twice — the live act is a method on the state authority
+/// and this is what carries the same choice through to the write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Remembered {
+    Subscribed,
+    Unsubscribed,
 }
 
 /// Whether a document is worth sending when it has not moved.
@@ -1174,8 +1371,64 @@ mod tests {
                     occupant,
                     role: role.clone(),
                     limit,
+                    subscribed_to: Vec::new(),
                 })
                 .unwrap_or_else(|_| panic!("the seat to be free"));
+        }
+
+        /// The id of a loop by name, which is what a message names it by.
+        async fn loop_named(&self, name: &str) -> LoopId {
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            let loops = transaction.loops().await.expect("the loops to be readable");
+            transaction.roll_back().await.expect("the read to close");
+
+            loops
+                .into_iter()
+                .find(|held_on| held_on.name == name)
+                .map(|held_on| held_on.id)
+                .expect("a loop by that name")
+        }
+
+        /// An administrator moving one cell of the grid, mid-shift.
+        async fn the_cell_becomes(&self, role: &RoleId, held_on: &LoopId, permission: Permission) {
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            transaction
+                .set_cell(role, held_on, permission)
+                .await
+                .expect("the cell to be set");
+            transaction.commit().await.expect("the edit to land");
+        }
+
+        /// The set this pair has remembered, by loop name.
+        async fn remembered_by(&self, role: &RoleId) -> Vec<String> {
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            let held = transaction
+                .the_subscriptions_of(&self.user, role)
+                .await
+                .expect("the set to be readable");
+            let mut names = Vec::new();
+            for held_on in &held {
+                names.push(
+                    transaction
+                        .a_loop(held_on)
+                        .await
+                        .expect("the loop to be readable")
+                        .expect("a loop by that id")
+                        .name,
+                );
+            }
+            transaction.roll_back().await.expect("the read to close");
+
+            names
+        }
+
+        /// A store that will not take a personalisation write, and will take everything
+        /// else. It is the only way to ask the question this ticket turns on: what happens
+        /// when the durable half of a live act is the thing that breaks.
+        async fn personalisation_writes_start_failing(&self) {
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            crate::configuration::refuse_every_subscription_write(&mut transaction).await;
+            transaction.commit().await.expect("the triggers to land");
         }
 
         async fn limit_of(&self, role: &RoleId) -> Option<u32> {
@@ -1193,6 +1446,18 @@ mod tests {
                 .await
                 .expect("the sign-in to end");
             transaction.commit().await.expect("the sign-out to land");
+        }
+
+        /// How many entries the log holds, whatever they are about.
+        async fn everything_the_log_holds(&self) -> usize {
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            let entries = transaction
+                .recent_entries(100)
+                .await
+                .expect("the log to be readable");
+            transaction.roll_back().await.expect("the read to close");
+
+            entries.len()
         }
 
         /// The entries the log holds for one event, oldest first.
@@ -1217,6 +1482,28 @@ mod tests {
 
     fn assuming(role: &RoleId) -> String {
         format!(r#"{{"message":"assume","role":"{}"}}"#, role.as_str())
+    }
+
+    fn subscribing(held_on: &LoopId) -> String {
+        format!(r#"{{"message":"subscribe","loop":"{}"}}"#, held_on.as_str())
+    }
+
+    fn unsubscribing(held_on: &LoopId) -> String {
+        format!(
+            r#"{{"message":"unsubscribe","loop":"{}"}}"#,
+            held_on.as_str()
+        )
+    }
+
+    /// Which loops a document says this session is monitoring, by name.
+    fn monitoring(said: &Outgoing) -> Vec<&str> {
+        the_presence(said)
+            .1
+            .loops
+            .iter()
+            .filter(|held_on| held_on.subscribed)
+            .map(|held_on| held_on.name.as_str())
+            .collect()
     }
 
     /// Everything the socket said back to one message.
@@ -1947,6 +2234,384 @@ mod tests {
                 .expect("the socket to answer")
                 .is_empty(),
             "a socket in a session was pushed the lobby"
+        );
+    }
+
+    // ---- #39: subscription ---------------------------------------------------------------
+
+    /// **`Grid(monitor, loop)` gates it**, and this is that requirement's first live
+    /// consumer (`docs/spec/api-surface.md`). A loop the role cannot monitor is not in the
+    /// document either, so the refusal is what somebody working from a stale page finds.
+    #[tokio::test]
+    async fn subscribing_to_a_loop_this_role_may_not_monitor_is_refused() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let observer = lobby.role_named("Observer").await;
+        lobby
+            .a_loop_reachable_by("Surgeon", &observer, Permission::Monitor)
+            .await;
+        let surgeon = lobby.loop_named("Surgeon").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+
+        let said = said(&mut socket, &subscribing(&surgeon)).await;
+
+        assert_eq!(
+            said,
+            Outgoing::Refused {
+                was: "subscribe".to_owned(),
+                reason: unmet(
+                    &Requirement::Grid {
+                        rung: Permission::Monitor,
+                        on: surgeon.clone()
+                    },
+                    "message"
+                ),
+            }
+        );
+    }
+
+    /// The same cell gates dropping a loop as taking it up: one relationship, one lookup.
+    #[tokio::test]
+    async fn unsubscribing_from_a_loop_this_role_may_not_monitor_is_refused() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, &subscribing(&air_to_ground)).await;
+
+        lobby
+            .the_cell_becomes(&flight, &air_to_ground, Permission::None)
+            .await;
+
+        let said = said(&mut socket, &unsubscribing(&air_to_ground)).await;
+        assert!(
+            matches!(said, Outgoing::Refused { .. }),
+            "a cell edit did not reach a message about that loop: {said:?}"
+        );
+    }
+
+    /// Neither act is available from the lobby: `Grid` is about the role a session is bound
+    /// to, and somebody standing in the lobby is bound to none.
+    #[tokio::test]
+    async fn subscribing_from_the_lobby_is_refused() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, HELLO).await;
+
+        let said = said(&mut socket, &subscribing(&air_to_ground)).await;
+
+        assert!(
+            matches!(said, Outgoing::Refused { .. }),
+            "a lobby socket subscribed to a loop: {said:?}"
+        );
+    }
+
+    /// **Subscription is distinct from permission** (v1 §5). Every loop in the document is
+    /// one this role may monitor, and none of them is being monitored until somebody says so.
+    #[tokio::test]
+    async fn a_session_starts_monitoring_nothing_it_has_not_taken_up() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let mut socket = lobby.a_socket();
+
+        let said = said(&mut socket, &assuming(&flight)).await;
+
+        assert!(monitoring(&said).is_empty());
+        assert_eq!(
+            the_presence(&said).1.loops.len(),
+            1,
+            "the loop left the document instead of sitting on it unmonitored"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribing_puts_a_loop_on_the_console_and_unsubscribing_takes_it_off() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        for name in ["Air-to-ground", "Flight Director"] {
+            lobby
+                .a_loop_reachable_by(name, &flight, Permission::Monitor)
+                .await;
+        }
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+
+        let up = said(&mut socket, &subscribing(&air_to_ground)).await;
+        assert_eq!(monitoring(&up), ["Air-to-ground"]);
+
+        let down = said(&mut socket, &unsubscribing(&air_to_ground)).await;
+        assert!(monitoring(&down).is_empty());
+    }
+
+    /// **Two acts rather than one toggle** (ADR-0016). The card lags the click, so a second
+    /// click on one that has not caught up says the same thing twice — and the answer is the
+    /// state it is already in rather than the opposite of it.
+    #[tokio::test]
+    async fn clicking_twice_before_the_card_catches_up_leaves_the_loop_up() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+
+        let first = said(&mut socket, &subscribing(&air_to_ground)).await;
+        let again = said(&mut socket, &subscribing(&air_to_ground)).await;
+
+        assert_eq!(monitoring(&again), ["Air-to-ground"]);
+        assert_eq!(
+            the_presence(&first).0,
+            the_presence(&again).0,
+            "the version moved for a document that had not"
+        );
+    }
+
+    /// **The subscription set persists per (user, role) and is restored on assume** — which
+    /// is what makes a restart cost an assume rather than a rebuild (ADR-0050).
+    #[tokio::test]
+    async fn the_set_is_remembered_and_restored_on_the_next_assume() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        for name in ["Air-to-ground", "Flight Director"] {
+            lobby
+                .a_loop_reachable_by(name, &flight, Permission::Monitor)
+                .await;
+        }
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, &subscribing(&air_to_ground)).await;
+        all(&mut socket, RELINQUISH).await;
+
+        let said = said(&mut socket, &assuming(&flight)).await;
+
+        assert_eq!(monitoring(&said), ["Air-to-ground"]);
+    }
+
+    /// A restart ends every session with no chance to flush anything (ADR-0039), so the
+    /// memory has to be there **before** one — written as the live act was applied rather
+    /// than captured when the session ended.
+    #[tokio::test]
+    async fn the_set_survives_a_restart_that_ends_every_session() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, &subscribing(&air_to_ground)).await;
+
+        assert_eq!(lobby.remembered_by(&flight).await, ["Air-to-ground"]);
+    }
+
+    /// Dropping a loop is remembered too, or a console would come back with the loops
+    /// somebody had deliberately taken off it.
+    #[tokio::test]
+    async fn a_loop_taken_off_the_console_stays_off_it_after_a_re_assume() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, &subscribing(&air_to_ground)).await;
+        all(&mut socket, &unsubscribing(&air_to_ground)).await;
+        all(&mut socket, RELINQUISH).await;
+
+        let said = said(&mut socket, &assuming(&flight)).await;
+
+        assert!(monitoring(&said).is_empty());
+        assert!(lobby.remembered_by(&flight).await.is_empty());
+    }
+
+    /// **Scoped to (user, role)** (ADR-0051): the loops somebody has up are a property of
+    /// the seat they are in, so another seat starts from its own set.
+    #[tokio::test]
+    async fn the_set_belongs_to_the_seat_and_not_to_the_person() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1)), ("CAPCOM", None)]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let capcom = lobby.role_named("CAPCOM").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        lobby
+            .the_cell_becomes(&capcom, &air_to_ground, Permission::Monitor)
+            .await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, &subscribing(&air_to_ground)).await;
+        all(&mut socket, RELINQUISH).await;
+
+        let said = said(&mut socket, &assuming(&capcom)).await;
+
+        assert!(
+            monitoring(&said).is_empty(),
+            "one seat's console followed the person into another"
+        );
+        assert!(lobby.remembered_by(&capcom).await.is_empty());
+    }
+
+    /// **The grid overrules personalisation silently and always, and keeps it inert rather
+    /// than dropping it** (ADR-0051). A temporary revocation must not destroy somebody's
+    /// console arrangement, so a loop that leaves reach and returns comes back where it was.
+    #[tokio::test]
+    async fn a_remembered_subscription_outside_reach_is_kept_and_comes_back_with_it() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, &subscribing(&air_to_ground)).await;
+        all(&mut socket, RELINQUISH).await;
+
+        lobby
+            .the_cell_becomes(&flight, &air_to_ground, Permission::None)
+            .await;
+        let out_of_reach = said(&mut socket, &assuming(&flight)).await;
+        assert!(
+            the_presence(&out_of_reach).1.loops.is_empty(),
+            "a loop out of reach was rendered"
+        );
+        all(&mut socket, RELINQUISH).await;
+
+        lobby
+            .the_cell_becomes(&flight, &air_to_ground, Permission::Monitor)
+            .await;
+        let back = said(&mut socket, &assuming(&flight)).await;
+        assert_eq!(
+            monitoring(&back),
+            ["Air-to-ground"],
+            "reach came back and the console did not"
+        );
+    }
+
+    /// **Personalisation is best effort and must never be able to fail a live act**
+    /// (ADR-0050). The store is made to refuse this one write and nothing else: the console
+    /// is correct, the preference is lost, and the operator is told nothing — because
+    /// nothing they asked for failed.
+    #[tokio::test]
+    async fn a_personalisation_write_that_fails_cannot_fail_the_live_act() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        lobby.personalisation_writes_start_failing().await;
+
+        let said = said(&mut socket, &subscribing(&air_to_ground)).await;
+
+        assert_eq!(
+            monitoring(&said),
+            ["Air-to-ground"],
+            "a store that would not remember the preference refused the live act"
+        );
+        assert!(
+            lobby.remembered_by(&flight).await.is_empty(),
+            "the write landed after all, so this test proves nothing"
+        );
+    }
+
+    /// ...and the same both ways. Dropping a loop is a live act too, and a store that will
+    /// not forget the preference must not keep somebody on a loop they took off.
+    #[tokio::test]
+    async fn a_failed_forget_leaves_the_console_correct_too() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, &subscribing(&air_to_ground)).await;
+        lobby.personalisation_writes_start_failing().await;
+
+        let said = said(&mut socket, &unsubscribing(&air_to_ground)).await;
+
+        assert!(monitoring(&said).is_empty());
+        assert_eq!(
+            lobby.remembered_by(&flight).await,
+            ["Air-to-ground"],
+            "the delete landed after all, so this test proves nothing"
+        );
+    }
+
+    /// **There is no personalisation configuration endpoint** (ADR-0050): the write rides
+    /// the live act, so it is not audited either — a user changing their own console is not
+    /// a configuration change (v1 §10).
+    #[tokio::test]
+    async fn changing_your_own_console_is_not_audited() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        let before = lobby.everything_the_log_holds().await;
+
+        all(&mut socket, &subscribing(&air_to_ground)).await;
+        all(&mut socket, &unsubscribing(&air_to_ground)).await;
+
+        assert_eq!(
+            lobby.everything_the_log_holds().await,
+            before,
+            "somebody arranging their own console was written to the audit log"
+        );
+    }
+
+    /// Somebody clicked a card, which is a person in front of a console doing something —
+    /// so it is one of the acts the 24-hour window is measured from (v1 §2).
+    #[tokio::test]
+    async fn taking_a_loop_up_is_a_deliberate_act() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        aged(
+            &lobby.api.store,
+            &lobby.sign_in,
+            Duration::from_secs(25 * 60 * 60),
+        )
+        .await;
+
+        all(&mut socket, &subscribing(&air_to_ground)).await;
+
+        assert!(
+            reaped(&lobby.api.store).await.is_empty(),
+            "a sign-in whose console was being arranged was reaped as abandoned"
         );
     }
 

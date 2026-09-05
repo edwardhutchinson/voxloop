@@ -200,6 +200,7 @@ mod tests {
                 occupant: occupant.clone(),
                 role: role.clone(),
                 limit: Some(1),
+                subscribed_to: Vec::new(),
             })
             .expect("the seat to be free");
 

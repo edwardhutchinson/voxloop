@@ -207,6 +207,18 @@ struct Session {
     /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
     said_by_the_client: MediaPath,
     seen_by_the_server: MediaPath,
+    /// The loops this session is monitoring right now.
+    ///
+    /// **A subscription is live state and ends with the session** (v1 §5). What outlives it
+    /// is the memory of the set, which is personalisation and belongs to Configuration; this
+    /// is seeded from that memory at assume and is never read back into it.
+    ///
+    /// It is not narrowed to reach, and that is [ADR-0051]'s rule rather than an oversight:
+    /// a loop the role has lost `monitor` on is kept here and left out of the document, so a
+    /// revocation that is undone leaves the console where it was.
+    ///
+    /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
+    subscriptions: Vec<LoopId>,
 }
 
 impl Session {
@@ -263,6 +275,17 @@ pub(crate) struct Assuming {
     pub(crate) occupant: UserId,
     pub(crate) role: RoleId,
     pub(crate) limit: Option<u32>,
+    /// The loops this (user, role) pair last had up, as Configuration remembers them.
+    ///
+    /// It arrives as a value for the same reason the limit does, and it is what makes a
+    /// restart cost an assume rather than a rebuild ([ADR-0050]): every operator has to
+    /// assume again after one, and this is what puts their console back rather than leaving
+    /// them to reassemble it by hand during whatever incident caused it.
+    ///
+    /// An empty set is a console with no loops up, which is what `Observer` ships as.
+    ///
+    /// [ADR-0050]: ../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
+    pub(crate) subscribed_to: Vec<LoopId>,
 }
 
 /// A role taken up: the session it created, and whatever it ended to create it.
@@ -322,6 +345,30 @@ pub(crate) struct InReach {
     pub(crate) permission: Permission,
 }
 
+/// Where a loop stands on one session's console: the reach it sits in, and the live choices
+/// made within it.
+///
+/// The two halves come from two seams and are composed here rather than inside either of
+/// them ([ADR-0039]): [`InReach`] is Configuration's, handed in as a value, and everything
+/// beside it is this module's. Arms (#41), mute (#44) and staffing state (#48) join the
+/// second half one ticket at a time, which is why this is a pair rather than a loop with a
+/// flag on it.
+///
+/// It is deliberately not called a subscription. **A subscription is the live choice to
+/// monitor a loop** (`CONTEXT.md`), and this is the loop the choice is about — most of them
+/// on most consoles have no subscription at all.
+///
+/// [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Standing {
+    pub(crate) held_on: InReach,
+    /// Whether this session is monitoring this loop.
+    ///
+    /// **Subscription is distinct from permission** (v1 §5): the loop is here because the
+    /// role may monitor it, and this says whether it currently is.
+    pub(crate) subscribed: bool,
+}
+
 /// The presence document: everything one session may see, as of one moment.
 ///
 /// It is a **projection** rather than a record. Nothing here is stored and read back — it is
@@ -329,10 +376,10 @@ pub(crate) struct InReach {
 /// be true at the same instant rather than assembled from several that were each true at
 /// some point ([ADR-0019]).
 ///
-/// What it carries today is the session, the role it is bound to, and the loops in reach.
-/// Subscriptions (#39), arms (#41), staffing state (#48), loop health (#46) and the audience
-/// (#49) land in it one ticket at a time, and each of them is a field the server has
-/// committed to keeping true from the moment it appears.
+/// What it carries today is the session, the role it is bound to, the loops in reach and
+/// which of them the session is monitoring. Arms (#41), staffing state (#48), loop health
+/// (#46) and the audience (#49) land in it one ticket at a time, and each of them is a field
+/// the server has committed to keeping true from the moment it appears.
 ///
 /// **Occupancy is deliberately not in it** ([ADR-0048]): the hail picker's roster is a
 /// snapshot fetched when the picker opens, and pushing deployment-wide occupancy at every
@@ -353,7 +400,7 @@ pub(crate) struct Presence {
     ///
     /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
     pub(crate) media_path: MediaPath,
-    pub(crate) loops: Vec<InReach>,
+    pub(crate) loops: Vec<Standing>,
 }
 
 impl StateAuthority {
@@ -426,6 +473,7 @@ impl StateAuthority {
                 last: None,
                 said_by_the_client: MediaPath::default(),
                 seen_by_the_server: MediaPath::default(),
+                subscriptions: assuming.subscribed_to,
             });
 
             Ok(Assumed { session, displaced })
@@ -511,6 +559,60 @@ impl StateAuthority {
         })
     }
 
+    /// Monitor a loop.
+    ///
+    /// **The live choice, and distinct from the permission behind it** (v1 §5): the grid
+    /// says which loops a role may monitor, and this says which of them it currently is.
+    /// The rung was checked before this was called and is not checked here — the live side
+    /// reads nothing durable ([ADR-0039]) — so what arrives is an act somebody has already
+    /// been found entitled to.
+    ///
+    /// It is a **set**, so subscribing to a loop already up is the same state rather than a
+    /// second subscription. That matters at the console: without optimistic rendering the
+    /// card lags the click, and a second click on a card that has not caught up yet must not
+    /// undo the first.
+    ///
+    /// It answers whether a live session took the act, which is the whole of what the caller
+    /// needs to know before remembering it. Nothing where the id names no session: an act on
+    /// a session that ended under it changes nothing and is worth remembering even less.
+    ///
+    /// [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+    pub(crate) fn subscribe(&self, session: &SessionId, to: &LoopId) -> bool {
+        self.write(|live| {
+            let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) else {
+                return false;
+            };
+
+            if !held.subscriptions.contains(to) {
+                held.subscriptions.push(to.clone());
+            }
+
+            true
+        })
+    }
+
+    /// Stop monitoring a loop.
+    ///
+    /// The other half of the toggle, and idempotent for the same reason: dropping a loop
+    /// that is already down is the same state.
+    ///
+    /// **It is not the same act as losing reach.** A loop the role can no longer monitor
+    /// stays in the set and out of the document ([ADR-0051]); this is the operator saying
+    /// they do not want it, which is the one thing that takes it out.
+    ///
+    /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
+    pub(crate) fn unsubscribe(&self, session: &SessionId, from: &LoopId) -> bool {
+        self.write(|live| {
+            let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) else {
+                return false;
+            };
+
+            held.subscriptions.retain(|held_on| held_on != from);
+
+            true
+        })
+    }
+
     /// The presence document for this session, and the version it carries.
     ///
     /// `within` is the session's **reach** — the loops its role holds at least `monitor` on
@@ -539,7 +641,16 @@ impl StateAuthority {
                 session: held.id.clone(),
                 role: held.role.clone(),
                 media_path: held.media_path(),
-                loops: within,
+                // **The narrowing happens here and nowhere else.** The session's set holds
+                // whatever it holds; the reach handed in decides what is rendered, so a
+                // subscription outside it is inert rather than lost ([ADR-0051]).
+                loops: within
+                    .into_iter()
+                    .map(|held_on| Standing {
+                        subscribed: held.subscriptions.contains(&held_on.id),
+                        held_on,
+                    })
+                    .collect(),
             };
 
             if held.last.as_ref() != Some(&presence) {
@@ -748,6 +859,9 @@ mod tests {
             occupant: occupant.clone(),
             role: role.clone(),
             limit,
+            // A pair with nothing remembered, which is what a first assume finds and what
+            // every test here is about unless it says otherwise.
+            subscribed_to: Vec::new(),
         }
     }
 
@@ -1086,7 +1200,15 @@ mod tests {
         assert_eq!(version, 1);
         assert_eq!(presence.session, assumed.session);
         assert_eq!(presence.role, role);
-        assert_eq!(presence.loops, vec![a_loop("air-to-ground")]);
+        assert_eq!(
+            presence.loops,
+            vec![Standing {
+                held_on: a_loop("air-to-ground"),
+                // Nothing was remembered and nothing has been taken up, so the loop is on
+                // the console and not being heard.
+                subscribed: false,
+            }]
+        );
     }
 
     /// **The version moves when the document moves and not otherwise**, or *is this the same
@@ -1142,6 +1264,194 @@ mod tests {
         assert_eq!(theirs, 1, "one session's version counted the other's");
     }
 
+    // ---- #39: subscription -------------------------------------------------------------
+
+    /// Which loops a document says this session is monitoring, by name.
+    fn monitoring(live: &StateAuthority, session: &SessionId, within: Vec<InReach>) -> Vec<String> {
+        live.presence(session, within)
+            .expect("a live session")
+            .1
+            .loops
+            .into_iter()
+            .filter(|held_on| held_on.subscribed)
+            .map(|held_on| held_on.held_on.name)
+            .collect()
+    }
+
+    /// **Subscription is distinct from permission** (v1 §5). A loop in reach is a loop this
+    /// role *may* monitor, and a session that has taken nothing up is monitoring nothing.
+    #[tokio::test]
+    async fn a_loop_in_reach_is_not_a_loop_being_monitored() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+
+        assert!(
+            monitoring(&live, &assumed.session, vec![a_loop("air-to-ground")]).is_empty(),
+            "a loop was being monitored that nobody took up"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribing_puts_a_loop_on_the_console_and_unsubscribing_takes_it_off() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+        let reach = vec![a_loop("air-to-ground"), a_loop("flight")];
+
+        assert!(live.subscribe(&assumed.session, &a_loop("flight").id));
+        assert_eq!(
+            monitoring(&live, &assumed.session, reach.clone()),
+            ["flight"]
+        );
+
+        assert!(live.unsubscribe(&assumed.session, &a_loop("flight").id));
+        assert!(monitoring(&live, &assumed.session, reach).is_empty());
+    }
+
+    /// The set is a set. Without optimistic rendering the card lags the click, so a second
+    /// click on one that has not caught up yet must land on the same state rather than
+    /// undoing the first.
+    #[tokio::test]
+    async fn subscribing_twice_is_one_subscription_and_one_unsubscribe_clears_it() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+        let reach = vec![a_loop("flight")];
+
+        live.subscribe(&assumed.session, &a_loop("flight").id);
+        live.subscribe(&assumed.session, &a_loop("flight").id);
+        live.unsubscribe(&assumed.session, &a_loop("flight").id);
+
+        assert!(monitoring(&live, &assumed.session, reach).is_empty());
+    }
+
+    /// The version moves when the document does, and a subscription moves the document.
+    #[tokio::test]
+    async fn the_version_moves_when_the_subscription_set_does() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+        let reach = vec![a_loop("flight")];
+        let (first, _) = live
+            .presence(&assumed.session, reach.clone())
+            .expect("a document");
+
+        live.subscribe(&assumed.session, &a_loop("flight").id);
+        let (moved, _) = live
+            .presence(&assumed.session, reach.clone())
+            .expect("a document");
+        assert_eq!(moved, first + 1);
+
+        live.subscribe(&assumed.session, &a_loop("flight").id);
+        let (again, _) = live.presence(&assumed.session, reach).expect("a document");
+        assert_eq!(
+            again, moved,
+            "the version moved for a document that had not"
+        );
+    }
+
+    /// **The grid overrules personalisation silently and always, and keeps it inert rather
+    /// than dropping it** (ADR-0051). A loop that leaves reach leaves the document; a loop
+    /// that comes back comes back where it was, so a temporary revocation does not destroy
+    /// somebody's console arrangement.
+    #[tokio::test]
+    async fn a_subscription_outside_reach_is_kept_and_not_rendered() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+        live.subscribe(&assumed.session, &a_loop("flight").id);
+
+        assert!(
+            monitoring(&live, &assumed.session, vec![a_loop("air-to-ground")]).is_empty(),
+            "a loop out of reach was rendered"
+        );
+
+        assert_eq!(
+            monitoring(&live, &assumed.session, vec![a_loop("flight")]),
+            ["flight"],
+            "reach came back and the subscription did not"
+        );
+    }
+
+    /// The set is seeded from what Configuration remembers, handed in as a value: it is what
+    /// makes a restart cost an assume rather than a rebuild (ADR-0050).
+    #[tokio::test]
+    async fn assuming_restores_the_set_the_pair_last_had() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(Assuming {
+                subscribed_to: vec![a_loop("flight").id],
+                ..taking(&sign_in, &user, &role, Some(1))
+            })
+            .expect("the seat to be free");
+
+        assert_eq!(
+            monitoring(
+                &live,
+                &assumed.session,
+                vec![a_loop("air-to-ground"), a_loop("flight")]
+            ),
+            ["flight"]
+        );
+    }
+
+    /// **A subscription is live state and ends with the session** (v1 §5). What outlives it
+    /// is the memory of the set, which is not this module's.
+    #[tokio::test]
+    async fn a_subscription_ends_with_the_session_that_held_it() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let assumed = live
+            .assume(Assuming {
+                subscribed_to: vec![a_loop("flight").id],
+                ..taking(&sign_in, &user, &role, Some(1))
+            })
+            .expect("the seat to be free");
+        live.ended_by_its_own_holder(&assumed.session)
+            .expect("the session to end");
+
+        assert!(!live.subscribe(&assumed.session, &a_loop("flight").id));
+        assert!(!live.unsubscribe(&assumed.session, &a_loop("flight").id));
+        let taken_again = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free");
+        assert!(
+            monitoring(&live, &taken_again.session, vec![a_loop("flight")]).is_empty(),
+            "a new session inherited the last one's subscriptions"
+        );
+    }
+
+    /// An act on a session that ended under it is refused rather than applied to somebody
+    /// else's, and there is then nothing worth remembering.
+    #[tokio::test]
+    async fn subscribing_on_a_session_nobody_holds_changes_nothing() {
+        let live = StateAuthority::empty();
+
+        assert!(!live.subscribe(
+            &SessionId::presented("nothing".to_owned()),
+            &a_loop("flight").id
+        ));
+    }
+
     // ---- #40: the media path ladder ----------------------------------------------------
 
     /// Where the merged ladder stands, as the document would carry it.
@@ -1176,6 +1486,7 @@ mod tests {
                 occupant: user,
                 role,
                 limit: None,
+                subscribed_to: Vec::new(),
             })
             .expect("the seat to be free");
 
@@ -1201,6 +1512,7 @@ mod tests {
                 occupant: user,
                 role,
                 limit: None,
+                subscribed_to: Vec::new(),
             })
             .expect("the seat to be free");
 
@@ -1249,6 +1561,7 @@ mod tests {
                 occupant: user,
                 role,
                 limit: None,
+                subscribed_to: Vec::new(),
             })
             .expect("the seat to be free");
         let (first, _) = live
@@ -1285,6 +1598,7 @@ mod tests {
                 occupant: one_user,
                 role: one_role,
                 limit: None,
+                subscribed_to: Vec::new(),
             })
             .expect("the seat to be free");
         let two = live
@@ -1293,6 +1607,7 @@ mod tests {
                 occupant: two_user,
                 role: two_role,
                 limit: None,
+                subscribed_to: Vec::new(),
             })
             .expect("the seat to be free");
         for session in [&one.session, &two.session] {
@@ -1324,6 +1639,7 @@ mod tests {
                 occupant: user,
                 role,
                 limit: None,
+                subscribed_to: Vec::new(),
             })
             .expect("the seat to be free");
         live.ended_by_its_own_holder(&assumed.session);

@@ -22,9 +22,9 @@
 //
 // **Not everything a tab says is a person saying it.** A media path report is this client
 // noticing something about its own transport, and the server does not count it towards the
-// window that reaps sign-ins nobody is sitting at (v1 §2) — which is why the two acts a
-// person performs and the one the machine performs sit side by side below without being
-// written the same way.
+// window that reaps sign-ins nobody is sitting at (v1 §2) — which is why the acts a person
+// performs and the one the machine performs sit side by side below without being written the
+// same way.
 
 const HELLO = JSON.stringify({ message: 'hello' });
 
@@ -103,6 +103,21 @@ export function openSignalling({
 		 * two are one thing.
 		 */
 		relinquish: () => say(socket, { message: 'relinquish' }),
+		/**
+		 * Monitor a loop, or stop monitoring it.
+		 *
+		 * **Two acts rather than one toggle**, and the console picks which by reading the
+		 * document it last received. Optimistic rendering is banned (ADR-0016) so the card
+		 * lags the click; a second click on a card that has not caught up yet says the same
+		 * thing twice and lands on the same state, where a toggle would undo the first and
+		 * leave somebody off a loop they had just taken up.
+		 *
+		 * The server answers with the presence document, or with a refusal where the role no
+		 * longer holds `monitor` on that loop. **Nothing here renders off what it just
+		 * said**: this tab asks, and then reads the document like everything else.
+		 */
+		subscribe: (heldOn) => say(socket, { message: 'subscribe', loop: heldOn }),
+		unsubscribe: (heldOn) => say(socket, { message: 'unsubscribe', loop: heldOn }),
 		/**
 		 * Say where this tab's media path stands: `connected`, `impaired` or `lost`.
 		 *

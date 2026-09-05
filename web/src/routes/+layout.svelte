@@ -65,10 +65,15 @@
 		// The last thing the socket would not do, and why. It is not the end of anything, so
 		// it is shown where it happened rather than taking the page away.
 		refused: null,
-		// The two acts a tab performs on its own session. They are here because the socket is
+		// The acts a tab performs on its own session. They are here because the socket is
 		// here: a page under the frame asks the frame, and never opens a second channel.
 		assume: () => {},
-		relinquish: () => {}
+		relinquish: () => {},
+		// Monitoring a loop, and stopping. **Two acts rather than one toggle** — which of
+		// them a click is comes from the document the console last read, because nothing
+		// here may render or reason off a state the server has not confirmed (ADR-0016).
+		subscribe: () => {},
+		unsubscribe: () => {}
 	});
 
 	holdFrame(frame);
@@ -125,10 +130,23 @@
 			channel.assume(role);
 		};
 		frame.relinquish = channel.relinquish;
+		// A refusal is cleared by the act that follows it, the way assume clears one: the
+		// server may have said *that needs more than this role holds on that loop* a moment
+		// ago, and the next click deserves its own answer rather than the last one's.
+		frame.subscribe = (held) => {
+			frame.refused = null;
+			channel.subscribe(held);
+		};
+		frame.unsubscribe = (held) => {
+			frame.refused = null;
+			channel.unsubscribe(held);
+		};
 
 		return () => {
 			frame.assume = () => {};
 			frame.relinquish = () => {};
+			frame.subscribe = () => {};
+			frame.unsubscribe = () => {};
 			channel.close();
 		};
 	});
