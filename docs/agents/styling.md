@@ -51,13 +51,21 @@ is a component because it holds a decision. A wrapper that only sets classes is 
 blind-armed loops are named in words, not just coloured (v1 §4), and say so in words, not just
 a border (§8). It holds for every state added from here.
 
-**The console renders no motion.** Cognitive load is the thing being minimised, and motion is
-permitted in exactly one place — the talking indicator, one fixed rate and one fixed shape,
-reading unambiguously as on or off (v1 §8,
-[ADR-0033](../adr/0033-the-console-shows-that-someone-is-talking-never-who.md)). Until #41
-builds it there is no such place, so `animation`, `transition`, `@keyframes` and Svelte's
-`transition:`, `in:`, `out:` and `animate:` directives are refused outright by
-`tests/styling.test.js`. The indicator gets written **into** that check rather than around it.
+**The console renders no motion**, and the one exception is a file you can name. Cognitive
+load is the thing being minimised, and motion is permitted in exactly one place — the talking
+indicator, one fixed rate and one fixed shape, reading unambiguously as on or off (v1 §8,
+[ADR-0033](../adr/0033-the-console-shows-that-someone-is-talking-never-who.md)). So
+`animation`, `transition`, `@keyframes` and Svelte's `transition:`, `in:`, `out:` and
+`animate:` directives are refused by `tests/styling.test.js` everywhere but `Talking.svelte`,
+including in `app.css` — a `transition` on the bare `button` rule would put motion under every
+control at once, which is the largest version of what this refuses rather than an exception to
+it.
+
+`Talking.svelte` is a component **so that *exactly one place* is a path the check can name**,
+and the permission is held to what it was given for: one `animation`, one `@keyframes`, a
+fixed duration, `infinite`, and `steps` rather than an ease — a continuous ramp reads as a
+level, and a level is the one thing the indicator may never imply. Widening any of that means
+editing `tests/styling.test.js`, in a diff a reviewer reads.
 
 **No raw colour anywhere outside `app.css`**, and **a new colour token must cite the spec line
 demanding it**. The palette is seven colours and stays small on purpose.

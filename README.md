@@ -233,9 +233,10 @@ moment.
 
 **The document is the API.** Whatever the console renders is in it, and anything in it is
 something the server has committed to keeping true. It carries the session, the role it is
-bound to, its **media path state**, and the loops in reach with **which of them the session
-is monitoring**; arms, staffing state, loop health and the audience land in it one ticket at
-a time.
+bound to, its **media path state**, whether the server has this session down as
+**transmitting**, and the loops in reach with **which of them the session is monitoring**,
+**which it has armed** and **which are being spoken on**; staffing state, loop health and the
+audience land in it one ticket at a time.
 
 It is **scoped to reach** — only loops the session's role holds at least `monitor` on — and
 it is recomputed on every tick, so a grid edit narrows or widens a live session's document
@@ -251,15 +252,17 @@ implementation underneath negotiates no extensions — which costs bandwidth and
 
 ## The media path
 
-A session gets a **WebRTC transport of its own, bound to it at creation**, opened by the
-assume that minted the session and closed by whatever ends it. One Worker, one Router and one
-shared `WebRtcServer` port carry all of them, because a loop is not a transport primitive: a
-transport belongs to one router, so a router per loop would give somebody monitoring six
-loops six ICE and DTLS sessions.
+A session gets a **media path of its own, bound to it at creation**, opened by the assume
+that minted the session and closed by whatever ends it. It is **two WebRTC transports, one
+each way**, because a browser's media library builds a directional one at each end. One
+Worker, one Router and one shared `WebRtcServer` port carry every session's, because a loop is
+not a transport primitive: a transport belongs to one router, so a router per loop would give
+somebody monitoring six loops six ICE and DTLS sessions. Two per session is two, whatever they
+are armed on and however many loops they monitor.
 
-**No audio is routed yet.** What exists is the pipe and a reading of its condition. The
-media plane's interface names domain operations only — open a path, close a path, make this
-audience hear this talker — and **it executes routing rather than computing it**
+The media plane's interface names domain operations only — open a path, close a path, take
+this client's uplink, make this audience hear this talker — and **it executes routing rather
+than computing it**
 ([ADR-0063](docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md)): no
 subscription, arm set or permission rung crosses into it, and a loop crosses only as an
 opaque label. It is a **sink** ([ADR-0062](docs/adr/0062-the-call-graph-is-acyclic-and-effects-modules-are-sinks.md)):
@@ -284,9 +287,17 @@ The two ends **merge pessimistically: green needs both, red needs one.** A sessi
 just been minted reads `lost` at both ends, because a transport nobody has connected to
 carries no audio, and that is what the bar says.
 
-The client half of the report exists on the socket and nothing drives it yet: the peer
-connection it would read is the Audio module's, and that arrives with the client's audio. So
-in a running deployment today the merged answer is `lost`, honestly.
+The client half is driven by the two transports' own `connectionstatechange`, merged the same
+way at that end: green needs both directions, red needs one. A session that cannot receive is
+as unable to work as one that cannot send, and the transmit bar has one thing to say about
+either.
+
+**The client's own media negotiation crosses the seam as a value nothing above the media plane
+can read.** ICE candidates, DTLS fingerprints and RTP parameters are a conversation between
+the worker and the library in the browser; VoxLoop owns the channel it happens on and has no
+opinion about what is on it, which is what keeps `DtlsParameters` from turning up in
+Transport's signature. It travels on the signalling socket like everything else, because
+**there is one channel and no second one**.
 
 **One session's media path going is not the worker going**, and the two are opposite
 decisions. A session whose transport has failed keeps its role indefinitely: the operator is
@@ -326,9 +337,10 @@ identically** and **never scrolled away**
 ([ADR-0034](docs/adr/0034-the-transmit-bar-is-always-visible-and-the-audience-is-a-count.md)):
 on the board it closes the field along the bottom edge, and in the ledger it rides above the
 rows rather than under a table of unknown length. It is one component so that it is one
-wording. The armed set and the key state arrive with arming and keying, and the two audience
-counts after that; what it carries today is **media path state**, because that is the first
-thing it has to say that withdraws emission.
+wording. It carries **media path state**, the **armed set in words** and the **key state**;
+the two audience counts arrive with
+[#49](https://github.com/edwardhutchinson/voxloop/issues/49) and the presets with
+[#56](https://github.com/edwardhutchinson/voxloop/issues/56).
 
 **Nothing renders optimistically**
 ([ADR-0016](docs/adr/0016-displayed-state-is-observed-or-asserted.md)). Neither view keeps any
@@ -337,11 +349,13 @@ a toggle will visibly lag a round trip and switching views loses nothing. The co
 remembers exactly one thing, and it is which view is showing — a fact about the reader rather
 than about the world.
 
-**The console renders no motion.** Motion is permitted in exactly one place, the talking
-indicator ([ADR-0033](docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md)),
-which does not exist yet — so `npm test` refuses `animation`, `transition`, `@keyframes` and
-Svelte's motion directives outright, and the indicator will be written into that check rather
-than around it.
+**The console renders no motion**, and the one exception is a file the check names. Motion is
+permitted in exactly one place, the talking indicator
+([ADR-0033](docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md)) — so
+`npm test` refuses `animation`, `transition`, `@keyframes` and Svelte's motion directives
+everywhere but `Talking.svelte`, and holds that file to what the permission was given for: one
+animation, one set of keyframes, a fixed duration, and `steps` rather than an ease, because a
+continuous ramp reads as a level and a level is the one thing the indicator may never imply.
 
 ## Monitoring a loop
 
@@ -394,6 +408,111 @@ A pair with nothing remembered starts with nothing up. Seeding a first assume fr
 **role's default console** is [#27](https://github.com/edwardhutchinson/voxloop/issues/27)'s,
 along with the rest of the personalisation rules — per-loop volume, loop order and the
 default view.
+
+## Arming, keying and hearing
+
+**Emission is two acts with two enforcements** ([ADR-0008](docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md)).
+
+**Arming** selects a loop as a destination. It is gated on `Grid(emit, loop)` and **that check
+is the whole of the enforcement**: the fan-out is built from the arm set and from nothing
+else, so a loop that never got past it has no route and there is nothing for a client to
+bypass. Arming and disarming cost **no renegotiation** — the uplink already exists and does not
+address, so both directions are a routing change at the server.
+
+**Keying** is the client enabling its own microphone track, and then telling the server. That
+order is what buys **key to first audio under 100 ms**: publishing on each press would put a
+renegotiation on the most latency-critical action in the product and clip the *"Flight,
+CAPCOM"* that identifies the speaker. **The server is the sole authority for saying it is
+happening**, including to the operator doing it — the transmitting lamp is a field of the
+presence document, and the console has nothing else to light it from. That round trip is the
+cost of the honesty rule and it is paid deliberately: audio is already flowing by then.
+
+**The route is per arm and not per key**, which is the same decision seen from the other side.
+Gating the fan-out on the key signal would put the server back in the latency path and would
+quietly remove the residual ADR-0008 accepts out loud: **a defective or hostile client can
+keep sending while claiming to be unkeyed.** The arm boundary caps that to loops the role may
+already reach, and mediasoup's **`AudioLevelObserver` runs in v1** — not as optional
+instrumentation — so the discrepancy is visible from the server. Supervision is where the two
+halves meet: the media plane knows a voice is on the wire and nothing about anybody's claims,
+the state authority knows the claims and nothing about the wire, and neither can ask the
+question alone. It is a log line rather than an act, because cutting somebody automatically on
+a half-second average level is not a decision to take without a person behind it
+([#51](https://github.com/edwardhutchinson/voxloop/issues/51) is the act that has one).
+
+**Arming and subscription are independent in both directions**
+([ADR-0013](docs/adr/0013-arming-is-independent-of-subscription.md)). Arming puts a loop in
+nobody's ears, the arming operator's least of all, and monitoring makes no destination. An arm
+never enters the subscription set, because staffing state is read off subscriptions and arms
+pushed into that set would make loops read `staffed` because somebody was *talking at* them.
+**Emitting blind is therefore legal**, and the console compensates: a blind arm says so in
+words, and every armed loop shows whether somebody is transmitting on it.
+
+The two sets are told apart once more when a cell moves. **A subscription outside reach is
+kept and left inert** so a revocation that is undone leaves the console where it was
+([ADR-0051](docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md));
+**an arm outside reach is dropped for good**, because a route that came back on its own when
+the cell did would put somebody on the air with their hand on nothing. For the same reason
+**an arm is not remembered** — the subscription set is restored on the next assume and the arm
+set starts empty.
+
+### Three layers, and only the middle knows what a loop is
+
+([ADR-0007](docs/adr/0007-the-client-emits-one-stream.md))
+
+| | |
+|---|---|
+| **Uplink** | one stream, encoded once, whatever the talker is armed on. It transmits; it does not address |
+| **Server** | fans it into every loop the talker has armed. The only place loop identity exists in the media path |
+| **Downlink** | **one stream per audible talker**, not per (talker, loop), mixed in the client |
+
+Opus, **48 kHz, mono, 20 ms frames**, a ceiling around 32 kbps, **inband FEC and DTX both on**
+([ADR-0010](docs/adr/0010-opus-mono-and-the-latency-budget.md)). The router advertises
+`useinbandfec` and `usedtx`; the encoder's half of the same decision is the browser's and is
+asked for when the microphone is published.
+
+**The state authority computes the audience and the media plane executes it**
+([ADR-0063](docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md)). The rule
+is one line and every clause in it is load-bearing: **for each loop the talker has armed,
+everybody else monitoring that loop within their own reach.** A listener appears once per
+destination, because the recording tap is addressed per (talker, destination loop)
+([ADR-0009](docs/adr/0009-recording-taps-plain-rtp-on-loopback.md)) — and the media plane
+collapses the pairs into one carriage, because the finer split would hand somebody monitoring
+two of a talker's loops the same voice twice.
+
+The whole fan-out is recomputed and **handed down when it moves**, the same way the presence
+document's version moves when the document does. It is **taken rather than read**: whichever
+socket asks first while it has moved is the one that carries it, and the rest are told there is
+nothing to do. It is worked out for every talker at once rather than per session, because one
+operator taking a loop up changes the audience of everybody armed on it.
+
+### The talking indicator
+
+**A loop is being spoken on, and never who**
+([ADR-0033](docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md)). One flag on
+the loop, identical for one talker and for five, in both views and in the same words. It is
+true whether or not this console is monitoring the loop, which is what makes it the
+compensation for arming blind. Attribution is still carried by the model and read by recording;
+v1 ships no surface on which an operator reads who is talking, and there is no field in the
+document or on the downlink that could tell them.
+
+The indicator is the console's **only** motion, and it is a component so that *exactly one
+place* is a path the styling check can name.
+
+### Push-to-talk input
+
+**Every source publishes a level and a liveness flag, never events**
+([ADR-0021](docs/adr/0021-ptt-input-is-a-level-with-liveness.md)), and the client ORs the live
+ones. Edges are lossy and their loss mode is an open mic; a level is self-correcting, and
+liveness is what expresses *the headset was unplugged while you were holding it* — a property
+of the source rather than of anything it could have sent. **A source that dies while keyed
+forces an unkey**, because it leaves the OR rather than being remembered in it.
+
+v1 ships one source, the **on-screen key control**. The keyboard bindings and the two emission
+modes are [#42](https://github.com/edwardhutchinson/voxloop/issues/42) and live **above** the
+seam — a source that decided its own mode could latch by accident. `$lib/input` is the way in
+and `web/eslint.input-seam.js` fails the build for anything that reaches past it, which is
+what makes ADR-0020's promise — the Tauri wrapper may only ever *add a source* — a check rather
+than a paragraph.
 
 ## The admin console
 
@@ -591,9 +710,9 @@ by `npm test`: no literal spacing, type or radius values, no colour outside `app
 ```sh
 cargo test                      # the binary, without the console embedded
 cargo test --features embed-web # the same, plus the embedded bundle (needs npm run build)
-cd web && npm test              # the console: the seam rule, the styling standard, the icons,
-                                # the two views of the loop list, and what the client says
-                                # over the signalling channel
+cd web && npm test              # the console: the Input seam and the lint rule behind it, the
+                                # styling standard, the icons, the two views of the loop list,
+                                # and what the client says over the signalling channel
 ```
 
 Tests run against the real store: each one opens a temporary SQLite file, migrates it and
@@ -613,4 +732,6 @@ asserts on the instructions rather than on a transport. That is what keeps every
 testable with no worker running — and it is why the fake must never grow an opinion about
 what it was handed. One test is the exception and runs a real Worker, Router and
 `WebRtcServer` on whatever port is free, because a seam with nothing real behind it is a
-reserved space rather than a proven boundary.
+reserved space rather than a proven boundary — it asserts the part the recorder cannot, which
+is that a session gets two transports and that what its client needs in order to build the far
+end is composed and put on that session's own channel.
