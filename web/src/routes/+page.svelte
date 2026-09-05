@@ -25,6 +25,9 @@
 		onRelinquish={frame.relinquish}
 		onSubscribe={frame.subscribe}
 		onUnsubscribe={frame.unsubscribe}
+		onArm={frame.arm}
+		onDisarm={frame.disarm}
+		onKeying={frame.keying}
 	/>
 {:else}
 	<Lobby

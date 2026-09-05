@@ -116,6 +116,44 @@ async fn watch(mut reports: Reports, state: &StateAuthority, nothing_is_carried:
                 // would otherwise be a death nobody was listening for.
                 nothing_is_carried.notify_one();
             }
+            // **The one place the two halves of ADR-0008 are put side by side.** Keying is
+            // the client's act and the server takes it on trust, which buys the key-to-first-
+            // audio budget and leaves one residual written down out loud: a defective or
+            // hostile client can keep sending while claiming to be unkeyed.
+            //
+            // This is what makes that residual visible rather than theoretical. The media
+            // plane knows a voice is on the wire and nothing about anybody's claims; the
+            // state authority knows the claims and nothing about the wire; **neither can ask
+            // the question and this is where they meet**, by passing a value, which is the
+            // same way every other pair of seams meets here.
+            //
+            // It is a log line and not an act. Cutting somebody automatically on a
+            // discrepancy would be taking an operator off the air on the strength of a
+            // half-second average level, and [ADR-0014]'s Cut is the deliberate act for it
+            // with a person behind it.
+            //
+            // [ADR-0014]: ../../docs/adr/0014-authority-acts-on-emission-are-transient.md
+            Reported::TheseAreAudible { talkers } => {
+                for talker in talkers {
+                    if state.is_keyed(&talker) {
+                        continue;
+                    }
+
+                    tracing::warn!(
+                        target: module::MEDIA_PLANE,
+                        session = talker.as_str(),
+                        "audio is arriving from a session that says it is not transmitting"
+                    );
+                }
+            }
+            // Nothing above the threshold from anybody, which is the observer having nothing
+            // to say rather than the deployment being quiet: DTX means a talker who has
+            // stopped speaking sends no packets at all. There is nothing to corroborate
+            // against an absence, so nothing is done with it beyond noting it at a level
+            // nobody reads by default.
+            Reported::NobodyIsAudible => {
+                tracing::trace!(target: module::MEDIA_PLANE, "no audio is arriving from anybody");
+            }
         }
     }
 }

@@ -17,35 +17,83 @@
 	// ladder is the console's `lost` banner until ADR-0018's rungs are built, and when they
 	// are, they are said **here**, beside this, in these words.
 	//
-	// The armed set in words and the key state arrive with #41, the two audience counts with
-	// #49.
+	// **The transmitting lamp is the server's answer and nothing else** (ADR-0008). It is
+	// `keyed` out of the presence document, which is the only thing this component reads it
+	// from — the button going down lights nothing, and there is no local state here that
+	// could. That round trip is the cost of the honesty rule and it is paid deliberately:
+	// audio is already flowing by the time the lamp lights, so it is a display latency rather
+	// than an audio one.
 	//
-	// The act it is about is **emission** rather than *transmit*, which `CONTEXT.md` avoids;
-	// the strip itself is the *transmit bar*, which is the glossary's own name for it.
+	// The two audience counts are #49's, and the presets that sit beside the key control are
+	// #56's.
+
+	import Icon from './Icon.svelte';
 
 	// The media path as the presence document has it: `connected`, `impaired` or `lost`
 	// (ADR-0042). Anything else is read as `lost`, which is the safe direction and the honest
 	// one — a console that cannot tell what the audio path is doing has no business offering
 	// a key control over it.
-	let { mediaPath } = $props();
+	//
+	// `armedOn` is the loops this session has armed, in the document's order and by name;
+	// `keyed` is the server's answer about this session; `mayKey` is whether emission stands
+	// at all, decided once above both views because Input's liveness is decided from the same
+	// answer; `onDown` and `onUp` are what the key control publishes to Input, which is where
+	// the mode logic will live (#42).
+	let { mediaPath, armedOn = [], keyed = false, mayKey = false, onDown, onUp } = $props();
+
+	// **The armed set in words** (ADR-0034), and the same words in both views. It is a list
+	// rather than a count because this is the half of the bar an operator acts on: the second
+	// before keying is spent reading where their voice is about to go, and *three loops* does
+	// not answer that.
+	const destinations = $derived(
+		armedOn.length === 0 ? 'nothing' : new Intl.ListFormat('en').format(armedOn)
+	);
 </script>
 
 <section aria-label="Transmit bar">
-	{#if mediaPath === 'connected'}
-		<p class="quiet">
-			VoxLoop cannot emit yet. The armed set, the audience and the key control belong here.
-		</p>
-	{:else if mediaPath === 'impaired'}
+	{#if mediaPath === 'impaired'}
 		<!-- A transient fault, of the kind that routinely clears itself in a second or two.
 		     Emission stands: a binary reading would cut audio for a reroute that heals, which
 		     is exactly what the middle rung exists to prevent (ADR-0042). -->
 		<p class="impaired" role="status">
 			The audio path is faulty. This usually clears itself, and emission still stands.
 		</p>
-	{:else}
+	{:else if !mayKey}
 		<p class="withdrawn" role="status">
 			There is no audio path, so VoxLoop will not emit. This is the audio rather than the connection
 			to VoxLoop, which is a different problem with a different fix.
+		</p>
+	{/if}
+
+	<!-- **The armed set stands whatever the audio path is doing** (ADR-0034). The bar answers
+	     *who am I about to talk to*, and an operator whose path has dropped is owed that answer
+	     more than anybody: it is what they are coming back to. Only the key control goes. -->
+	<p class="armed">Armed on {destinations}.</p>
+
+	{#if mayKey}
+		<p class="keying">
+			<!-- **The key control renders differently at zero armed** (v1 §8) rather than being
+			     disabled: a revocation can empty the arm set under somebody who is mid-sentence,
+			     and taking the control out of their hand is a bigger lie than showing them that
+			     it reaches nobody. It still keys. -->
+			<button
+				class="key"
+				aria-pressed={keyed}
+				onpointerdown={onDown}
+				onpointerup={onUp}
+				onpointercancel={onUp}
+				onpointerleave={onUp}
+			>
+				<Icon name={armedOn.length === 0 ? 'mic-off' : 'mic'} />
+				{armedOn.length === 0 ? 'Key — reaching nobody' : 'Key'}
+			</button>
+
+			<!-- The lamp, in words, and lit by the document alone. It is a separate thing from
+			     the control that asks for it, because *I pressed this* and *VoxLoop says you are
+			     on the air* are two facts and only the second one is worth showing. -->
+			<span class="lamp" role="status">
+				{keyed ? 'Keyed' : 'Not keyed'}
+			</span>
 		</p>
 	{/if}
 </section>
@@ -62,5 +110,36 @@
 	.withdrawn {
 		margin: 0;
 		color: var(--warning);
+	}
+
+	.armed {
+		margin: 0;
+		font-size: var(--type-2);
+	}
+
+	.keying {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		margin: var(--space-2) 0 0;
+	}
+
+	/* The one control on the console an operator's hand rests on, so it is the one that is
+	   worth being larger than the furniture. */
+	.key {
+		font-size: var(--type-3);
+	}
+
+	/* The lamp is drawn from the document and is never pre-lit, so there is no pressed state
+	   here to style — what changes is the word. The heavier weight is what makes it findable
+	   at the edge of vision without motion, which is spent elsewhere. */
+	.lamp {
+		font-size: var(--type-2);
+		font-weight: 600;
+	}
+
+	.key[aria-pressed='false'] + .lamp {
+		color: var(--quiet);
+		font-weight: inherit;
 	}
 </style>

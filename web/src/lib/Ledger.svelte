@@ -17,9 +17,23 @@
 	// swallowed clicks would take the cog and the mute that arrive with #44 down with it. It
 	// is the same act either way, and `Console.svelte` decides which of the two messages a
 	// click is — so the two views cannot come to disagree about what a click means.
+	//
+	// **Every state the board carries is carried here too**, which from this ticket on means
+	// the arm, the blind arm and the talking indicator. The indicator is the one thing that is
+	// literally the same object in both views, because it is one component (ADR-0033) — what
+	// differs is that the board says `Not hearing it` beside a blind arm and this says what
+	// that means in a sentence.
+	import Talking from './Talking.svelte';
 	import TransmitBar from './TransmitBar.svelte';
+	import { carries } from './rungs.js';
 
-	let { loops, mediaPath, onToggle } = $props();
+	let { loops, mediaPath, armedOn, keyed, mayKey, onToggle, onArm, onKeyDown, onKeyUp } = $props();
+
+	// Which loops carry an arm control at all. **Reach is the grid and only the grid**: a role
+	// that may hear a loop and not speak on it gets no control, rather than one that is
+	// refused when pressed (ADR-0016). The rung is read through `rungs.js`, which both views
+	// share, because it is the grid's rule rather than either view's.
+	const mayEmit = (reachable) => carries(reachable.permission, 'emit');
 
 	// A rung is a word on the board and a sentence here. A rung this does not know is shown
 	// as the word the document used: the grid is the only thing entitled to say what a role
@@ -35,7 +49,7 @@
      ledger is read top-down from its header, and a bar under a table of unknown length reads
      as that table's footer rather than as a fixture of the console. -->
 <div class="transmit">
-	<TransmitBar {mediaPath} />
+	<TransmitBar {mediaPath} {armedOn} {keyed} {mayKey} onDown={onKeyDown} onUp={onKeyUp} />
 </div>
 
 <table>
@@ -44,6 +58,7 @@
 			<th>Loop</th>
 			<th>This role may</th>
 			<th>Monitoring</th>
+			<th>Emitting to</th>
 		</tr>
 	</thead>
 	<tbody>
@@ -62,6 +77,31 @@
 					<span class="meaning">
 						{reachable.subscribed ? 'You are hearing this loop.' : 'You are not hearing this loop.'}
 					</span>
+					{#if reachable.talking}
+						<Talking />
+					{/if}
+				</td>
+				<td>
+					{#if mayEmit(reachable)}
+						<button aria-pressed={reachable.armed} onclick={() => onArm(reachable)}>
+							{reachable.armed ? 'Disarm' : 'Arm'}
+						</button>
+						<!-- The sentence the card has no room for. **Arming is independent of
+						     subscription** (ADR-0013), so an armed loop somebody is not hearing
+						     is a legal state rather than a mistake — and the sentence says what
+						     it costs rather than warning about it. -->
+						<span class="meaning">
+							{#if reachable.armed && !reachable.subscribed}
+								Your voice goes here and you are not hearing it.
+							{:else if reachable.armed}
+								Your voice goes here when you key.
+							{:else}
+								Your voice does not go here.
+							{/if}
+						</span>
+					{:else}
+						<span class="meaning">This role may not speak on this loop.</span>
+					{/if}
 				</td>
 			</tr>
 		{/each}

@@ -282,6 +282,14 @@ _Avoid_: grid (which is the admin console's role × loop matrix), tiles, dashboa
 The console view showing one compact table row per loop in reach. It is the reading view, and it is where state too long for a card lives — the staffing reason above all. It holds the same loops in the same order as the board.
 _Avoid_: list, table, detail view
 
+**Talking indicator**:
+The single mark on a loop saying that somebody is transmitting on it. It is identical for one talker and for any number of them and it never says who — a loop is staffed by people who can speak for it, so the loop is the identity, and asking which of them is talking asks the question the loop exists to make unnecessary. It appears whether or not the console showing it is monitoring the loop, which is what makes it the compensation for arming blind. It is the one thing in the console permitted to move, at one fixed rate and in one fixed shape; it may never imply amplitude, because silence sends no packets and a level would be inventing a signal.
+_Avoid_: VU meter, level meter, activity bar, speaker indicator, talker (which would name one)
+
+**Blind arm**:
+A loop a session has armed and is not monitoring. It is legal rather than a mistake — arming and subscription are independent — and it is the case the console compensates for: a blind arm is named in words, and the loop still carries its talking indicator, so an operator can see they are about to talk over somebody they cannot hear.
+_Avoid_: deaf arm, one-way loop, blind loop (which would name the loop rather than the arm)
+
 **Transmit bar**:
 The strip present in both console views carrying the armed set in words, the audience counts and the key state. It answers *who am I about to talk to* and, because it stays live while the key is held, *who am I talking to*, so it is never scrolled away and never worded differently between the views. A change to the armed set the session did not ask for is marked; a preset or a deliberate arm just redraws.
 _Avoid_: status bar, toolbar, PTT bar

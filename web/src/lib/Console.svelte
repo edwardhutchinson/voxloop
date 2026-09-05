@@ -17,10 +17,37 @@
 	// picker here and no *switch*. Relinquishing lands in the lobby, and the lobby is where a
 	// role is taken up. Audio genuinely stops in between, and offering a control that hid
 	// that would be the class of lie this product exists to avoid.
+	//
+	// **Input is a seam and this is the only thing above it** (ADR-0021, ADR-0061). The console
+	// registers the sources and reads one answer — *does anything live want to emit* — and it
+	// never asks a source anything. That is what lets the Tauri wrapper add a native hotkey
+	// and change nothing here (ADR-0020), and it is why `$lib/input` is imported rather than
+	// anything underneath it.
+	//
+	// **Nothing here lights the transmitting lamp.** Intent goes down: the local track is
+	// keyed and the server is told, in that order, because that order is what buys
+	// key-to-first-audio under 100 ms (ADR-0008). The lamp comes back up in the presence
+	// document, like every other state on this page.
+	import { keying } from '$lib/input';
 	import Board from './Board.svelte';
 	import Ledger from './Ledger.svelte';
 
-	let { presence, lost, refused, onRelinquish, onSubscribe, onUnsubscribe } = $props();
+	let {
+		presence,
+		lost,
+		refused,
+		onRelinquish,
+		onSubscribe,
+		onUnsubscribe,
+		onArm,
+		onDisarm,
+		onKeying
+	} = $props();
+
+	// One Input for the life of this console. The on-screen key control is its only source in
+	// v1 and #42 puts the keyboard bindings beside it; **the console ORs nothing itself** —
+	// that is the seam's job, and reaching in to do it here is the thing the lint rule refuses.
+	const input = keying({ onIntent: (wants) => onKeying(wants) });
 
 	// The board is what a control room reads at a glance, so it is what a console opens on.
 	// Which view somebody lands in becomes theirs — personalisation per (user, role), from a
@@ -34,6 +61,35 @@
 	// arrives in (ADR-0053), and this line is the one #55 changes to make it personal.
 	const inOrder = $derived(presence.loops);
 
+	// **The armed set in words, worked out once and handed to both views** (ADR-0034). Two
+	// views computing it separately is exactly how a board and a ledger come to disagree about
+	// where somebody's voice is going, which is the one thing the transmit bar may not do.
+	const armedOn = $derived(
+		inOrder.filter((reachable) => reachable.armed).map((reachable) => reachable.name)
+	);
+
+	// **Whether emission stands at all**, decided once here rather than in the bar, because
+	// two things read it: the bar, which draws the key control, and Input, which is told
+	// whether that control is on screen. `impaired` is a transient fault that routinely clears
+	// itself and emission stands through it; `lost` is where emission is withdrawn
+	// (ADR-0042). Anything the console has no reading of is read as `lost`, which is the safe
+	// direction — a console that cannot tell what the audio path is doing has no business
+	// offering a key control over it. The rest of the emission predicate is #43's.
+	const mayKey = $derived(
+		presence.media_path === 'connected' || presence.media_path === 'impaired'
+	);
+
+	// **The control going is the source dying, and a source that dies while keyed forces an
+	// unkey** (ADR-0021). This is the case that makes liveness load-bearing rather than
+	// reserved: a key control that vanished under a held pointer delivers no release, so
+	// without this the level would stay high, the microphone would stay open, and the server
+	// would go on telling everybody a session with no audio path was transmitting. Publishing
+	// presence drops the source out of the OR, which unkeys through the same path a release
+	// does.
+	$effect(() => {
+		input.onScreen.present(mayKey);
+	});
+
 	// **Clicking a loop toggles monitoring**, and the toggle is decided here rather than in
 	// either view. It is two acts on the wire — subscribe and unsubscribe — and which one a
 	// click is comes from the document, which is the only thing that knows: the views are
@@ -46,6 +102,15 @@
 	function toggle(reachable) {
 		if (reachable.subscribed) onUnsubscribe(reachable.id);
 		else onSubscribe(reachable.id);
+	}
+
+	// **Arming is the same two-acts-not-a-toggle shape**, decided here for the same reason:
+	// the document is the only thing that knows which of the two a press is, and the views
+	// say which loop was pressed. It is a separate act from monitoring in both directions
+	// (ADR-0013) and shares nothing with it but this shape.
+	function arming(reachable) {
+		if (reachable.armed) onDisarm(reachable.id);
+		else onArm(reachable.id);
 	}
 </script>
 
@@ -93,9 +158,29 @@
 	</div>
 
 	{#if showing === 'board'}
-		<Board loops={inOrder} mediaPath={presence.media_path} onToggle={toggle} />
+		<Board
+			loops={inOrder}
+			mediaPath={presence.media_path}
+			{armedOn}
+			{mayKey}
+			keyed={presence.keyed}
+			onToggle={toggle}
+			onArm={arming}
+			onKeyDown={input.onScreen.down}
+			onKeyUp={input.onScreen.up}
+		/>
 	{:else}
-		<Ledger loops={inOrder} mediaPath={presence.media_path} onToggle={toggle} />
+		<Ledger
+			loops={inOrder}
+			mediaPath={presence.media_path}
+			{armedOn}
+			{mayKey}
+			keyed={presence.keyed}
+			onToggle={toggle}
+			onArm={arming}
+			onKeyDown={input.onScreen.down}
+			onKeyUp={input.onScreen.up}
+		/>
 	{/if}
 
 	<p class="relinquish">

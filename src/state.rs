@@ -219,6 +219,49 @@ struct Session {
     ///
     /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
     subscriptions: Vec<LoopId>,
+    /// The loops this session has selected as destinations for its voice.
+    ///
+    /// **Independent of the subscription set in both directions** ([ADR-0013]) and a second
+    /// list for exactly that reason: a loop may be armed without being monitored and
+    /// monitored without being armed, and an arm folded into the set above would make loops
+    /// read `staffed` because somebody was *talking at* them.
+    ///
+    /// **Unlike a subscription it is narrowed to reach destructively**, in
+    /// [`Session::take_the_arms_out_of_reach`], and the difference is the difference between
+    /// a preference and a route. A subscription outside reach is kept inert so that a
+    /// revocation which is undone leaves the console where it was ([ADR-0051]). An arm that
+    /// came back the same way would put somebody on the air again with their hand on
+    /// nothing, which is the one class of surprise this product exists to prevent.
+    ///
+    /// [ADR-0013]: ../../docs/adr/0013-arming-is-independent-of-subscription.md
+    /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
+    arms: Vec<LoopId>,
+    /// Whether the client says it is transmitting right now.
+    ///
+    /// **The client keys and the server is told** ([ADR-0008]). It is a signal rather than a
+    /// permission: what it may reach was settled when the arms were made, and this says only
+    /// whether voice is going. Everything anybody else is shown about it — the talking
+    /// indicator, and the talker's own transmitting lamp — is read from here, because the
+    /// server is the sole authority for saying that a transmission is happening and a lamp
+    /// lit by a button going down would be the console asserting its own state.
+    ///
+    /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    keyed: bool,
+    /// The reach this session was last projected within, kept so that the fan-out can be
+    /// computed without reading anything durable ([ADR-0039]).
+    ///
+    /// It is Configuration's answer, handed in by [`StateAuthority::presence`] and held
+    /// rather than re-asked, because **the audience is a projection over every session at
+    /// once** and this module may not read a store to build one. The document is recomputed
+    /// on every tick, so what is here is at most one tick old and is refreshed by the very
+    /// mechanism that keeps the console honest.
+    ///
+    /// A session that has never been projected has an empty one, which is the truthful
+    /// answer for a seat nobody has been told about yet: it reaches nothing and nothing
+    /// reaches it.
+    ///
+    /// [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+    reach: Vec<InReach>,
 }
 
 impl Session {
@@ -226,6 +269,41 @@ impl Session {
     fn media_path(&self) -> MediaPath {
         self.said_by_the_client
             .pessimistically_with(self.seen_by_the_server)
+    }
+
+    /// Whether this session may hear that loop: it is in reach, and it is monitored.
+    ///
+    /// Both halves are needed and neither implies the other. The rung says what this role
+    /// may ever hear and the subscription says what it is hearing now (v1 §5), and a
+    /// subscription outside reach is kept precisely so that it can be inert ([ADR-0051]).
+    ///
+    /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
+    fn hears(&self, held_on: &LoopId) -> bool {
+        self.subscriptions.contains(held_on)
+            && self.reach.iter().any(|within| &within.id == held_on)
+    }
+
+    /// Drop the arms this session's role may no longer emit on.
+    ///
+    /// **An arm outside reach is taken away rather than left inert**, which is the one place
+    /// this module treats an arm and a subscription differently, and the reason is what each
+    /// of them is. A subscription is a preference, so [ADR-0051] keeps it: a revocation that
+    /// is undone leaves the console where it was. An arm is a route, and one that came back
+    /// on its own when a cell was restored would put an operator on the air without their
+    /// hand on anything.
+    ///
+    /// It is done here because this is where reach arrives. The document that says which
+    /// loops are armed and the fan-out that carries voice to them are then the same answer,
+    /// rather than two that agree until somebody edits a cell.
+    ///
+    /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
+    fn take_the_arms_out_of_reach(&mut self) {
+        let reach = &self.reach;
+        self.arms.retain(|armed| {
+            reach
+                .iter()
+                .any(|within| &within.id == armed && within.permission.carries(Permission::Emit))
+        });
     }
 }
 
@@ -251,6 +329,13 @@ struct Live {
     sessions: Vec<Session>,
     /// The sessions that have ended recently, and why.
     tombstones: Vec<Tombstone>,
+    /// The fan-out as it was last taken away to be executed.
+    ///
+    /// It is the same device the presence document uses for its version: the answer is
+    /// recomputed and compared, so *has anything changed* is decided by looking at the
+    /// answer rather than by remembering to say so at every write. A counter bumped by hand
+    /// is a counter somebody forgets to bump in the one method that mattered.
+    last_routing: Option<Vec<WhoHears>>,
 }
 
 /// The single holder of live state, and the only thing that may read or write it.
@@ -367,6 +452,59 @@ pub(crate) struct Standing {
     /// **Subscription is distinct from permission** (v1 §5): the loop is here because the
     /// role may monitor it, and this says whether it currently is.
     pub(crate) subscribed: bool,
+    /// Whether this session has armed this loop as a destination for its voice.
+    ///
+    /// A third fact beside the other two rather than a value within either, because
+    /// **arming is independent of subscription** ([ADR-0013]): armed and unmonitored is
+    /// legal, monitored and unarmed is the common case, and neither can be read off the
+    /// other. An armed loop this session is not monitoring is a **blind arm**, which the
+    /// console names in words (v1 §4).
+    ///
+    /// [ADR-0013]: ../../docs/adr/0013-arming-is-independent-of-subscription.md
+    pub(crate) armed: bool,
+    /// Whether somebody is transmitting on this loop right now.
+    ///
+    /// **It says that the loop is being spoken on and never who** ([ADR-0033]), so it is one
+    /// flag and not a list: identical for one talker and for five, and carrying nothing to
+    /// attribute a voice with. It counts **every** live session armed and keyed on the loop,
+    /// this one included — an operator's own transmission is a fact about the loop like
+    /// anybody else's, and it reaches their console the same way it reaches everybody's,
+    /// from the server.
+    ///
+    /// It is true whether or not this session is monitoring the loop, which is what makes it
+    /// the compensation v1 §4 requires for arming blind.
+    ///
+    /// [ADR-0033]: ../../docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md
+    pub(crate) talking: bool,
+}
+
+/// One listener, and the loop they hear a talker on.
+///
+/// It is the state authority's half of [ADR-0063]'s division: **the audience is computed
+/// here and executed there**. What crosses into the media plane is this, translated by
+/// Transport into a label the media plane cannot ask questions of — no `LoopId` reaches it,
+/// and nothing below the seam may narrow or widen what this says.
+///
+/// A listener appears **once per destination**, so somebody monitoring two of a talker's
+/// armed loops is in the list twice. That is not a doubled stream: the downlink is one
+/// stream per audible talker ([ADR-0007]) and the media plane collapses the pairs, which it
+/// can only do if it is told them — the recording tap is per (talker, destination loop)
+/// ([ADR-0009]) and that is the distinction being preserved.
+///
+/// [ADR-0007]: ../../docs/adr/0007-the-client-emits-one-stream.md
+/// [ADR-0009]: ../../docs/adr/0009-recording-taps-plain-rtp-on-loopback.md
+/// [ADR-0063]: ../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Heard {
+    pub(crate) listener: SessionId,
+    pub(crate) on: LoopId,
+}
+
+/// One talker and everyone who hears them, which is the answer the media plane executes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WhoHears {
+    pub(crate) talker: SessionId,
+    pub(crate) listeners: Vec<Heard>,
 }
 
 /// The presence document: everything one session may see, as of one moment.
@@ -400,6 +538,17 @@ pub(crate) struct Presence {
     ///
     /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
     pub(crate) media_path: MediaPath,
+    /// Whether the server has this session down as transmitting.
+    ///
+    /// **This is the transmitting lamp** ([ADR-0008]). It is in the document because the
+    /// document is the only thing the console renders, and that is the whole of the honesty
+    /// rule here: the operator's own lamp lights when this field arrives back saying so, and
+    /// never when their own button goes down. The round trip is the cost and it is paid
+    /// deliberately — audio is already flowing by then, so it is a display latency rather
+    /// than an audio one.
+    ///
+    /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    pub(crate) keyed: bool,
     pub(crate) loops: Vec<Standing>,
 }
 
@@ -474,6 +623,14 @@ impl StateAuthority {
                 said_by_the_client: MediaPath::default(),
                 seen_by_the_server: MediaPath::default(),
                 subscriptions: assuming.subscribed_to,
+                // **Nothing is armed and nothing is keyed on a seat just taken.** The
+                // subscription set is restored because it is remembered personalisation
+                // (ADR-0050) and a restart otherwise costs every operator their console by
+                // hand; an arm set restored the same way would put somebody on the air the
+                // instant they assumed, which is why nothing remembers one.
+                arms: Vec::new(),
+                keyed: false,
+                reach: Vec::new(),
             });
 
             Ok(Assumed { session, displaced })
@@ -613,6 +770,170 @@ impl StateAuthority {
         })
     }
 
+    /// Arm a loop: select it as a destination for this session's voice.
+    ///
+    /// **`Grid(emit, loop)` was checked before this was called** and is not checked here —
+    /// the live side reads nothing durable ([ADR-0039]) — so what arrives is an act somebody
+    /// has already been found entitled to. What makes the check load-bearing rather than
+    /// advisory is that the fan-out is built from this set and from nothing else: there is no
+    /// route to a loop that is not in here, so there is nothing for a client to bypass
+    /// ([ADR-0008]).
+    ///
+    /// **It is not a subscription and never becomes one** ([ADR-0013]). Arming a loop puts
+    /// it in no ears, including the arming operator's own — emitting blind is legal, and the
+    /// console compensates by naming the blind arms in words rather than by quietly
+    /// subscribing on somebody's behalf.
+    ///
+    /// It is a **set**, like the subscription set and for the same reason: the console does
+    /// not render optimistically, so a second click on a control that has not caught up yet
+    /// must land on the same state rather than undo the first.
+    ///
+    /// It answers whether a live session took the act. Nothing where the id names no
+    /// session.
+    ///
+    /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    /// [ADR-0013]: ../../docs/adr/0013-arming-is-independent-of-subscription.md
+    /// [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+    pub(crate) fn arm(&self, session: &SessionId, to: &LoopId) -> bool {
+        self.write(|live| {
+            let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) else {
+                return false;
+            };
+
+            if !held.arms.contains(to) {
+                held.arms.push(to.clone());
+            }
+
+            true
+        })
+    }
+
+    /// Disarm a loop: stop selecting it as a destination.
+    ///
+    /// The other half of the act, idempotent for the same reason. **Neither half is a
+    /// renegotiation** ([ADR-0007]): the client's stream already exists and is unaddressed,
+    /// so both directions are a routing change on the server and instant by construction.
+    ///
+    /// [ADR-0007]: ../../docs/adr/0007-the-client-emits-one-stream.md
+    pub(crate) fn disarm(&self, session: &SessionId, from: &LoopId) -> bool {
+        self.write(|live| {
+            let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) else {
+                return false;
+            };
+
+            held.arms.retain(|armed| armed != from);
+
+            true
+        })
+    }
+
+    /// The client says it is transmitting.
+    ///
+    /// **Keying is the client's act and this is the signal, not the permission** ([ADR-0008]).
+    /// What the transmission may reach was settled at arm time, so there is nothing to check
+    /// here and no rung to consult; what this changes is what everybody is *told*, which the
+    /// server is the sole authority for.
+    ///
+    /// The residual is [ADR-0008]'s and is stated rather than papered over: a defective or
+    /// hostile client can keep sending audio while claiming to be unkeyed. The arm boundary
+    /// caps that to loops the role may already reach, and the media plane's
+    /// `AudioLevelObserver` is what makes the discrepancy visible from this end.
+    ///
+    /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    pub(crate) fn the_client_keys(&self, session: &SessionId) -> bool {
+        self.keying(session, true)
+    }
+
+    /// The client says it has stopped transmitting.
+    ///
+    /// **It is taken at its word and it is not the only thing that stops audio.** A key
+    /// state is a claim about a client's own microphone, so this is how a transmission ends
+    /// in the ordinary case and never how one is prevented — that is the arm set's job, and
+    /// [ADR-0014]'s Cut is the act for taking somebody off the air against their client's
+    /// wishes.
+    ///
+    /// [ADR-0014]: ../../docs/adr/0014-authority-acts-on-emission-are-transient.md
+    pub(crate) fn the_client_unkeys(&self, session: &SessionId) -> bool {
+        self.keying(session, false)
+    }
+
+    /// Whether the server has this session down as transmitting.
+    ///
+    /// It exists for the corroboration [ADR-0008] requires: audio arriving from a session
+    /// that claims to be unkeyed is the discrepancy the `AudioLevelObserver` was turned on
+    /// to find, and something above both seams has to be able to ask.
+    ///
+    /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    pub(crate) fn is_keyed(&self, session: &SessionId) -> bool {
+        self.read(|live| {
+            live.sessions
+                .iter()
+                .any(|held| &held.id == session && held.keyed)
+        })
+    }
+
+    /// Both directions of the key, in one place so they cannot come to differ.
+    fn keying(&self, session: &SessionId, now: bool) -> bool {
+        self.write(|live| {
+            let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) else {
+                return false;
+            };
+
+            held.keyed = now;
+
+            true
+        })
+    }
+
+    /// The whole fan-out, where it has moved since it was last taken.
+    ///
+    /// **The audience is computed here and executed there** ([ADR-0063]). Every talker's
+    /// audience is worked out together, because one operator taking a loop up changes the
+    /// audience of everybody armed on it — an answer scoped to one session would be a
+    /// different question, and one nobody could act on.
+    ///
+    /// **It is per arm rather than per key**, and that is [ADR-0008] rather than an
+    /// oversight. Keying is the client muting its own microphone, precisely so that a key
+    /// press costs no round trip and no renegotiation; gating the route on the key signal
+    /// would put the server back in the latency path and would quietly remove the residual
+    /// that ADR explicitly accepts and writes down. So the route stands while a loop is
+    /// armed, and voice crosses it while the client is keyed.
+    ///
+    /// **It moves when it moves**, like the presence document's version, and for the same
+    /// reason: it is handed to a sink that takes the whole audience each time, so handing
+    /// down an unchanged one would be an instruction to rebuild what is already there.
+    /// **Taken rather than read**, because it exists to be executed once — two sockets
+    /// asking on the same tick must not both carry it down.
+    ///
+    /// **It is computed from the reach each session was last projected within**, which is
+    /// [`Session::reach`] and is written by [`StateAuthority::presence`]. That is the
+    /// ordering to hold onto: a session nobody has asked for a document about reaches nothing
+    /// and is reached by nothing, which is the truthful answer for a seat nobody has been
+    /// told about yet — and every live session has a socket asking five times a second, so it
+    /// is at most one tick old.
+    ///
+    /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    /// [ADR-0063]: ../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
+    pub(crate) fn the_routing_if_it_moved(&self) -> Option<Vec<WhoHears>> {
+        self.write(|live| {
+            let routing: Vec<WhoHears> = live
+                .sessions
+                .iter()
+                .map(|talker| WhoHears {
+                    talker: talker.id.clone(),
+                    listeners: live.who_hears(talker),
+                })
+                .collect();
+
+            if live.last_routing.as_ref() == Some(&routing) {
+                return None;
+            }
+            live.last_routing = Some(routing.clone());
+
+            Some(routing)
+        })
+    }
+
     /// The presence document for this session, and the version it carries.
     ///
     /// `within` is the session's **reach** — the loops its role holds at least `monitor` on
@@ -635,20 +956,38 @@ impl StateAuthority {
         within: Vec<InReach>,
     ) -> Option<(u64, Presence)> {
         self.write(|live| {
-            let held = live.sessions.iter_mut().find(|held| &held.id == session)?;
+            // The reach is recorded before anything is projected from it, because two other
+            // answers are computed from it for sessions other than this one: who hears this
+            // talker, and which loops anybody is talking on. Both are projections over every
+            // session at once, and this module may not ask a store for any of it.
+            {
+                let held = live.sessions.iter_mut().find(|held| &held.id == session)?;
+                held.reach = within;
+                held.take_the_arms_out_of_reach();
+            }
 
+            // Worked out before the session is borrowed again, because it reads every other
+            // session: a loop is being spoken on because *somebody* is armed and keyed on
+            // it, and who that is never reaches the document ([ADR-0033]).
+            let spoken_on = live.the_loops_being_spoken_on();
+
+            let held = live.sessions.iter_mut().find(|held| &held.id == session)?;
             let presence = Presence {
                 session: held.id.clone(),
                 role: held.role.clone(),
                 media_path: held.media_path(),
+                keyed: held.keyed,
                 // **The narrowing happens here and nowhere else.** The session's set holds
                 // whatever it holds; the reach handed in decides what is rendered, so a
                 // subscription outside it is inert rather than lost ([ADR-0051]).
-                loops: within
-                    .into_iter()
+                loops: held
+                    .reach
+                    .iter()
                     .map(|held_on| Standing {
                         subscribed: held.subscriptions.contains(&held_on.id),
-                        held_on,
+                        armed: held.arms.contains(&held_on.id),
+                        talking: spoken_on.contains(&held_on.id),
+                        held_on: held_on.clone(),
                     })
                     .collect(),
             };
@@ -795,6 +1134,57 @@ fn ended(session: Session, why: Ended) -> Relinquished {
 }
 
 impl Live {
+    /// Who hears this talker, and on which loop.
+    ///
+    /// The rule is one line and every clause in it is load-bearing: **for each loop the
+    /// talker has armed, everybody else monitoring that loop within their own reach**.
+    ///
+    /// - The arm set is the talker's, already narrowed to the loops their role may emit on,
+    ///   so there is no entry to a loop the grid does not permit ([ADR-0008]).
+    /// - The subscription is the listener's live choice and their reach is the grid's answer
+    ///   about them, and **both** are needed: a subscription outside reach is deliberately
+    ///   kept and just as deliberately inert ([ADR-0051]).
+    /// - The talker is not in their own audience. Hearing yourself back over the network is
+    ///   a fault in an intercom, not a feature.
+    ///
+    /// **Nothing here asks whether anybody is keyed**, for the reason
+    /// [`StateAuthority::the_routing_if_it_moved`] gives.
+    ///
+    /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
+    fn who_hears(&self, talker: &Session) -> Vec<Heard> {
+        talker
+            .arms
+            .iter()
+            .flat_map(|armed| {
+                self.sessions
+                    .iter()
+                    .filter(move |listener| listener.id != talker.id && listener.hears(armed))
+                    .map(|listener| Heard {
+                        listener: listener.id.clone(),
+                        on: armed.clone(),
+                    })
+            })
+            .collect()
+    }
+
+    /// Every loop somebody is armed and keyed on, deployment-wide.
+    ///
+    /// It is worked out once per document rather than per loop, and it is deployment-wide
+    /// rather than scoped to anybody: a loop is being spoken on or it is not, and which
+    /// consoles get to see that is the reach the document is projected within, applied
+    /// afterwards. Nothing in here says who, which is [ADR-0033] and the reason this answers
+    /// with loops rather than with talkers.
+    ///
+    /// [ADR-0033]: ../../docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md
+    fn the_loops_being_spoken_on(&self) -> Vec<LoopId> {
+        self.sessions
+            .iter()
+            .filter(|held| held.keyed)
+            .flat_map(|held| held.arms.iter().cloned())
+            .collect()
+    }
+
     /// Keep a session's ending, so whoever was holding it can be told why.
     fn remember(&mut self, relinquished: &Relinquished) {
         self.forget_the_old_tombstones();
@@ -1205,8 +1595,10 @@ mod tests {
             vec![Standing {
                 held_on: a_loop("air-to-ground"),
                 // Nothing was remembered and nothing has been taken up, so the loop is on
-                // the console and not being heard.
+                // the console, not being heard, not a destination and quiet.
                 subscribed: false,
+                armed: false,
+                talking: false,
             }]
         );
     }
@@ -1650,12 +2042,449 @@ mod tests {
         assert!(live.presence(&assumed.session, Vec::new()).is_none());
     }
 
+    // ---- Arming, keying and the fan-out (#41) ------------------------------------------
+
+    /// A live session, made from its own user and its own role, so several can stand at once.
+    async fn a_session(live: &StateAuthority, store: &Store, who: &str) -> SessionId {
+        let (sign_in, user, role) = a_seat(store, who, &format!("{who}'s role")).await;
+
+        live.assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free")
+            .session
+    }
+
+    /// The loops one session is armed on, as its own document has them.
+    fn armed(live: &StateAuthority, session: &SessionId, within: Vec<InReach>) -> Vec<String> {
+        live.presence(session, within)
+            .expect("a document")
+            .1
+            .loops
+            .into_iter()
+            .filter(|standing| standing.armed)
+            .map(|standing| standing.held_on.name)
+            .collect()
+    }
+
+    /// The loops one session's document says are being spoken on.
+    fn talking(live: &StateAuthority, session: &SessionId, within: Vec<InReach>) -> Vec<String> {
+        live.presence(session, within)
+            .expect("a document")
+            .1
+            .loops
+            .into_iter()
+            .filter(|standing| standing.talking)
+            .map(|standing| standing.held_on.name)
+            .collect()
+    }
+
+    /// Who hears this talker, and where, as the fan-out has it this instant.
+    fn heard_by(live: &StateAuthority, talker: &SessionId) -> Vec<(String, String)> {
+        live.the_routing_if_it_moved()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|who| &who.talker == talker)
+            .map(|who| {
+                who.listeners
+                    .into_iter()
+                    .map(|heard| {
+                        (
+                            heard.listener.as_str().to_owned(),
+                            heard.on.as_str().to_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// **Arming and subscription are independent in both directions** (ADR-0013). An arm puts
+    /// a loop in nobody's ears — the arming operator's least of all — and a subscription
+    /// makes no destination.
+    #[tokio::test]
+    async fn an_arm_never_enters_the_subscription_set_and_a_subscription_never_arms() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let reach = vec![a_loop_to_emit_on("air-to-ground"), a_loop_to_emit_on("sim")];
+
+        live.presence(&session, reach.clone());
+        live.arm(&session, &LoopId::presented("air-to-ground".to_owned()));
+        live.subscribe(&session, &LoopId::presented("sim".to_owned()));
+
+        let (_, presence) = live.presence(&session, reach).expect("a document");
+        let air_to_ground = &presence.loops[0];
+        let sim = &presence.loops[1];
+
+        assert!(air_to_ground.armed, "the armed loop is not armed");
+        assert!(
+            !air_to_ground.subscribed,
+            "arming a loop put it in the operator's own ears"
+        );
+        assert!(sim.subscribed, "the monitored loop is not monitored");
+        assert!(!sim.armed, "monitoring a loop armed it");
+    }
+
+    /// A second arm of the same loop is the same state, for the reason a second click is:
+    /// nothing renders optimistically, so the control lags and a repeat must not undo the
+    /// first.
+    #[tokio::test]
+    async fn arming_twice_before_the_control_catches_up_leaves_the_loop_armed() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let reach = vec![a_loop_to_emit_on("air-to-ground")];
+        live.presence(&session, reach.clone());
+
+        live.arm(&session, &LoopId::presented("air-to-ground".to_owned()));
+        live.arm(&session, &LoopId::presented("air-to-ground".to_owned()));
+        live.disarm(&session, &LoopId::presented("air-to-ground".to_owned()));
+
+        assert!(
+            armed(&live, &session, reach).is_empty(),
+            "one disarm did not undo two arms of the same loop"
+        );
+    }
+
+    /// **An arm outside reach is dropped and a subscription outside reach is kept.** The
+    /// asymmetry is deliberate: a preference restored with the cell leaves a console where it
+    /// was, and a route restored the same way would put somebody back on the air with their
+    /// hand on nothing.
+    #[tokio::test]
+    async fn a_revoked_cell_takes_the_arm_away_for_good_and_leaves_the_subscription_inert() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let held_on = LoopId::presented("air-to-ground".to_owned());
+        let emitting = vec![a_loop_to_emit_on("air-to-ground")];
+
+        live.presence(&session, emitting.clone());
+        live.arm(&session, &held_on);
+        live.subscribe(&session, &held_on);
+
+        // The cell goes to `none`, so the loop leaves the document altogether.
+        live.presence(&session, Vec::new());
+
+        let (_, back) = live.presence(&session, emitting).expect("a document");
+        assert!(
+            !back.loops[0].armed,
+            "an arm came back on its own when the cell did"
+        );
+        assert!(
+            back.loops[0].subscribed,
+            "a subscription was destroyed by a revocation that was undone"
+        );
+    }
+
+    /// A cell dropped to `monitor` is still in reach and still not somewhere this role may
+    /// speak, so the arm goes with the rung rather than with the loop.
+    #[tokio::test]
+    async fn losing_emit_but_keeping_monitor_takes_the_arm_and_leaves_the_loop() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        live.presence(&session, vec![a_loop_to_emit_on("air-to-ground")]);
+        live.arm(&session, &LoopId::presented("air-to-ground".to_owned()));
+
+        let (_, presence) = live
+            .presence(&session, vec![a_loop("air-to-ground")])
+            .expect("a document");
+
+        assert_eq!(presence.loops.len(), 1, "the loop left reach as well");
+        assert!(
+            !presence.loops[0].armed,
+            "an arm outlived the rung under it"
+        );
+    }
+
+    /// **The fan-out is every listener monitoring a loop the talker has armed**, and the loop
+    /// crosses with each of them because the recording tap is per (talker, destination).
+    #[tokio::test]
+    async fn everybody_monitoring_an_armed_loop_hears_the_talker() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let talker = a_session(&live, &store, "flight").await;
+        let listener = a_session(&live, &store, "capcom").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+
+        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")]);
+        live.presence(&listener, vec![a_loop("air-to-ground")]);
+        live.arm(&talker, &air_to_ground);
+        live.subscribe(&listener, &air_to_ground);
+
+        assert_eq!(
+            heard_by(&live, &talker),
+            vec![(listener.as_str().to_owned(), "air-to-ground".to_owned())]
+        );
+    }
+
+    /// **The route stands whether or not anybody is keyed** (ADR-0008). Keying is the client
+    /// muting its own microphone so that a press costs no round trip, and building the
+    /// fan-out on the key signal would put the server back in the latency path and remove the
+    /// residual that ADR accepts out loud.
+    #[tokio::test]
+    async fn the_fan_out_is_built_from_the_arm_and_not_from_the_key() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let talker = a_session(&live, &store, "flight").await;
+        let listener = a_session(&live, &store, "capcom").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")]);
+        live.presence(&listener, vec![a_loop("air-to-ground")]);
+        live.arm(&talker, &air_to_ground);
+        live.subscribe(&listener, &air_to_ground);
+
+        let unkeyed = heard_by(&live, &talker);
+        live.the_client_keys(&talker);
+
+        assert_eq!(
+            unkeyed.len(),
+            1,
+            "an unkeyed talker had no route, so keying would cost a renegotiation"
+        );
+        assert_eq!(
+            live.the_routing_if_it_moved(),
+            None,
+            "keying moved the fan-out"
+        );
+    }
+
+    /// Nobody hears a loop the talker has not armed, and nobody hears a talker on a loop they
+    /// are not monitoring. Two halves of the one rule, asserted together because a fan-out
+    /// that got either wrong would look right from the other side.
+    #[tokio::test]
+    async fn an_unarmed_loop_and_an_unmonitored_one_carry_nothing() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let talker = a_session(&live, &store, "flight").await;
+        let listener = a_session(&live, &store, "capcom").await;
+        let reach = vec![a_loop_to_emit_on("air-to-ground"), a_loop_to_emit_on("sim")];
+        live.presence(&talker, reach.clone());
+        live.presence(&listener, reach);
+
+        // Armed on one, and the listener is monitoring the other.
+        live.arm(&talker, &LoopId::presented("air-to-ground".to_owned()));
+        live.subscribe(&listener, &LoopId::presented("sim".to_owned()));
+
+        assert!(heard_by(&live, &talker).is_empty());
+    }
+
+    /// A subscription outside reach is kept and inert (ADR-0051), and inert has to mean
+    /// inaudible: a loop that is out of the document must not be in somebody's ears.
+    #[tokio::test]
+    async fn a_subscription_the_role_may_no_longer_monitor_hears_nothing() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let talker = a_session(&live, &store, "flight").await;
+        let listener = a_session(&live, &store, "capcom").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")]);
+        live.presence(&listener, vec![a_loop("air-to-ground")]);
+        live.arm(&talker, &air_to_ground);
+        live.subscribe(&listener, &air_to_ground);
+        assert_eq!(heard_by(&live, &talker).len(), 1);
+
+        // The listener's cell goes to `none`. The subscription stands and stops being heard.
+        live.presence(&listener, Vec::new());
+
+        assert!(
+            heard_by(&live, &talker).is_empty(),
+            "a loop out of reach was still in somebody's ears"
+        );
+    }
+
+    /// Hearing yourself back over the network is a fault in an intercom, not a feature.
+    #[tokio::test]
+    async fn a_talker_is_not_in_their_own_audience() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let talker = a_session(&live, &store, "flight").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")]);
+        live.arm(&talker, &air_to_ground);
+        live.subscribe(&talker, &air_to_ground);
+
+        assert!(heard_by(&live, &talker).is_empty());
+    }
+
+    /// **One listener, two destinations, and both are handed down.** The downlink is one
+    /// stream per audible talker (ADR-0007) — collapsing the pair is the media plane's to
+    /// do, and it can only do it if it is told what it is collapsing, because the recording
+    /// tap is per (talker, destination loop).
+    #[tokio::test]
+    async fn a_listener_monitoring_two_of_a_talkers_loops_is_named_on_both() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let talker = a_session(&live, &store, "flight").await;
+        let listener = a_session(&live, &store, "capcom").await;
+        let reach = vec![a_loop_to_emit_on("air-to-ground"), a_loop_to_emit_on("sim")];
+        live.presence(&talker, reach.clone());
+        live.presence(&listener, reach);
+
+        for held_on in ["air-to-ground", "sim"] {
+            live.arm(&talker, &LoopId::presented(held_on.to_owned()));
+            live.subscribe(&listener, &LoopId::presented(held_on.to_owned()));
+        }
+
+        assert_eq!(
+            heard_by(&live, &talker),
+            vec![
+                (listener.as_str().to_owned(), "air-to-ground".to_owned()),
+                (listener.as_str().to_owned(), "sim".to_owned())
+            ]
+        );
+    }
+
+    /// **It is taken rather than read**, and it moves when it moves. A sink is handed the
+    /// whole audience each time, so an unchanged one is an instruction to rebuild what is
+    /// already there — and two sockets asking on the same tick must not both carry it down.
+    #[tokio::test]
+    async fn the_routing_is_handed_down_once_and_again_only_when_it_has_moved() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let talker = a_session(&live, &store, "flight").await;
+        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")]);
+
+        assert!(
+            live.the_routing_if_it_moved().is_some(),
+            "a deployment with a session in it had no routing at all"
+        );
+        assert_eq!(live.the_routing_if_it_moved(), None);
+
+        live.arm(&talker, &LoopId::presented("air-to-ground".to_owned()));
+        // The arm reaches nobody, so the answer is the same one and is not handed down again.
+        assert_eq!(live.the_routing_if_it_moved(), None);
+    }
+
+    /// **The indicator marks the loop, never the talker**, and it is one flag rather than a
+    /// list: identical for one talker and for five (ADR-0033).
+    #[tokio::test]
+    async fn the_talking_indicator_is_the_same_for_one_talker_and_for_two() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let one = a_session(&live, &store, "flight").await;
+        let other = a_session(&live, &store, "capcom").await;
+        let watching = a_session(&live, &store, "gnc").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        let emitting = vec![a_loop_to_emit_on("air-to-ground")];
+        for session in [&one, &other] {
+            live.presence(session, emitting.clone());
+            live.arm(session, &air_to_ground);
+        }
+
+        assert!(
+            talking(&live, &watching, vec![a_loop("air-to-ground")]).is_empty(),
+            "an armed loop nobody is keyed on reads as being spoken on"
+        );
+
+        live.the_client_keys(&one);
+        let one_talker = talking(&live, &watching, vec![a_loop("air-to-ground")]);
+        live.the_client_keys(&other);
+        let two_talkers = talking(&live, &watching, vec![a_loop("air-to-ground")]);
+
+        assert_eq!(one_talker, vec!["air-to-ground".to_owned()]);
+        assert_eq!(two_talkers, one_talker, "the indicator counted its talkers");
+
+        live.the_client_unkeys(&one);
+        live.the_client_unkeys(&other);
+        assert!(talking(&live, &watching, vec![a_loop("air-to-ground")]).is_empty());
+    }
+
+    /// **Every armed loop shows whether somebody is transmitting on it** (v1 §4), and that is
+    /// the whole compensation for emitting blind: the loop is armed, unmonitored, and the
+    /// operator can still see they are about to talk over somebody.
+    #[tokio::test]
+    async fn a_blind_armed_loop_still_says_somebody_is_talking_on_it() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let blind = a_session(&live, &store, "flight").await;
+        let talker = a_session(&live, &store, "capcom").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        let emitting = vec![a_loop_to_emit_on("air-to-ground")];
+        live.presence(&blind, emitting.clone());
+        live.presence(&talker, emitting.clone());
+        live.arm(&blind, &air_to_ground);
+        live.arm(&talker, &air_to_ground);
+        live.the_client_keys(&talker);
+
+        let (_, presence) = live.presence(&blind, emitting).expect("a document");
+
+        assert!(presence.loops[0].armed);
+        assert!(!presence.loops[0].subscribed, "the arm subscribed somebody");
+        assert!(presence.loops[0].talking, "a blind arm was left blind");
+    }
+
+    /// **The lamp is the server's answer** (ADR-0008). It is a field of the document, so the
+    /// console has nothing else to light it from and no way to pre-light it.
+    #[tokio::test]
+    async fn the_transmitting_lamp_is_a_field_of_the_document() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+
+        assert!(!live.is_keyed(&session));
+        assert!(
+            !live
+                .presence(&session, Vec::new())
+                .expect("a document")
+                .1
+                .keyed
+        );
+
+        live.the_client_keys(&session);
+
+        assert!(live.is_keyed(&session));
+        assert!(
+            live.presence(&session, Vec::new())
+                .expect("a document")
+                .1
+                .keyed
+        );
+    }
+
+    /// The key moves the document, so the lamp arrives on the acknowledgement rather than on
+    /// the next thing that happens to change.
+    #[tokio::test]
+    async fn keying_moves_the_version() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let (before, _) = live.presence(&session, Vec::new()).expect("a document");
+
+        live.the_client_keys(&session);
+        let (after, _) = live.presence(&session, Vec::new()).expect("a document");
+
+        assert_eq!(after, before + 1);
+    }
+
+    /// An act on a session that ended under it changes nothing, and says so.
+    #[tokio::test]
+    async fn arming_and_keying_a_session_that_has_ended_do_nothing() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        live.ended_by_its_own_holder(&session);
+
+        assert!(!live.arm(&session, &LoopId::presented("air-to-ground".to_owned())));
+        assert!(!live.disarm(&session, &LoopId::presented("air-to-ground".to_owned())));
+        assert!(!live.the_client_keys(&session));
+        assert!(!live.the_client_unkeys(&session));
+        assert!(!live.is_keyed(&session));
+    }
+
     /// One loop in reach, named the way a grid row hands it over.
     fn a_loop(name: &str) -> InReach {
         InReach {
             id: LoopId::presented(name.to_owned()),
             name: name.to_owned(),
             permission: Permission::Monitor,
+        }
+    }
+
+    /// The same loop, on a row that may speak on it.
+    fn a_loop_to_emit_on(name: &str) -> InReach {
+        InReach {
+            permission: Permission::Emit,
+            ..a_loop(name)
         }
     }
 }
