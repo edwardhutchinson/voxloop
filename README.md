@@ -36,6 +36,13 @@ scheduled work: bump the line by hand as its own commit, having read the changel
 the two versions, and re-run the load test ([ADR-0006](docs/adr/0006-mediasoup-carries-the-audio.md)).
 Never a `cargo update`.
 
+**`mediasoup-client` is pinned exactly too**, and for the same reason said about the other end
+of the same negotiation: the version in `web/package.json` carries no caret, so a minor bump
+cannot arrive on somebody's `npm install`. The two halves have to agree about ICE, DTLS and
+RTP, and the failure mode of them drifting apart independently is audio that does not cross
+under a deployment nobody tested. Bump it the way the crate is bumped — by hand, as its own
+commit, with the changelog read.
+
 That build does not embed the console, and does not need Node or `web/dist` to exist.
 
 A **release** build embeds the console, and has an ordering requirement:
