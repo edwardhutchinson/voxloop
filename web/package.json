@@ -22,5 +22,8 @@
     "prettier-plugin-svelte": "^4.1.1",
     "svelte": "^5.57.0",
     "vite": "^8.2.2"
+  },
+  "dependencies": {
+    "mediasoup-client": "^3.23.1"
   }
 }

@@ -47,7 +47,8 @@ use crate::configuration::{
     Personalisation, Role, RoleId, Roles, SignInToken, SignIns, StoreError, Transaction, UserId,
     Users,
 };
-use crate::state::{Assuming, Ended, InReach, MediaPath, Relinquished, SessionId};
+use crate::media_plane::{Audience, Carried, Destination, Hearing, Negotiated, Negotiation, Way};
+use crate::state::{Assuming, Ended, InReach, MediaPath, Relinquished, SessionId, WhoHears};
 use crate::telemetry::module;
 
 /// How often the lobby is worked out again and pushed if it has moved.
@@ -123,6 +124,21 @@ struct Conversation {
     lobby_version: u64,
     /// The last lobby this socket sent, to tell a change from a redundant send.
     sent_lobby: Option<Lobby>,
+    /// Where the media plane says things to this socket's session, and the end this socket
+    /// listens on.
+    ///
+    /// **The media plane is a sink and answers nothing** ([ADR-0062]), so what a client's own
+    /// library needs — the path to build, the name of its uplink, one more talker to hear —
+    /// arrives here rather than as the return of a call. Handing the channel *in* at
+    /// [`crate::media_plane::MediaPlane::open_a_path_for`] is what keeps that true.
+    ///
+    /// **A fresh pair per assume**, so a message composed for a session that has ended cannot
+    /// arrive at the one that replaced it: the old receiver is dropped and the sends against
+    /// it fail into nothing, which is the right end for signalling nobody is waiting for.
+    ///
+    /// [ADR-0062]: ../../../docs/adr/0062-the-call-graph-is-acyclic-and-effects-modules-are-sinks.md
+    telling: tokio::sync::mpsc::UnboundedSender<Negotiated>,
+    told: tokio::sync::mpsc::UnboundedReceiver<Negotiated>,
 }
 
 /// What the client says to the server.
@@ -192,6 +208,65 @@ enum Incoming {
     ///
     /// [`StateAuthority::the_client_says`]: crate::state::StateAuthority::the_client_says
     MediaPath { state: String },
+    /// Arm a loop: select it as a destination for this session's voice.
+    ///
+    /// `Grid(emit, loop)` (`docs/spec/api-surface.md`), and **this is where emission is
+    /// enforced** ([ADR-0008]). The fan-out is built from the arm set and from nothing else,
+    /// so a loop that never got past this check has no route and there is nothing for a
+    /// client to bypass — which is why keying, one row below, needs no grid check of its own.
+    ///
+    /// **Two acts rather than one toggle**, for the reason subscribe and unsubscribe are:
+    /// nothing renders optimistically, so a second press on a control that has not caught up
+    /// yet must land on the same state.
+    ///
+    /// [ADR-0008]: ../../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    Arm {
+        #[serde(rename = "loop")]
+        held_on: String,
+    },
+    /// Stop selecting a loop as a destination. `Grid(emit, loop)`, the same cell as arming.
+    ///
+    /// It is the same rung because it is the same relationship being changed, and a role that
+    /// has lost `emit` cannot disarm either — which costs nothing, because losing the rung has
+    /// already taken the arm away.
+    Disarm {
+        #[serde(rename = "loop")]
+        held_on: String,
+    },
+    /// The client is transmitting on whatever it is armed on.
+    ///
+    /// `Session` (`docs/spec/api-surface.md`) and deliberately **not** a grid check: the arm
+    /// set was validated at arm time and is the whole of what this can reach, so a rung
+    /// consulted here would be a second lookup that could disagree with the first.
+    ///
+    /// It is a **signal rather than a request** ([ADR-0008]): the client has already muted or
+    /// unmuted its own microphone, which is what buys key-to-first-audio under 100 ms. What
+    /// the server does with it is tell everybody, including the talker — whose own lamp
+    /// lights on the answer and never on the button.
+    ///
+    /// [ADR-0008]: ../../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    Key,
+    /// The client has stopped transmitting. `Session`, the other half of the signal.
+    Unkey,
+    /// What this client's own end can decode.
+    ///
+    /// The first of four messages that are **mediasoup signalling** (`docs/spec/api-surface.md`)
+    /// — the conversation between the worker and the library in the browser, which VoxLoop
+    /// owns the channel for and has no opinion about ([ADR-0006]). What each of them carries
+    /// is opaque here and is opaque to everything above the media plane.
+    ///
+    /// [ADR-0006]: ../../../docs/adr/0006-mediasoup-carries-the-audio.md
+    MediaCanDecode {
+        what_it_can_decode: serde_json::Value,
+    },
+    /// The client's keys for one end of its media path.
+    MediaConnect { way: Way, keys: serde_json::Value },
+    /// The client is sending, and this is what it is sending.
+    MediaSpeaks {
+        what_it_is_sending: serde_json::Value,
+    },
+    /// The client has built its end of one carriage and can be sent audio on it.
+    MediaHears { carriage: String },
 }
 
 impl Incoming {
@@ -205,7 +280,24 @@ impl Incoming {
     fn requirement(&self) -> Requirement {
         match self {
             Self::Hello | Self::Assume { .. } => Requirement::SignedIn,
-            Self::Relinquish | Self::MediaPath { .. } => Requirement::Session,
+            Self::Relinquish
+            | Self::MediaPath { .. }
+            // **Keying carries no grid check and that is the design** (ADR-0008). What a
+            // transmission may reach was settled when the arms were made, and the media
+            // signalling below carries no destination at all — the uplink transmits and does
+            // not address (ADR-0007).
+            | Self::Key
+            | Self::Unkey
+            | Self::MediaCanDecode { .. }
+            | Self::MediaConnect { .. }
+            | Self::MediaSpeaks { .. }
+            | Self::MediaHears { .. } => Requirement::Session,
+            // **Emission is enforced here.** The rung is `emit` and the loop is the
+            // caller's, so this is a value built per message like the two below it.
+            Self::Arm { held_on } | Self::Disarm { held_on } => Requirement::Grid {
+                rung: Permission::Emit,
+                on: LoopId::presented(held_on.clone()),
+            },
             // The **first live consumer of `Grid`**, and the shape every later one takes:
             // the rung is the operation's and the loop is the caller's, so the requirement
             // is a value built here rather than a registration.
@@ -232,8 +324,22 @@ impl Incoming {
             | Self::Assume { .. }
             | Self::Relinquish
             | Self::Subscribe { .. }
-            | Self::Unsubscribe { .. } => true,
-            Self::MediaPath { .. } => false,
+            | Self::Unsubscribe { .. }
+            | Self::Arm { .. }
+            | Self::Disarm { .. }
+            // **Keying is the most deliberate act there is**, and it is also what clears an
+            // off-console assertion (`CONTEXT.md`). A console somebody is talking on is
+            // emphatically one somebody is sitting at.
+            | Self::Key
+            | Self::Unkey => true,
+            // The machine noticing something about its own transport, and the four messages
+            // its media library sends on its own account. A laptop left open on a desk
+            // negotiating ICE with itself must not renew its own sign-in.
+            Self::MediaPath { .. }
+            | Self::MediaCanDecode { .. }
+            | Self::MediaConnect { .. }
+            | Self::MediaSpeaks { .. }
+            | Self::MediaHears { .. } => false,
         }
     }
 
@@ -246,6 +352,14 @@ impl Incoming {
             Self::Subscribe { .. } => "subscribe",
             Self::Unsubscribe { .. } => "unsubscribe",
             Self::MediaPath { .. } => "media-path",
+            Self::Arm { .. } => "arm",
+            Self::Disarm { .. } => "disarm",
+            Self::Key => "key",
+            Self::Unkey => "unkey",
+            Self::MediaCanDecode { .. } => "media-can-decode",
+            Self::MediaConnect { .. } => "media-connect",
+            Self::MediaSpeaks { .. } => "media-speaks",
+            Self::MediaHears { .. } => "media-hears",
         }
     }
 }
@@ -282,6 +396,29 @@ enum Outgoing {
     /// The socket is going away, and why. A client that is merely disconnected cannot tell
     /// *ended* from *lost* on its own, and the two want different things of the operator.
     Closing { reason: String },
+    /// What this client's own media library has to build to have an audio path.
+    ///
+    /// The first of four messages carrying **mediasoup signalling** the other way. They are
+    /// not documents and are not versioned: a document is everything that is true at one
+    /// moment and is rendered atomically ([ADR-0019]), and these are one half of a
+    /// negotiation between two libraries. Nothing the console draws comes out of them — what
+    /// the console draws about the audio path is `media_path` in the presence document.
+    ///
+    /// [ADR-0019]: ../../../docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md
+    APathToBuild { path: Negotiation },
+    /// The uplink is carried, under this name.
+    TheUplinkIsCarried { carriage: Carried },
+    /// One more talker to hear, and what to build in order to hear them.
+    ///
+    /// **It names no talker** ([ADR-0033]). It carries what the client's library needs to
+    /// build a carriage and nothing that identifies whose voice is on it, because there is no
+    /// surface in v1 on which an operator reads that — and a field the console could not
+    /// draw would be one somebody would eventually draw.
+    ///
+    /// [ADR-0033]: ../../../docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md
+    OneMoreTalker { talker: Negotiation },
+    /// One fewer. That carriage is closed at this end and the client should let it go.
+    OneFewerTalker { carriage: Carried },
 }
 
 /// The lobby, as the console renders it.
@@ -357,6 +494,14 @@ struct Presence {
     ///
     /// [ADR-0042]: ../../../docs/adr/0042-the-media-path-has-its-own-ladder.md
     media_path: &'static str,
+    /// Whether the server has this session down as transmitting.
+    ///
+    /// **The transmitting lamp, and the whole of it** ([ADR-0008]). The console lights it
+    /// from this field and has nothing else to light it from, which is what makes it
+    /// impossible to pre-light locally.
+    ///
+    /// [ADR-0008]: ../../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    keyed: bool,
     loops: Vec<Reachable>,
 }
 
@@ -388,10 +533,28 @@ struct Reachable {
     ///
     /// [ADR-0016]: ../../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
     subscribed: bool,
+    /// Whether this session has armed it as a destination for its voice.
+    ///
+    /// A third field beside the rung and the subscription, because **arming is independent of
+    /// subscription** ([ADR-0013]) and neither of the other two can be read off it. An armed
+    /// loop that is not subscribed is a **blind arm**, and the console says so in words.
+    ///
+    /// [ADR-0013]: ../../../docs/adr/0013-arming-is-independent-of-subscription.md
+    armed: bool,
+    /// Whether somebody is transmitting on it right now.
+    ///
+    /// **One flag, and it never says who** ([ADR-0033]) — identical for one talker and for
+    /// five. It is here rather than derived on the client because there is nothing on the
+    /// client to derive it from: the downlink carries no attribution, deliberately.
+    ///
+    /// [ADR-0033]: ../../../docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md
+    talking: bool,
 }
 
 impl Conversation {
     fn opened(api: Api, user: UserId, sign_in: SignInToken) -> Self {
+        let (telling, told) = tokio::sync::mpsc::unbounded_channel();
+
         Self {
             api,
             user,
@@ -400,6 +563,8 @@ impl Conversation {
             sent_presence: None,
             lobby_version: 0,
             sent_lobby: None,
+            telling,
+            told,
         }
     }
 
@@ -423,7 +588,22 @@ impl Conversation {
                 },
                 _ = lobby.tick() => self.pushed_lobby().await,
                 _ = presence.tick() => self.pushed_presence().await,
+                // The media plane, saying something to this session. It is carried straight
+                // out: this socket is the channel VoxLoop owns for it (ADR-0006) and nothing
+                // here reads a word of what it is carrying.
+                Some(negotiated) = self.told.recv() => Ok(vec![carrying(negotiated)]),
             };
+
+            // **Somebody has to take the fan-out down to the media plane**, and every socket
+            // asks after every turn of this loop. The answer is taken rather than read, so
+            // whichever socket asks first while it has moved is the one that carries it and
+            // the rest are told there is nothing to do (`the_routing_if_it_moved`).
+            //
+            // It is here rather than beside each act because an act on *this* socket changes
+            // the audience of talkers on *other* sockets: taking a loop up puts this session
+            // into the audience of everybody armed on it, and a fan-out worked out per socket
+            // for its own session would be a different question with a useless answer.
+            self.hand_down_the_routing();
 
             let said = match said {
                 Ok(said) => said,
@@ -492,7 +672,51 @@ impl Conversation {
                     .await
             }
             Incoming::MediaPath { state } => self.the_client_reports(&state).await,
+            Incoming::Arm { held_on } => {
+                self.arming(&LoopId::presented(held_on), Armed::Armed).await
+            }
+            Incoming::Disarm { held_on } => {
+                self.arming(&LoopId::presented(held_on), Armed::Disarmed)
+                    .await
+            }
+            Incoming::Key => self.keying(Keyed::Keyed).await,
+            Incoming::Unkey => self.keying(Keyed::Unkeyed).await,
+            Incoming::MediaCanDecode { what_it_can_decode } => {
+                self.the_media_plane(|media, session| {
+                    media.the_client_will_hear(session, Negotiation::presented(what_it_can_decode));
+                })
+            }
+            Incoming::MediaConnect { way, keys } => self.the_media_plane(|media, session| {
+                media.the_client_connects(session, way, Negotiation::presented(keys));
+            }),
+            Incoming::MediaSpeaks { what_it_is_sending } => {
+                self.the_media_plane(|media, session| {
+                    media.the_client_speaks(session, Negotiation::presented(what_it_is_sending));
+                })
+            }
+            Incoming::MediaHears { carriage } => self.the_media_plane(|media, session| {
+                media.the_client_hears(session, &Carried::presented(carriage));
+            }),
         }
+    }
+
+    /// Hand one piece of the client's own media negotiation down to the media plane.
+    ///
+    /// **It answers nothing and is never awaited** ([ADR-0062]), so all four of these are one
+    /// shape: take the session, do the thing, say nothing back. The client learns what
+    /// happened from what arrives on [`Conversation::told`] or from its media path going
+    /// green, which is the same way it learns everything else about the audio path.
+    ///
+    /// [ADR-0062]: ../../../docs/adr/0062-the-call-graph-is-acyclic-and-effects-modules-are-sinks.md
+    fn the_media_plane(
+        &self,
+        say: impl FnOnce(&crate::media_plane::MediaPlane, &SessionId),
+    ) -> Result<Vec<Outgoing>, StoreError> {
+        if let Some(session) = &self.session {
+            say(&self.api.media, session);
+        }
+
+        Ok(Vec::new())
     }
 
     /// The document this socket's tier calls for, whether or not it has changed.
@@ -656,7 +880,15 @@ impl Conversation {
         // close. The media plane cannot refuse and cannot be awaited (ADR-0062), so this
         // returns nothing — the transport arriving, or failing to, shows up on the reports
         // channel as a media path state and reaches this document on a later tick.
-        self.api.media.open_a_path_for(&assumed.session);
+        // **A fresh channel per session**, so nothing composed for the session this one
+        // displaced can arrive at it. The sender goes down with the instruction that builds
+        // the path, which is what keeps the media plane a sink: it is given somewhere to say
+        // things rather than asked anything.
+        let (telling, told) = tokio::sync::mpsc::unbounded_channel();
+        self.telling = telling.clone();
+        self.told = told;
+
+        self.api.media.open_a_path_for(&assumed.session, telling);
 
         self.session = Some(assumed.session);
         self.sent_presence = None;
@@ -746,6 +978,93 @@ impl Conversation {
         }
 
         self.presence(Told::WhetherOrNotItMoved).await
+    }
+
+    /// Arm a loop, or disarm it — the same act in two directions.
+    ///
+    /// `Grid(emit, loop)` was met a moment ago, and **that check is the whole of the
+    /// enforcement** ([ADR-0008]): the fan-out is built from the arm set alone, so a loop that
+    /// did not get past it has no route to close.
+    ///
+    /// **Nothing is remembered.** A subscription set is written through because it is a
+    /// preference that is safe to be stale ([ADR-0050]) and a restart would otherwise cost
+    /// every operator their console by hand. An arm set restored on the next assume would put
+    /// somebody on the air the moment they took a seat, which is the opposite of safe to be
+    /// stale — so there is no personalisation write here and no row for one.
+    ///
+    /// The document goes out **whether or not it moved**, like the subscription acts and for
+    /// the same reason: somebody pressed a control and is waiting for it to change.
+    ///
+    /// [ADR-0008]: ../../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    /// [ADR-0050]: ../../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
+    async fn arming(&mut self, held_on: &LoopId, now: Armed) -> Result<Vec<Outgoing>, StoreError> {
+        let Some(session) = self.session.clone() else {
+            // Unreachable: `Grid` resolved a session a moment ago, and only this socket
+            // clears it.
+            return Ok(Vec::new());
+        };
+
+        match now {
+            Armed::Armed => self.api.state.arm(&session, held_on),
+            Armed::Disarmed => self.api.state.disarm(&session, held_on),
+        };
+
+        self.presence(Told::WhetherOrNotItMoved).await
+    }
+
+    /// Take the client's word that it is transmitting, or that it has stopped.
+    ///
+    /// The document is pushed **straight away** rather than on the next tick, and this is
+    /// where the round trip [ADR-0008] insists on is paid: the operator's own lamp lights when
+    /// this answer arrives, and two hundred milliseconds of a console that has not lit yet is
+    /// the honest cost of never lighting one that should not be.
+    ///
+    /// [ADR-0008]: ../../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    async fn keying(&mut self, now: Keyed) -> Result<Vec<Outgoing>, StoreError> {
+        let Some(session) = self.session.clone() else {
+            // Unreachable: `Session` was met a moment ago, and only this socket clears it.
+            return Ok(Vec::new());
+        };
+
+        match now {
+            Keyed::Keyed => self.api.state.the_client_keys(&session),
+            Keyed::Unkeyed => self.api.state.the_client_unkeys(&session),
+        };
+
+        self.presence(Told::WhetherOrNotItMoved).await
+    }
+
+    /// Carry the fan-out down to the media plane, where it has moved.
+    ///
+    /// **This is the one place the two state seams meet on the audio path**, and they meet
+    /// the way they always do — by passing a value ([ADR-0039]). The state authority worked
+    /// out who hears whom; this translates each loop into the opaque label the media plane is
+    /// allowed to see and hands the answer down. No `LoopId` crosses, no rung crosses, and
+    /// nothing below may narrow what it is given ([ADR-0063]).
+    ///
+    /// It answers nothing and cannot fail, because the thing it is talking to answers nothing
+    /// and cannot refuse.
+    ///
+    /// [ADR-0039]: ../../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+    /// [ADR-0063]: ../../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
+    fn hand_down_the_routing(&self) {
+        let Some(routing) = self.api.state.the_routing_if_it_moved() else {
+            return;
+        };
+
+        for WhoHears { talker, listeners } in routing {
+            let audience = Audience {
+                hearing: listeners
+                    .into_iter()
+                    .map(|heard| Hearing {
+                        listener: heard.listener,
+                        destination: Destination::labelled(heard.on.as_str().to_owned()),
+                    })
+                    .collect(),
+            };
+
+            self.api.media.these_should_hear(&talker, &audience);
+        }
     }
 
     /// Remember the set this act leaves behind. **Best effort, and it answers nothing.**
@@ -905,14 +1224,17 @@ impl Conversation {
                     name: named.name,
                 },
                 media_path: presence.media_path.as_str(),
+                keyed: presence.keyed,
                 loops: presence
                     .loops
                     .into_iter()
-                    .map(|monitoring| Reachable {
-                        id: monitoring.held_on.id.as_str().to_owned(),
-                        name: monitoring.held_on.name,
-                        permission: monitoring.held_on.permission.as_str(),
-                        subscribed: monitoring.subscribed,
+                    .map(|standing| Reachable {
+                        id: standing.held_on.id.as_str().to_owned(),
+                        name: standing.held_on.name,
+                        permission: standing.held_on.permission.as_str(),
+                        subscribed: standing.subscribed,
+                        armed: standing.armed,
+                        talking: standing.talking,
                     })
                     .collect(),
             },
@@ -1148,6 +1470,24 @@ enum Remembered {
     Unsubscribed,
 }
 
+/// Which way the arm set moved.
+///
+/// It is a pair like [`Remembered`] and deliberately **not** that type: an arm is not
+/// remembered anywhere, and sharing the enum would be the first step towards sharing the
+/// write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Armed {
+    Armed,
+    Disarmed,
+}
+
+/// Which way the key moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Keyed {
+    Keyed,
+    Unkeyed,
+}
+
 /// Whether a document is worth sending when it has not moved.
 ///
 /// An answer to something the client asked is sent whatever it says; a push is sent only
@@ -1156,6 +1496,20 @@ enum Remembered {
 enum Told {
     WhetherOrNotItMoved,
     OnlyIfItMoved,
+}
+
+/// One thing the media plane said to a session, as the message that carries it.
+///
+/// It is a translation and nothing more: Transport owns the wire format and the media plane
+/// owns what is on it, and this is the line between the two. Nothing here reads a
+/// [`Negotiation`], which is the whole reason it can be one `match` with no arms that think.
+fn carrying(negotiated: Negotiated) -> Outgoing {
+    match negotiated {
+        Negotiated::APathToBuild(path) => Outgoing::APathToBuild { path },
+        Negotiated::TheUplinkIsCarried(carriage) => Outgoing::TheUplinkIsCarried { carriage },
+        Negotiated::OneMoreTalker(talker) => Outgoing::OneMoreTalker { talker },
+        Negotiated::OneFewerTalker(carriage) => Outgoing::OneFewerTalker { carriage },
+    }
 }
 
 /// Write the audit entry for a session that ended, **with the reason** (v1 §12).
@@ -1347,7 +1701,7 @@ mod tests {
         }
 
         /// Somebody else, signed in and holding a seat.
-        async fn somebody_occupies(&self, role: &RoleId, username: &str) {
+        async fn somebody_occupies(&self, role: &RoleId, username: &str) -> SessionId {
             let mut transaction = self.api.store.begin().await.expect("a transaction");
             let occupant = transaction
                 .create_user(NewUser {
@@ -1373,7 +1727,37 @@ mod tests {
                     limit,
                     subscribed_to: Vec::new(),
                 })
-                .unwrap_or_else(|_| panic!("the seat to be free"));
+                .unwrap_or_else(|_| panic!("the seat to be free"))
+                .session
+        }
+
+        /// A second person at a second console, eligible for the same role.
+        ///
+        /// It is a whole socket rather than a session poked into live state, because the
+        /// questions this ticket asks — who hears whom, and what a second console is shown —
+        /// are answered by the same code path a real console goes through. The role has to
+        /// have no limit for two to sit in it, which is what every caller of this uses.
+        async fn somebody_else(&self, username: &str, role: &RoleId) -> Conversation {
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            let other = transaction
+                .create_user(NewUser {
+                    username: username.to_owned(),
+                    password_hash: None,
+                    is_system_administrator: false,
+                })
+                .await
+                .expect("the user to be created");
+            transaction
+                .grant_eligibility(&other, role)
+                .await
+                .expect("the eligibility to be granted");
+            let sign_in = transaction
+                .open_sign_in(&other)
+                .await
+                .expect("the sign-in to open");
+            transaction.commit().await.expect("the console to land");
+
+            Conversation::opened(self.api.clone(), other, sign_in)
         }
 
         /// The id of a loop by name, which is what a message names it by.
@@ -2175,12 +2559,17 @@ mod tests {
         assert_eq!(said["role"]["name"], "Flight Director");
         assert_eq!(said["loops"][0]["name"], "Air-to-ground");
         assert_eq!(said["loops"][0]["permission"], "emit");
+        assert_eq!(said["loops"][0]["subscribed"], false);
+        assert_eq!(said["loops"][0]["armed"], false);
+        assert_eq!(said["loops"][0]["talking"], false);
         assert_eq!(said["media_path"], "lost");
+        assert_eq!(said["keyed"], false);
         let mut named: Vec<&String> = said.as_object().expect("a document").keys().collect();
         named.sort();
         assert_eq!(
             named,
             [
+                "keyed",
                 "loops",
                 "media_path",
                 "message",
@@ -3025,6 +3414,410 @@ mod tests {
                 Instructed::APathWasOpenedFor(taken_up),
             ],
             "the displaced path is closed before the new one is opened"
+        );
+    }
+
+    // ---- Arming, keying and the fan-out (#41) ------------------------------------------
+
+    fn arming(held_on: &LoopId) -> String {
+        format!(r#"{{"message":"arm","loop":"{}"}}"#, held_on.as_str())
+    }
+
+    fn disarming(held_on: &LoopId) -> String {
+        format!(r#"{{"message":"disarm","loop":"{}"}}"#, held_on.as_str())
+    }
+
+    const KEY: &str = r#"{"message":"key"}"#;
+    const UNKEY: &str = r#"{"message":"unkey"}"#;
+
+    /// Which loops a document says this session has armed, by name.
+    fn armed(said: &Outgoing) -> Vec<&str> {
+        the_presence(said)
+            .1
+            .loops
+            .iter()
+            .filter(|held_on| held_on.armed)
+            .map(|held_on| held_on.name.as_str())
+            .collect()
+    }
+
+    /// Which loops a document says are being spoken on, by name.
+    fn talking(said: &Outgoing) -> Vec<&str> {
+        the_presence(said)
+            .1
+            .loops
+            .iter()
+            .filter(|held_on| held_on.talking)
+            .map(|held_on| held_on.name.as_str())
+            .collect()
+    }
+
+    /// The last step of a turn of the socket loop, which is where the fan-out goes down.
+    ///
+    /// `talk` does this after every message and every tick; a test drives `received` rather
+    /// than the loop, so it does the same thing here rather than asserting on a fan-out
+    /// nothing had carried yet.
+    fn a_turn_of_the_loop(socket: &Conversation) {
+        socket.hand_down_the_routing();
+    }
+
+    /// Whatever the media plane has said to this socket's session, as the messages `talk`
+    /// would have carried out of it.
+    fn negotiated(socket: &mut Conversation) -> Vec<Outgoing> {
+        let mut said = Vec::new();
+        while let Ok(one) = socket.told.try_recv() {
+            said.push(carrying(one));
+        }
+
+        said
+    }
+
+    /// The audiences the media plane has been handed, as (talker, listener, destination).
+    fn the_fan_out(lobby: &ALobby) -> Vec<(String, String, String)> {
+        lobby
+            .recording
+            .instructions()
+            .into_iter()
+            .filter_map(|instruction| match instruction {
+                Instructed::TheseShouldHear { talker, audience } => Some((talker, audience)),
+                _ => None,
+            })
+            .flat_map(|(talker, audience)| {
+                audience.hearing.into_iter().map(move |hearing| {
+                    (
+                        talker.as_str().to_owned(),
+                        hearing.listener.as_str().to_owned(),
+                        hearing.destination.as_str().to_owned(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// **Arming is gated on `emit`**, and a role that may only listen on a loop may not make
+    /// it a destination. The refusal is the same shape every other unmet requirement takes.
+    #[tokio::test]
+    async fn arming_a_loop_this_role_may_only_monitor_is_refused() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+
+        let refused = said(&mut socket, &arming(&air_to_ground)).await;
+
+        assert!(
+            matches!(&refused, Outgoing::Refused { was, .. } if was == "arm"),
+            "{refused:?}"
+        );
+        // And nothing was routed, because there is nothing to route to.
+        a_turn_of_the_loop(&socket);
+        assert!(the_fan_out(&lobby).is_empty());
+    }
+
+    /// Arming from the lobby is refused for the same reason subscribing is: there is no
+    /// session, so there is no role, so there is no cell to read.
+    #[tokio::test]
+    async fn arming_and_keying_from_the_lobby_are_refused() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+
+        for message in [&arming(&air_to_ground), KEY, UNKEY] {
+            let refused = said(&mut socket, message).await;
+            assert!(matches!(&refused, Outgoing::Refused { .. }), "{refused:?}");
+        }
+    }
+
+    /// **Arming puts a loop in nobody's ears, including the arming operator's own**
+    /// (ADR-0013). It says so in the document as a third fact beside the rung and the
+    /// subscription, which is what the console needs to name a blind arm in words.
+    #[tokio::test]
+    async fn arming_a_loop_does_not_take_it_up() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+
+        let armed_now = said(&mut socket, &arming(&air_to_ground)).await;
+
+        assert_eq!(armed(&armed_now), vec!["Air-to-ground"]);
+        assert!(
+            monitoring(&armed_now).is_empty(),
+            "arming a loop took it up as well"
+        );
+
+        let disarmed = said(&mut socket, &disarming(&air_to_ground)).await;
+        assert!(armed(&disarmed).is_empty());
+    }
+
+    /// **The fan-out reaches whoever is monitoring an armed loop, and the loop crosses as a
+    /// label** (ADR-0063). Nothing below the seam is told what the label names.
+    #[tokio::test]
+    async fn arming_carries_the_fan_out_down_with_the_loop_as_a_label() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+
+        let mut talker = lobby.a_socket();
+        let talking = said(&mut talker, &assuming(&flight)).await;
+        let talking = the_presence(&talking).1.session.clone();
+
+        let mut listener = lobby.somebody_else("capcom", &flight).await;
+        let hearing = said(&mut listener, &assuming(&flight)).await;
+        let hearing = the_presence(&hearing).1.session.clone();
+
+        all(&mut talker, &arming(&air_to_ground)).await;
+        all(&mut listener, &subscribing(&air_to_ground)).await;
+        a_turn_of_the_loop(&talker);
+
+        assert_eq!(
+            the_fan_out(&lobby).last(),
+            Some(&(talking, hearing, air_to_ground.as_str().to_owned())),
+            "the audience did not reach the media plane as an answer"
+        );
+    }
+
+    /// **The route is built from the arm and not from the key** (ADR-0008). Keying is the
+    /// client muting its own microphone, so that a key press costs no round trip and no
+    /// renegotiation — and so that the residual that ADR writes down out loud still exists to
+    /// be watched for.
+    #[tokio::test]
+    async fn keying_moves_nothing_in_the_fan_out() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+
+        let mut talker = lobby.a_socket();
+        all(&mut talker, &assuming(&flight)).await;
+        let mut listener = lobby.somebody_else("capcom", &flight).await;
+        all(&mut listener, &assuming(&flight)).await;
+        all(&mut talker, &arming(&air_to_ground)).await;
+        all(&mut listener, &subscribing(&air_to_ground)).await;
+        a_turn_of_the_loop(&talker);
+        let routed = the_fan_out(&lobby);
+        assert_eq!(routed.len(), 1, "the route was not there before the key");
+
+        all(&mut talker, KEY).await;
+        a_turn_of_the_loop(&talker);
+
+        assert_eq!(the_fan_out(&lobby), routed, "keying re-routed the audio");
+    }
+
+    /// **The lamp is the server's answer and the console has nothing else to light it from**
+    /// (ADR-0008). It arrives in the document, on the round trip, and it goes out the same
+    /// way.
+    #[tokio::test]
+    async fn keying_lights_the_lamp_in_the_document() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        let assumed = said(&mut socket, &assuming(&flight)).await;
+        assert!(!the_presence(&assumed).1.keyed, "a new session was lit");
+
+        let keyed = said(&mut socket, KEY).await;
+        let unkeyed = said(&mut socket, UNKEY).await;
+
+        assert!(the_presence(&keyed).1.keyed);
+        assert!(!the_presence(&unkeyed).1.keyed);
+    }
+
+    /// **The indicator marks the loop and never the talker** (ADR-0033), and it reaches a
+    /// console that is not monitoring the loop — which is the whole of what v1 §4 asks for as
+    /// compensation for arming blind.
+    #[tokio::test]
+    async fn a_loop_being_spoken_on_is_marked_on_every_console_that_reaches_it() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+
+        let mut talker = lobby.a_socket();
+        all(&mut talker, &assuming(&flight)).await;
+        let mut watching = lobby.somebody_else("capcom", &flight).await;
+        all(&mut watching, &assuming(&flight)).await;
+        // Armed, and monitoring nothing at all: this console is blind on the loop it is
+        // about to be told somebody is speaking on.
+        all(&mut watching, &arming(&air_to_ground)).await;
+
+        all(&mut talker, &arming(&air_to_ground)).await;
+        all(&mut talker, KEY).await;
+
+        let mut pushed = watching
+            .pushed_presence()
+            .await
+            .expect("the socket to answer");
+        assert_eq!(pushed.len(), 1, "{pushed:?}");
+        let seen = pushed.remove(0);
+
+        assert_eq!(talking(&seen), vec!["Air-to-ground"]);
+        assert!(
+            monitoring(&seen).is_empty(),
+            "the mark implied a subscription"
+        );
+        // And it says nothing about who: there is no field on the document that could.
+        assert_eq!(
+            as_json(&seen)["loops"][0]["talking"],
+            serde_json::Value::Bool(true)
+        );
+    }
+
+    /// **An arm is not remembered** (#39's set is, and this is the difference). A
+    /// subscription is a preference that is safe to be stale; an arm restored on the next
+    /// assume would put somebody on the air the moment they took a seat.
+    #[tokio::test]
+    async fn an_arm_is_not_remembered_and_a_new_seat_is_armed_on_nothing() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, &arming(&air_to_ground)).await;
+        all(&mut socket, &subscribing(&air_to_ground)).await;
+
+        all(&mut socket, RELINQUISH).await;
+        let again = said(&mut socket, &assuming(&flight)).await;
+
+        assert!(armed(&again).is_empty(), "an arm survived a relinquish");
+        assert_eq!(
+            monitoring(&again),
+            vec!["Air-to-ground"],
+            "the subscription set was not restored"
+        );
+        assert!(
+            lobby.remembered_by(&flight).await == vec!["Air-to-ground".to_owned()],
+            "the arm was written down beside the subscription"
+        );
+    }
+
+    /// **The client's own media negotiation is carried and never read.** Four messages, four
+    /// instructions, each carrying exactly what the client said — because what is in them is
+    /// a conversation between two media libraries and none of VoxLoop's business (ADR-0006).
+    #[tokio::test]
+    async fn the_media_negotiation_crosses_the_seam_untouched() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        let assumed = said(&mut socket, &assuming(&flight)).await;
+        let session = SessionId::presented(the_presence(&assumed).1.session.clone());
+
+        let can_decode = serde_json::json!({ "codecs": [{ "mimeType": "audio/opus" }] });
+        let keys = serde_json::json!({ "fingerprints": [], "role": "client" });
+        let sending = serde_json::json!({ "rtpParameters": { "codecs": [] } });
+        for message in [
+            format!(r#"{{"message":"media-can-decode","what_it_can_decode":{can_decode}}}"#),
+            format!(r#"{{"message":"media-connect","way":"up","keys":{keys}}}"#),
+            format!(r#"{{"message":"media-speaks","what_it_is_sending":{sending}}}"#),
+            r#"{"message":"media-hears","carriage":"a-carriage"}"#.to_owned(),
+        ] {
+            assert!(
+                all(&mut socket, &message).await.is_empty(),
+                "a media message was answered, and the media plane answers nothing"
+            );
+        }
+
+        assert_eq!(
+            lobby
+                .recording
+                .instructions()
+                .into_iter()
+                .skip(1)
+                .collect::<Vec<_>>(),
+            vec![
+                Instructed::ThisClientWillHear {
+                    session: session.clone(),
+                    what_it_can_decode: Negotiation::presented(can_decode),
+                },
+                Instructed::ThisClientConnected {
+                    session: session.clone(),
+                    way: Way::Up,
+                    keys: Negotiation::presented(keys),
+                },
+                Instructed::ThisClientSpeaks {
+                    session: session.clone(),
+                    what_it_is_sending: Negotiation::presented(sending),
+                },
+                Instructed::ThisClientHears {
+                    session,
+                    carriage: Carried::presented("a-carriage".to_owned()),
+                },
+            ]
+        );
+    }
+
+    /// **What the media plane says to a session comes out on that session's socket.** The
+    /// channel is handed in when the path is opened, which is what keeps the media plane a
+    /// sink: it is given somewhere to say things rather than asked anything.
+    #[tokio::test]
+    async fn what_the_media_plane_says_reaches_the_session_it_was_said_to() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        let assumed = said(&mut socket, &assuming(&flight)).await;
+        let session = SessionId::presented(the_presence(&assumed).1.session.clone());
+
+        let path = serde_json::json!({ "router": {}, "up": {}, "down": {} });
+        lobby.recording.the_worker_tells(
+            &session,
+            Negotiated::APathToBuild(Negotiation::presented(path.clone())),
+        );
+        lobby.recording.the_worker_tells(
+            &session,
+            Negotiated::TheUplinkIsCarried(Carried::presented("an-uplink".to_owned())),
+        );
+
+        let carried = negotiated(&mut socket);
+
+        assert_eq!(as_json(&carried[0])["message"], "a-path-to-build");
+        assert_eq!(as_json(&carried[0])["path"], path);
+        assert_eq!(as_json(&carried[1])["message"], "the-uplink-is-carried");
+        assert_eq!(as_json(&carried[1])["carriage"], "an-uplink");
+    }
+
+    /// **A fresh channel per session**, so signalling composed for a session that has ended
+    /// cannot arrive at the one that replaced it. A carriage named for somebody else's
+    /// session is the one thing a client must never be handed.
+    #[tokio::test]
+    async fn signalling_for_an_ended_session_reaches_nothing() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        let first = said(&mut socket, &assuming(&flight)).await;
+        let first = SessionId::presented(the_presence(&first).1.session.clone());
+
+        all(&mut socket, RELINQUISH).await;
+        all(&mut socket, &assuming(&flight)).await;
+
+        lobby.recording.the_worker_tells(
+            &first,
+            Negotiated::TheUplinkIsCarried(Carried::presented("a-stale-uplink".to_owned())),
+        );
+
+        assert!(
+            negotiated(&mut socket).is_empty(),
+            "a socket was handed signalling for a session that had ended"
         );
     }
 
