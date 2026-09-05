@@ -26,13 +26,36 @@ const views = ['Board.svelte', 'Ledger.svelte'];
 // Two of the three are being monitored and one is not, because **subscription is distinct
 // from permission** (v1 §5): every loop here is one the role may monitor, and that says
 // nothing about which of them it currently is.
+//
+// `FLIGHT` is armed and not monitored, which is a **blind arm** — legal, because arming is
+// independent of subscription (ADR-0013), and the state the console has to name in words. It
+// is also being spoken on, which is what makes it the loop that proves an indicator reaches a
+// console that is not hearing the loop.
 const inReach = [
-	{ id: 'l-3', name: 'THERMAL', permission: 'control', subscribed: true },
-	{ id: 'l-1', name: 'FLIGHT', permission: 'emit', subscribed: false },
-	{ id: 'l-2', name: 'GNC', permission: 'monitor', subscribed: true }
+	{
+		id: 'l-3',
+		name: 'THERMAL',
+		permission: 'control',
+		subscribed: true,
+		armed: false,
+		talking: false
+	},
+	{ id: 'l-1', name: 'FLIGHT', permission: 'emit', subscribed: false, armed: true, talking: true },
+	{ id: 'l-2', name: 'GNC', permission: 'monitor', subscribed: true, armed: false, talking: false }
 ];
 
 const namesOf = (loops) => loops.map((reachable) => reachable.name);
+
+/**
+ * A view without its transmit bar: the loop list, and only that.
+ *
+ * The bar names loops too — it carries the armed set in words (ADR-0034) — and it is above the
+ * rows in one view and below the cards in the other, so a question about the order **of the
+ * list** has to ask it of the list. Everything else here reads the whole body, because the bar
+ * being in it is usually the point.
+ */
+const theLoopList = (body) =>
+	body.replace(/<section aria-label="Transmit bar">[\s\S]*?<\/section>/, '');
 
 /** Where each of these names first appears, in the order the page has them. */
 const asShown = (body, names) =>
@@ -43,7 +66,7 @@ const eachView = (props) => Promise.all(views.map((view) => rendered(view, props
 // A view as a session with a working audio path sees it. The media path is passed rather
 // than left out wherever a question is not about it, because the document always carries one
 // (ADR-0042) and a view rendered without it is a view no session ever sees.
-const carrying = { loops: inReach, mediaPath: 'connected' };
+const carrying = { loops: inReach, mediaPath: 'connected', armed: ['FLIGHT'], keyed: false };
 
 test('both views render every loop in the document', async () => {
 	for (const [at, body] of (await eachView(carrying)).entries()) {
@@ -56,7 +79,7 @@ test('both views render every loop in the document', async () => {
 test('both views hold the loops in one order', async () => {
 	for (const [at, body] of (await eachView(carrying)).entries()) {
 		assert.deepEqual(
-			asShown(body, namesOf(inReach)),
+			asShown(theLoopList(body), namesOf(inReach)),
 			namesOf(inReach),
 			`${views[at]} shows the loops in an order of its own`
 		);
@@ -87,7 +110,7 @@ test('a loop that leaves reach leaves both views', async () => {
 });
 
 test('an empty reach is a view with no loops rather than no view', async () => {
-	for (const [at, body] of (await eachView({ ...carrying, loops: [] })).entries()) {
+	for (const [at, body] of (await eachView({ ...carrying, loops: [], armed: [] })).entries()) {
 		assert.ok(
 			body.includes(await rendered('TransmitBar.svelte', { mediaPath: 'connected' })),
 			`${views[at]} lost its bar`
@@ -281,6 +304,196 @@ test('the console hands both views the same toggle', async () => {
 	for (const act of ['onSubscribe', 'onUnsubscribe']) {
 		assert.match(source, new RegExp(`${act}\\(`), `the console never calls ${act}`);
 	}
+});
+
+// ---- Arming, keying and the talking indicator (#41) ---------------------------------------
+
+// **A state that renders in only one view is a bug** (v1 §8), and the arm is the state this
+// ticket adds. The board says it as a word and the ledger as a sentence, which is the division
+// of labour ADR-0032 keeps both views for.
+test('both views say whether each loop is armed', async () => {
+	const [board, ledger] = await eachView(carrying);
+
+	assert.match(board, />\s*Not armed\s*</, 'the board does not say a loop is unarmed');
+	assert.match(board, />\s*Armed/, 'the board does not say a loop is armed');
+	assert.match(ledger, /Your voice goes here/);
+	assert.match(ledger, /Your voice does not go here\./);
+});
+
+// **A blind arm is named in words** (v1 §4, §8): armed and not monitored is legal, and the
+// console compensating for it is the whole of what makes emitting blind safe to allow.
+test('both views name a blind arm in words', async () => {
+	const [board, ledger] = await eachView(carrying);
+
+	assert.match(board, /Armed, not hearing it/, 'the board does not name the blind arm');
+	assert.match(
+		ledger,
+		/Your voice goes here and you are not hearing it\./,
+		'the ledger does not name the blind arm'
+	);
+});
+
+// **Reach is the grid and only the grid.** A role that may hear a loop and not speak on it is
+// offered nothing to press, rather than a control that is refused when it is used — a console
+// may not misrepresent what a person can do (ADR-0016).
+test('neither view offers an arm on a loop this role may only monitor', async () => {
+	const monitorOnly = [{ ...inReach[2] }];
+	const [board, ledger] = await eachView({ ...carrying, loops: monitorOnly, armed: [] });
+
+	assert.doesNotMatch(board, />\s*Arm\s*</, 'the board offers an arm on a loop it may not emit on');
+	assert.doesNotMatch(
+		ledger,
+		/>\s*Arm\s*</,
+		'the ledger offers an arm on a loop it may not emit on'
+	);
+	assert.match(ledger, /This role may not speak on this loop\./);
+});
+
+// **The console shows that a loop is being spoken on and never who** (ADR-0033). It is one
+// component, so both views carry the same indicator by construction rather than by two
+// implementations agreeing — and there is nothing in it that could name anybody.
+test('the talking indicator is the same indicator in both views and names nobody', async () => {
+	const indicator = await rendered('Talking.svelte');
+	const [board, ledger] = await eachView(carrying);
+
+	for (const [at, body] of [board, ledger].entries()) {
+		assert.ok(body.includes(indicator), `${views[at]} does not carry the talking indicator`);
+	}
+
+	// One loop is being spoken on and two are not, so the indicator appears once in each.
+	for (const [at, body] of [board, ledger].entries()) {
+		assert.equal(
+			body.split(indicator).length - 1,
+			1,
+			`${views[at]} marks the wrong number of loops as being spoken on`
+		);
+	}
+
+	// It says so in a word as well as in the glyph, because colour and motion are never what
+	// carries a state.
+	assert.match(indicator, /Talking/);
+});
+
+// It reaches a console that is not monitoring the loop, which is what makes it the
+// compensation v1 §4 asks for: the operator arming blind can still see they are about to talk
+// over somebody.
+test('a loop being spoken on is marked whether or not this console is hearing it', async () => {
+	const indicator = await rendered('Talking.svelte');
+	const blind = inReach.map((reachable) => ({ ...reachable, subscribed: false }));
+
+	for (const [at, body] of (await eachView({ ...carrying, loops: blind })).entries()) {
+		assert.ok(body.includes(indicator), `${views[at]} shows the mark only where a loop is heard`);
+	}
+});
+
+// **The armed set in words, and the same words in both views** (ADR-0034). It is the half of
+// the bar an operator acts on: the second before keying is spent reading where their voice is
+// about to go, and a count does not answer that.
+test('the transmit bar carries the armed set in words, identically in both views', async () => {
+	const bar = await rendered('TransmitBar.svelte', {
+		mediaPath: 'connected',
+		armed: ['FLIGHT', 'SIM']
+	});
+
+	assert.match(bar, /Armed on FLIGHT and SIM\./);
+
+	for (const [at, body] of (await eachView({ ...carrying, armed: ['FLIGHT', 'SIM'] })).entries()) {
+		assert.ok(body.includes(bar), `${views[at]} does not carry the armed set as the other does`);
+	}
+});
+
+// **At zero armed the key control renders differently rather than going away** (v1 §8). A
+// revocation can empty the arm set under somebody mid-sentence, and taking the control out of
+// their hand is a bigger lie than showing them that it reaches nobody.
+test('the key control says so when it reaches nobody, and still keys', async () => {
+	const nothing = await rendered('TransmitBar.svelte', { mediaPath: 'connected', armed: [] });
+	const something = await rendered('TransmitBar.svelte', {
+		mediaPath: 'connected',
+		armed: ['FLIGHT']
+	});
+
+	assert.match(nothing, /Armed on nothing\./);
+	assert.match(nothing, /reaching nobody/);
+	assert.notEqual(nothing, something, 'the key control reads the same at zero armed');
+	// It is still there, and it is still a control.
+	assert.match(nothing, /<button class="key[ "]/);
+});
+
+// **The transmitting lamp is lit by the server's acknowledgement, never by the button going
+// down** (ADR-0008). The bar keeps no state of its own — the test above says so — so the only
+// thing that can light it is the document's `keyed`, and this is that being true.
+test('the transmitting lamp is the document’s answer and nothing else', async () => {
+	const lit = await rendered('TransmitBar.svelte', {
+		mediaPath: 'connected',
+		armed: ['FLIGHT'],
+		keyed: true
+	});
+	const unlit = await rendered('TransmitBar.svelte', {
+		mediaPath: 'connected',
+		armed: ['FLIGHT'],
+		keyed: false
+	});
+
+	assert.match(lit, />\s*Transmitting\s*</);
+	assert.match(unlit, />\s*Not transmitting\s*</);
+	assert.match(lit, /<button[^>]*aria-pressed="true"/);
+	assert.match(unlit, /<button[^>]*aria-pressed="false"/);
+
+	// And the source has nowhere to pre-light it from: there is no local key state in the bar
+	// and no handler that sets one.
+	const source = read(join(lib, 'TransmitBar.svelte'));
+	assert.ok(!source.includes('$state('), 'the transmit bar keeps a key state of its own');
+});
+
+// Emission is withdrawn on a lost audio path (ADR-0042), so there is no key control over one.
+test('a lost audio path leaves no key control to press', async () => {
+	const lost = await rendered('TransmitBar.svelte', { mediaPath: 'lost', armed: ['FLIGHT'] });
+
+	assert.doesNotMatch(lost, /<button/, 'a console with no audio path was offered a key control');
+	assert.match(lost, /will not emit/);
+});
+
+// **Two acts rather than one toggle, and the decision is held above both views**, exactly as
+// it is for monitoring: which of arm and disarm a press is comes from the document, and two
+// views deciding separately is how they come to disagree.
+test('neither view decides whether a press is an arm or a disarm', async () => {
+	for (const view of views) {
+		assert.doesNotMatch(
+			read(join(lib, view)),
+			/\bonDisarm\b/,
+			`${view} picks the act itself — the document is what says which one a press is`
+		);
+	}
+
+	const source = read(join(lib, 'Console.svelte'));
+	assert.equal(
+		source.match(/onArm=\{arming\}/g)?.length,
+		2,
+		'the two views are not handed one arm'
+	);
+	assert.match(source, /\.armed\b/, 'the arm decision does not read the document');
+	for (const act of ['onArm', 'onDisarm']) {
+		assert.match(source, new RegExp(`${act}\\(`), `the console never calls ${act}`);
+	}
+});
+
+// **Input is a seam** (ADR-0021, ADR-0061), and the console is the only thing above it. A view
+// reaching a source directly would be the seam becoming a directory, which the lint rule
+// refuses — and a view that ORs its own sources would be mode logic below the line.
+test('the views know nothing about where a key press comes from', async () => {
+	for (const view of views) {
+		assert.doesNotMatch(
+			read(join(lib, view)),
+			/\$lib\/input/,
+			`${view} reaches Input itself — the console is the only thing above that seam`
+		);
+	}
+
+	assert.match(
+		read(join(lib, 'Console.svelte')),
+		/from '\$lib\/input'/,
+		'the console does not go through the Input seam'
+	);
 });
 
 test('the console offers both views and opens on the board', async () => {

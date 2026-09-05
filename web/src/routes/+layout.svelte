@@ -25,6 +25,7 @@
 	import Enrol from '$lib/Enrol.svelte';
 	import SignIn from '$lib/SignIn.svelte';
 	import { holdFrame } from '$lib/frame.js';
+	import { openAudio } from '$lib/audio.js';
 	import { principal, signOut } from '$lib/server.js';
 	import { openSignalling } from '$lib/session.js';
 
@@ -73,7 +74,15 @@
 		// them a click is comes from the document the console last read, because nothing
 		// here may render or reason off a state the server has not confirmed (ADR-0016).
 		subscribe: () => {},
-		unsubscribe: () => {}
+		unsubscribe: () => {},
+		// Arming a loop as a destination, and disarming it. The same shape as the pair above
+		// and a wholly separate act (ADR-0013).
+		arm: () => {},
+		disarm: () => {},
+		// Keying. **The local track goes first and the server is told second**, which is the
+		// order that buys key-to-first-audio under 100 ms (ADR-0008) — and nothing here
+		// renders off either half, because the transmitting lamp is the document's.
+		keying: () => {}
 	});
 
 	holdFrame(frame);
@@ -98,6 +107,13 @@
 	$effect(() => {
 		if (!signedIn) return;
 
+		// **The Audio module is the frame's, for the same reason the socket is.** It belongs
+		// to the session rather than to a page, so it survives a navigation into the admin
+		// console and back — an administrator who is also an operator must not drop off the
+		// air to add a loop (v1 §9). It is built when a session starts and closed when one
+		// ends, and it is the only thing in the client that touches a microphone.
+		let audio = null;
+
 		const channel = openSignalling({
 			onLobby: (said) => {
 				frame.lobby = said;
@@ -118,10 +134,28 @@
 			onSessionEnded: (reason) => {
 				frame.presence = null;
 				frame.relinquished = reason;
+				// Audio genuinely stops, and it stops here rather than being left to be
+				// garbage-collected: a microphone still open on a session that has ended is
+				// the one thing an operator cannot see and would most want to know about.
+				audio?.close();
+				audio = null;
 			},
 			onRefused: (reason) => (frame.refused = reason),
 			onEnded: itEnded,
-			onLost: () => (frame.lost = true)
+			onLost: () => (frame.lost = true),
+			// The four halves of the client's own media negotiation. They are handed straight
+			// to Audio: nothing here reads them, and nothing on screen comes out of them.
+			onPathToBuild: (path) => {
+				audio?.close();
+				audio = openAudio({
+					say: channel,
+					onMediaPath: channel.mediaPath
+				});
+				audio.aPathToBuild(path);
+			},
+			onUplinkCarried: (carriage) => audio?.theUplinkIsCarried(carriage),
+			onOneMoreTalker: (talker) => audio?.oneMoreTalker(talker),
+			onOneFewerTalker: (carriage) => audio?.oneFewerTalker(carriage)
 		});
 
 		frame.assume = (role) => {
@@ -141,12 +175,33 @@
 			frame.refused = null;
 			channel.unsubscribe(held);
 		};
+		frame.arm = (held) => {
+			frame.refused = null;
+			channel.arm(held);
+		};
+		frame.disarm = (held) => {
+			frame.refused = null;
+			channel.disarm(held);
+		};
+		// **The track first, the signal second** (ADR-0008). The client is the one entitled to
+		// key, because it is the one that can do it without a round trip; the server is the
+		// one entitled to say it is happening, which is why the second half is a message and
+		// not a request.
+		frame.keying = (wants) => {
+			audio?.keying(wants);
+			if (wants) channel.key();
+			else channel.unkey();
+		};
 
 		return () => {
 			frame.assume = () => {};
 			frame.relinquish = () => {};
 			frame.subscribe = () => {};
 			frame.unsubscribe = () => {};
+			frame.arm = () => {};
+			frame.disarm = () => {};
+			frame.keying = () => {};
+			audio?.close();
 			channel.close();
 		};
 	});

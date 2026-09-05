@@ -13,22 +13,34 @@
 	// order to live.
 	//
 	// **The card body is a button and the card is not.** Clicking the body toggles monitoring
-	// (v1 §8), and the arm, mute and cog controls that arrive with #41 and #44 must not
-	// propagate that click — so the clickable region is one element inside the card rather
-	// than the card itself, and it is a `<button>`, which cannot contain another one. A
-	// control added to this card is a sibling of the body by construction, and there is no
-	// `stopPropagation` for anybody to forget.
+	// (v1 §8), and the arm control — with the mute and the cog that arrive with #44 — must not
+	// propagate that click. So the clickable region is one element inside the card rather than
+	// the card itself, and it is a `<button>`, which cannot contain another one: the arm sits
+	// beside the body by construction, and there is no `stopPropagation` for anybody to
+	// forget. That rule is what this ticket was the first to actually need.
 	//
 	// **The loop name is not a heading**, and that changed when the body became a control: a
 	// heading announces a section of content, and a card is a control. The `<ul>` is what
 	// carries the structure — a list of twenty toggle buttons, each named for its loop and
 	// its state — and a heading inside a button is not valid markup anyway.
 	//
+	// **A blind arm says so in words** (v1 §4, §8). Arming is independent of subscription
+	// (ADR-0013), so a loop can be a destination for somebody who is not hearing it — which is
+	// legal and is the case the console has to compensate for. The words are the compensation;
+	// the talking indicator beside them is the rest of it.
+	//
 	// The staffing marks are #48. Nothing here decides which act a click is: it says which
 	// loop was clicked, and `Console.svelte` reads the document to know the rest.
+	import Talking from './Talking.svelte';
 	import TransmitBar from './TransmitBar.svelte';
 
-	let { loops, mediaPath, onToggle } = $props();
+	let { loops, mediaPath, armed, keyed, onToggle, onArm, onKeyDown, onKeyUp } = $props();
+
+	// Which loops carry an arm control at all. **Reach is the grid and only the grid**: a role
+	// that may hear a loop and not speak on it gets no control, rather than one that is
+	// refused when pressed (ADR-0016).
+	const mayEmit = (reachable) =>
+		reachable.permission === 'emit' || reachable.permission === 'control';
 </script>
 
 <ul class="board">
@@ -40,8 +52,29 @@
 				     thing carrying a state, and a card is read at a glance by somebody who may
 				     not be looking at another card to compare it with. -->
 				<span class="monitoring">{reachable.subscribed ? 'Monitoring' : 'Not monitoring'}</span>
+				{#if reachable.talking}
+					<span class="spoken"><Talking /></span>
+				{/if}
 				<span class="rung">{reachable.permission}</span>
 			</button>
+			{#if mayEmit(reachable)}
+				<p class="arming">
+					<!-- The button names the act and never the state, the way the card body does:
+					     what is true now is the word beside it, so neither has to be read as the
+					     other and the state is never carried by `aria-pressed` alone. -->
+					<button aria-pressed={reachable.armed} onclick={() => onArm(reachable)}>Arm</button>
+					<span class="armed">
+						{#if reachable.armed && !reachable.subscribed}
+							<!-- The blind arm, in words rather than in a border (v1 §4). -->
+							Armed, not hearing it
+						{:else if reachable.armed}
+							Armed
+						{:else}
+							Not armed
+						{/if}
+					</span>
+				</p>
+			{/if}
 		</li>
 	{/each}
 </ul>
@@ -50,7 +83,7 @@
      the cards are scanned rather than read, and the bar is the one thing on the page that is
      not a loop. The page's own `--space-page-bottom` is what keeps the last row clear of it. -->
 <div class="transmit">
-	<TransmitBar {mediaPath} />
+	<TransmitBar {mediaPath} {armed} {keyed} onDown={onKeyDown} onUp={onKeyUp} />
 </div>
 
 <style>
@@ -110,6 +143,25 @@
 		display: block;
 		margin-top: var(--space-1);
 		color: var(--quiet);
+		font-size: var(--type-2);
+	}
+
+	.spoken {
+		display: block;
+		margin-top: var(--space-1);
+	}
+
+	/* Outside the body and inside the card: the chrome is the card's, so the arm takes its
+	   room out of the body's padding rather than out of the card. */
+	.arming {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		margin: 0;
+		padding: 0 var(--space-3) var(--space-3);
+	}
+
+	.armed {
 		font-size: var(--type-2);
 	}
 

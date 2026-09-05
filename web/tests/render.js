@@ -25,10 +25,22 @@ const built = join(src, '..', '.svelte-kit', 'tests');
 // The compiled components sit outside `src/`, so every specifier they carry has to be
 // pointed back at the file it meant. A sibling component is beside them here too; anything
 // else — `icons.js`, `server.js` — was left where it was.
+//
+// `$lib/…` is here as well as `./…` because SvelteKit's alias is a build-time thing and
+// nothing resolves it in a bare Node process. It is what a component writes when it imports a
+// seam rather than a sibling — `$lib/input` is the only way into Input (ADR-0061) — so a
+// renderer that could not follow one could not render the console.
 const pointedBackAtTheSource = (code) =>
-	code.replaceAll(/'\.\/([A-Za-z0-9.-]+)'/g, (_, file) =>
-		file.endsWith('.svelte') ? `'./${file}.js'` : JSON.stringify(join(lib, file))
-	);
+	code
+		.replaceAll(/'\.\/([A-Za-z0-9.-]+)'/g, (_, file) =>
+			file.endsWith('.svelte') ? `'./${file}.js'` : JSON.stringify(join(lib, file))
+		)
+		.replaceAll(/'\$lib\/([A-Za-z0-9./-]+)'/g, (_, file) =>
+			// A seam is imported by its directory — `$lib/input` — and Node resolves no such
+			// thing, so the index is named here. It is the one place in the console where a
+			// specifier is a directory, and it is that on purpose (ADR-0061).
+			JSON.stringify(file.endsWith('.js') ? join(lib, file) : join(lib, file, 'index.js'))
+		);
 
 let compiled = false;
 
