@@ -22,8 +22,15 @@
  * `onIntent(wants)` is called when the answer **changes** and not on every reading: it is a
  * level being sampled, and a caller told the same thing five times a second would be a caller
  * that had to remember what it was last told in order to act on it.
+ *
+ * `onDropped(named)` is the other half of ADR-0021's forced unkey: *that source went while
+ * you were holding it, and the key went with it*. It is said only when the death is what took
+ * the answer down, because that is the only case where anything happened to the operator —
+ * a source dying with the key still up, or with another source still holding it, has changed
+ * nothing they can hear. The console **says so locally** rather than waiting to be told, and
+ * this is what it says it from.
  */
-export function levels({ onIntent }) {
+export function levels({ onIntent, onDropped = () => {} }) {
 	const sources = new Map();
 	let told = false;
 
@@ -49,8 +56,18 @@ export function levels({ onIntent }) {
 
 			return {
 				publish: (level, live) => {
+					const before = sources.get(named);
+					// A source that was in the OR and is now gone, with its level still up:
+					// the unplugged headset, and the key control that vanished under a held
+					// pointer. Read from the two readings rather than announced by the
+					// source, because a source that has gone can announce nothing.
+					const died = before.live && before.level && !live;
+
 					sources.set(named, { level, live });
+					const wanted = told;
 					settle();
+
+					if (died && wanted && !told) onDropped(named);
 				}
 			};
 		}

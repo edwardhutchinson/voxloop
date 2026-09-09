@@ -24,6 +24,17 @@
 	// audio is already flowing by the time the lamp lights, so it is a display latency rather
 	// than an audio one.
 	//
+	// **Two modes and no third** (v1 §4), and they are two controls here because they are two
+	// bindings (ADR-0022). Latch is never reached by how the key control was pressed — no
+	// short tap, no double tap, no held duration — so a single-button device is momentary
+	// only, and the second button is what the console offers instead of a gesture.
+	//
+	// **The latch is this console's own state and the lamp is the server's**, and the two are
+	// rendered as the different things they are (ADR-0016). *You have latched the key open* is
+	// a fact about the input on this desk, knowable here and true the moment it is said; *you
+	// are on the air* is the server's answer and arrives in the presence document. So the
+	// latch never touches the lamp, and pressing latch lights nothing.
+	//
 	// The two audience counts are #49's, and the presets that sit beside the key control are
 	// #56's.
 
@@ -37,9 +48,28 @@
 	// `armedOn` is the loops this session has armed, in the document's order and by name;
 	// `keyed` is the server's answer about this session; `mayKey` is whether emission stands
 	// at all, decided once above both views because Input's liveness is decided from the same
-	// answer; `onDown` and `onUp` are what the key control publishes to Input, which is where
-	// the mode logic will live (#42).
-	let { mediaPath, armedOn = [], keyed = false, mayKey = false, onDown, onUp } = $props();
+	// answer.
+	//
+	// `onDown`/`onUp` and `onLatchDown`/`onLatchUp` are what the two controls publish to
+	// Input. They are four callbacks rather than two and a mode, because **a source never
+	// knows which emission mode it serves** (ADR-0021): each of these is a button reporting
+	// what a pointer is doing to it, and which of the two modes that serves is settled in
+	// `modes.js`, above the seam.
+	//
+	// `latched` is whether the key is latched open, and `dropped` is the source that went
+	// while it was being held, if one has.
+	let {
+		mediaPath,
+		armedOn = [],
+		keyed = false,
+		mayKey = false,
+		latched = false,
+		dropped = null,
+		onDown,
+		onUp,
+		onLatchDown,
+		onLatchUp
+	} = $props();
 
 	// **The armed set in words** (ADR-0034), and the same words in both views. It is a list
 	// rather than a count because this is the half of the bar an operator acts on: the second
@@ -48,6 +78,22 @@
 	const destinations = $derived(
 		armedOn.length === 0 ? 'nothing' : new Intl.ListFormat('en').format(armedOn)
 	);
+
+	// **The console must not place a focusable control where an operator's hands rest**
+	// (v1 §4). A key pressed with focus on a control is refused, so a key control that took
+	// focus when it was clicked would leave the operator's *keyboard* binding dead until they
+	// clicked somewhere else — on the one control where that matters most, and with nothing on
+	// screen to explain it. Preventing the default on the way down is what stops focus moving,
+	// and it is the only thing prevented: the press itself is published from the same handler.
+	const holding = (event) => {
+		event.preventDefault();
+		onDown();
+	};
+
+	const pressing = (event) => {
+		event.preventDefault();
+		onLatchDown();
+	};
 </script>
 
 <section aria-label="Transmit bar">
@@ -70,6 +116,19 @@
 	     more than anybody: it is what they are coming back to. Only the key control goes. -->
 	<p class="armed">Armed on {destinations}.</p>
 
+	{#if dropped}
+		<!-- **A source that dies while keyed forces an unkey and says so locally** (ADR-0021).
+		     Outside the block below on purpose: the case that produces this is the audio path
+		     going under a held key, which takes the key control away with it, so a notice
+		     drawn beside that control would be a notice nobody ever reads.
+		     It names what they are holding rather than what went, because that is the part
+		     they can act on and the part that is true in every case that produces this: the
+		     hand is still down, and nothing it does from there talks until it comes up. -->
+		<p class="dropped" role="status">
+			You were still holding {dropped} when VoxLoop stopped emitting. Let go and press again to talk.
+		</p>
+	{/if}
+
 	{#if mayKey}
 		<p class="keying">
 			<!-- **The key control renders differently at zero armed** (v1 §8) rather than being
@@ -79,13 +138,27 @@
 			<button
 				class="key"
 				aria-pressed={keyed}
-				onpointerdown={onDown}
+				onpointerdown={holding}
 				onpointerup={onUp}
 				onpointercancel={onUp}
 				onpointerleave={onUp}
 			>
 				<Icon name={armedOn.length === 0 ? 'mic-off' : 'mic'} />
 				{armedOn.length === 0 ? 'Key — reaching nobody' : 'Key'}
+			</button>
+
+			<!-- **Press to open, press to close** (v1 §4), which is why the act is on the way
+			     down and there is nothing on the way up that could undo it. It names the act
+			     rather than the state, the way every control on the console does; what is true
+			     now is the sentence under it. -->
+			<button
+				aria-pressed={latched}
+				onpointerdown={pressing}
+				onpointerup={onLatchUp}
+				onpointercancel={onLatchUp}
+				onpointerleave={onLatchUp}
+			>
+				{latched ? 'Unlatch' : 'Latch'}
 			</button>
 
 			<!-- The lamp, in words, and lit by the document alone. It is a separate thing from
@@ -95,6 +168,15 @@
 				{keyed ? 'Keyed' : 'Not keyed'}
 			</span>
 		</p>
+
+		{#if latched}
+			<!-- Said in words rather than carried by the pressed control alone, and said as the
+			     local thing it is: this is the console holding the key open, not VoxLoop
+			     reporting that it is. The lamp beside it is the half that came back. -->
+			<p class="latched">
+				You have latched the key open. It stays open until you unlatch it or the audio path goes.
+			</p>
+		{/if}
 	{/if}
 </section>
 
@@ -107,7 +189,8 @@
 	   carries the state: the sentence says which of the two withdrawal conditions applies and
 	   would still say it in monochrome. */
 	.impaired,
-	.withdrawn {
+	.withdrawn,
+	.dropped {
 		margin: 0;
 		color: var(--warning);
 	}
@@ -138,8 +221,16 @@
 		font-weight: 600;
 	}
 
-	.key[aria-pressed='false'] + .lamp {
+	.key[aria-pressed='false'] ~ .lamp {
 		color: var(--quiet);
 		font-weight: inherit;
+	}
+
+	/* The latch control stays at the furniture's size, beside a key control that does not: the
+	   key is the one an operator's hand rests on, and two controls both claiming that would
+	   make neither of them findable. What is true now runs underneath, in words. */
+	.latched {
+		margin: var(--space-2) 0 0;
+		font-size: var(--type-2);
 	}
 </style>
