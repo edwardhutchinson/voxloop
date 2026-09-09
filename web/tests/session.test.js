@@ -59,7 +59,13 @@ function listening() {
 		onSessionEnded: (reason) => told.push(['session-ended', reason]),
 		onRefused: (reason) => told.push(['refused', reason]),
 		onEnded: (reason) => told.push(['ended', reason]),
-		onLost: () => told.push(['lost'])
+		onLost: () => told.push(['lost']),
+		// The four halves of the client's own media negotiation. They go to Audio rather than
+		// to the console, and nothing on screen comes out of them.
+		onPathToBuild: (path) => told.push(['a-path-to-build', path]),
+		onUplinkCarried: (carriage) => told.push(['the-uplink-is-carried', carriage]),
+		onOneMoreTalker: (talker) => told.push(['one-more-talker', talker]),
+		onOneFewerTalker: (carriage) => told.push(['one-fewer-talker', carriage])
 	};
 }
 
@@ -70,6 +76,16 @@ beforeEach(() => {
 });
 
 const lastSocket = () => ASocket.opened.at(-1);
+
+/** A console listening on an open channel, and the socket the server would talk on. */
+function openTold() {
+	const page = listening();
+	openSignalling(page);
+	const socket = lastSocket();
+	socket.happens('open');
+
+	return { ...page, socket };
+}
 
 test('opens the signalling channel on whatever the console was served from', () => {
 	openSignalling(listening());
@@ -275,6 +291,89 @@ test('reporting a media path tells the console nothing on its own', () => {
 // A socket that has gone is not somewhere to shout into. Nothing is queued either: an assume
 // that arrived after a reconnection would be a role taken up seconds after somebody asked
 // for it, on a console they may have walked away from.
+// **Two acts rather than one toggle**, for the reason subscribe and unsubscribe are, and a
+// wholly separate pair from them: arming a loop puts it in nobody's ears and monitoring one
+// makes no destination (ADR-0013).
+test('arming a loop and disarming it are two things a tab says, not one', () => {
+	const channel = openSignalling(listening());
+	lastSocket().happens('open');
+
+	channel.arm('a-loop');
+	channel.disarm('a-loop');
+
+	assert.deepEqual(lastSocket().sent.slice(1), [
+		'{"message":"arm","loop":"a-loop"}',
+		'{"message":"disarm","loop":"a-loop"}'
+	]);
+});
+
+// **The key is a signal rather than a request** (ADR-0008): the client has already keyed by
+// the time this goes, which is what buys key-to-first-audio under 100 ms. It carries no loop,
+// because the uplink transmits and does not address (ADR-0007) — what it may reach was
+// settled when the arms were made.
+test('keying says so and names no loop', () => {
+	const channel = openSignalling(listening());
+	lastSocket().happens('open');
+
+	channel.key();
+	channel.unkey();
+
+	assert.deepEqual(lastSocket().sent.slice(1), ['{"message":"key"}', '{"message":"unkey"}']);
+});
+
+// **Nothing renders off what a tab just said** (ADR-0016), and the transmitting lamp is the
+// sharpest case of it: it is lit by the server's acknowledgement coming back in the presence
+// document, never by the button going down (ADR-0008).
+test('keying tells the console nothing on its own', () => {
+	const page = listening();
+	const channel = openSignalling(page);
+	lastSocket().happens('open');
+
+	channel.key();
+	channel.arm('a-loop');
+
+	assert.deepEqual(page.told, []);
+});
+
+// **VoxLoop owns the signalling and has no opinion about this part of it** (ADR-0006). The
+// four messages carry what one media library says to another, and this file's only part in
+// them is that they go on the one authorised channel rather than on a second one.
+test('the client’s own media negotiation goes out on the one channel, untouched', () => {
+	const channel = openSignalling(listening());
+	lastSocket().happens('open');
+
+	channel.mediaCanDecode({ codecs: ['opus'] });
+	channel.mediaConnect('up', { fingerprints: [] });
+	channel.mediaSpeaks({ rtpParameters: { codecs: [] } });
+	channel.mediaHears('a-carriage');
+
+	assert.deepEqual(lastSocket().sent.slice(1).map(JSON.parse), [
+		{ message: 'media-can-decode', what_it_can_decode: { codecs: ['opus'] } },
+		{ message: 'media-connect', way: 'up', keys: { fingerprints: [] } },
+		{ message: 'media-speaks', what_it_is_sending: { rtpParameters: { codecs: [] } } },
+		{ message: 'media-hears', carriage: 'a-carriage' }
+	]);
+});
+
+// The other direction, and the same rule: what arrives is handed on whole, to Audio rather
+// than to the console. **Nothing that arrives says who is talking** (ADR-0033) and there is
+// nothing here that would know what to do with it if it did.
+test('what the media plane says is handed on whole, and none of it is a document', () => {
+	const page = openTold();
+
+	page.socket.says({ message: 'a-path-to-build', path: { router: {}, up: {}, down: {} } });
+	page.socket.says({ message: 'the-uplink-is-carried', carriage: 'an-uplink' });
+	page.socket.says({ message: 'one-more-talker', talker: { id: 'a-carriage' } });
+	page.socket.says({ message: 'one-fewer-talker', carriage: 'a-carriage' });
+
+	assert.deepEqual(page.told, [
+		['a-path-to-build', { router: {}, up: {}, down: {} }],
+		['the-uplink-is-carried', 'an-uplink'],
+		['one-more-talker', { id: 'a-carriage' }],
+		['one-fewer-talker', 'a-carriage']
+	]);
+});
+
 test('nothing is said on a socket that is not open', () => {
 	const channel = openSignalling(listening());
 	lastSocket().happens('open');

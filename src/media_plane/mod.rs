@@ -67,7 +67,130 @@ pub(crate) enum Reported {
     /// A worker's death takes every transport with it, so this is not one session's problem
     /// and is not reported as one.
     NothingIsCarried { detail: String },
+    /// Audio is genuinely arriving from these sessions, as the `AudioLevelObserver` hears it.
+    ///
+    /// **This is the corroboration [ADR-0008] requires, and it is why the observer runs in
+    /// v1 rather than as optional instrumentation.** Keying is the client's act and the
+    /// server takes it on trust, which leaves one residual: a defective or hostile client can
+    /// keep sending while claiming to be unkeyed. Nothing here knows what anybody claims —
+    /// this says only that a voice is on the wire, and something above both seams compares
+    /// the two.
+    ///
+    /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    TheseAreAudible { talkers: Vec<SessionId> },
+    /// Nothing above the threshold is arriving from anybody.
+    ///
+    /// It is **not** silence on a loop and must never be read as one: DTX means a quiet
+    /// talker sends no packets at all ([ADR-0010]), so this is the observer saying it has
+    /// nothing to report rather than the deployment saying nobody is speaking.
+    ///
+    /// [ADR-0010]: ../../docs/adr/0010-opus-mono-and-the-latency-budget.md
+    NobodyIsAudible,
 }
+
+/// Whatever the client's own media library has to be handed, carried and never read.
+///
+/// **VoxLoop owns the signalling** ([ADR-0006]) and this is the part of it that is not
+/// VoxLoop's to have an opinion about: ICE candidates, DTLS fingerprints and RTP parameters
+/// are a conversation between the worker and the library in the browser, and the server's
+/// job is to carry it over the one authorised channel rather than to interpret it.
+///
+/// It is opaque **so that the rule holds that nothing mediasoup names leaves this module**
+/// ([ADR-0061]). A `DtlsParameters` crossing the seam would put a mediasoup type in
+/// Transport's signature and the seam would have quietly stopped existing; a value nobody
+/// above can read cannot do that. Everything VoxLoop *decides* — who may arm, who hears whom
+/// — is in domain types beside this and never in here.
+///
+/// [ADR-0006]: ../../docs/adr/0006-mediasoup-carries-the-audio.md
+/// [ADR-0061]: ../../docs/adr/0061-module-privacy-is-the-seam-enforcement.md
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct Negotiation(serde_json::Value);
+
+impl Negotiation {
+    /// Take what a client said. Nothing reads it on the way past.
+    pub(crate) fn presented(said: serde_json::Value) -> Self {
+        Self(said)
+    }
+}
+
+/// The name the media plane gave something it is carrying.
+///
+/// A string because it is only ever quoted back: the client presents one to say *this
+/// carriage*, and nothing outside this module parses it or may infer anything from it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct Carried(String);
+
+impl Carried {
+    /// Take a name a client quoted back.
+    pub(crate) fn presented(said: String) -> Self {
+        Self(said)
+    }
+}
+
+/// Which of a session's two ends a client is talking about.
+///
+/// **Two transports and not one**, because a browser's media library builds a directional
+/// one at each end. It is still one ICE and DTLS conversation per direction rather than per
+/// loop, which is the thing [ADR-0007] rules out — a loop is not a transport primitive, and
+/// these are named for the two layers that ADR does name.
+///
+/// [ADR-0007]: ../../docs/adr/0007-the-client-emits-one-stream.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Way {
+    /// The uplink: one stream, whatever the talker is armed on. It transmits; it does not
+    /// address.
+    Up,
+    /// The downlink: one stream per audible talker, mixed in the client.
+    Down,
+}
+
+impl Way {
+    /// The word this direction goes by, on the wire and in a log line alike.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+        }
+    }
+}
+
+/// What the media plane has to say to **one** session, rather than about the deployment.
+///
+/// It is a second channel beside [`Reports`] rather than a variant of it, and the difference
+/// is who the audience is. A report is a fact about the running system that something above
+/// decides the meaning of; this is signalling addressed to one client, and the socket that
+/// holds that session is the only thing that can carry it. Putting it on [`Reports`] would
+/// mean supervision routing a payload it has no business reading to a socket it does not
+/// know about.
+///
+/// **It is still a sink.** The channel is handed *in* at [`Carriage::open_a_path_for`], so
+/// nothing here calls anybody and no operation answers anything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Negotiated {
+    /// What this session needs to build its own end of the media path.
+    APathToBuild(Negotiation),
+    /// The uplink is carried, under this name.
+    ///
+    /// It is what a client's own library waits for before it will call a microphone
+    /// published: the stream exists on this server and has a name here.
+    TheUplinkIsCarried(Carried),
+    /// One more talker to hear, and what to build in order to hear them.
+    ///
+    /// **One per audible talker and never per (talker, loop)** ([ADR-0007]): a listener
+    /// monitoring two of a talker's destinations is one entry here, or they would hear the
+    /// same voice twice.
+    ///
+    /// [ADR-0007]: ../../docs/adr/0007-the-client-emits-one-stream.md
+    OneMoreTalker(Negotiation),
+    /// One fewer. This carriage is closed at the server's end and the client should let it go.
+    OneFewerTalker(Carried),
+}
+
+/// Where the media plane says things to one session. Handed in, so nothing here calls out.
+pub(crate) type Telling = UnboundedSender<Negotiated>;
 
 /// Who should hear one session's uplink, and where each of them hears it.
 ///
@@ -100,13 +223,19 @@ pub(crate) struct Destination(String);
 
 impl Destination {
     /// Label a destination. The caller knows what it names; this does not.
-    // Reserved for #39, which is the first ticket with an audience to hand down. The tests
-    // below exercise it, so this is allowed where it is genuinely dead and nowhere else.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn labelled(label: String) -> Self {
         Self(label)
     }
 
+    /// The label, back out unchanged.
+    ///
+    /// **Reserved for the recording tap**, which is addressed per (talker, destination loop)
+    /// ([ADR-0009]) and is the only thing in the design that reads one of these. v1 ships no
+    /// sink for it, so nothing in a running deployment calls this and the tests below are
+    /// what keep the promise honest — a label that could not be read back would be a label
+    /// that had quietly become an identifier.
+    ///
+    /// [ADR-0009]: ../../docs/adr/0009-recording-taps-plain-rtp-on-loopback.md
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
@@ -124,12 +253,38 @@ impl Destination {
 /// or a `WebRtcTransport` escaping through a widened signature is how this seam would quietly
 /// stop existing.
 trait Carriage: Send + Sync {
-    /// Give this session a media path of its own.
+    /// Give this session a media path of its own, and somewhere to say things to it.
     ///
     /// **The path is bound to the session at creation** (ADR-0026) rather than handed out
     /// and claimed afterwards, so there is no window in which a transport exists that
-    /// nobody owns and nothing to present in order to take one over.
-    fn open_a_path_for(&self, session: &SessionId);
+    /// nobody owns and nothing to present in order to take one over. The same is true of
+    /// `telling`: the channel arrives with the session that owns it, so there is no way to
+    /// ask for somebody else's signalling.
+    fn open_a_path_for(&self, session: &SessionId, telling: Telling);
+
+    /// What this session's own end can decode.
+    ///
+    /// Nothing is carried to a client before this arrives, because a stream it cannot decode
+    /// is worse than no stream: it is one the console would show as heard.
+    fn the_client_will_hear(&self, session: &SessionId, what_it_can_decode: Negotiation);
+
+    /// The client's keys for one end of its path, on its way to the worker.
+    fn the_client_connects(&self, session: &SessionId, way: Way, keys: Negotiation);
+
+    /// The client is sending, and this is what it is sending.
+    ///
+    /// **One uplink, whatever the talker is armed on** ([ADR-0007]). It exists from the
+    /// moment the microphone does and it does not come and go with the key: keying is the
+    /// client muting its own track, precisely so that a key press costs no renegotiation.
+    ///
+    /// [ADR-0007]: ../../docs/adr/0007-the-client-emits-one-stream.md
+    fn the_client_speaks(&self, session: &SessionId, what_it_is_sending: Negotiation);
+
+    /// The client has built its end of one carriage and is ready to be sent audio on it.
+    ///
+    /// A carriage is built paused and resumed here rather than started running, so that
+    /// nothing is sent to an end that does not exist yet.
+    fn the_client_hears(&self, session: &SessionId, carriage: &Carried);
 
     /// Take this session's media path away, and everything carried on it with it.
     fn close_the_path_of(&self, session: &SessionId);
@@ -140,14 +295,13 @@ trait Carriage: Send + Sync {
     /// would make the media plane hold an opinion about what it was told last, and the one
     /// thing this module must not do is have a view about who hears whom.
     ///
-    /// **Nothing hands one down until #39 and #41**, and the signature is here anyway
-    /// because it is the decision ([ADR-0063]): getting it the other way round would be
-    /// quietly fatal, and the shape is much harder to change once there are callers. What
-    /// stops that being a promise nobody checks is `an_audience_crosses_as_an_answer`, which
-    /// asserts that what the media plane is handed is what it records.
+    /// **A listener may appear more than once**, with a different destination each time, and
+    /// this module collapses that into one carriage: the downlink is one stream per audible
+    /// talker ([ADR-0007]) and delivering the pair as two would hand somebody the same voice
+    /// twice. What the pairs are kept for is the recording tap, which is per (talker,
+    /// destination loop) ([ADR-0009]).
     ///
     /// [ADR-0063]: ../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
-    #[cfg_attr(not(test), allow(dead_code))]
     fn these_should_hear(&self, talker: &SessionId, audience: &Audience);
 }
 
@@ -208,8 +362,8 @@ impl MediaPlane {
     }
 
     /// See [`Carriage::open_a_path_for`].
-    pub(crate) fn open_a_path_for(&self, session: &SessionId) {
-        self.carriage.open_a_path_for(session);
+    pub(crate) fn open_a_path_for(&self, session: &SessionId, telling: Telling) {
+        self.carriage.open_a_path_for(session, telling);
     }
 
     /// See [`Carriage::close_the_path_of`].
@@ -217,8 +371,32 @@ impl MediaPlane {
         self.carriage.close_the_path_of(session);
     }
 
+    /// See [`Carriage::the_client_will_hear`].
+    pub(crate) fn the_client_will_hear(
+        &self,
+        session: &SessionId,
+        what_it_can_decode: Negotiation,
+    ) {
+        self.carriage
+            .the_client_will_hear(session, what_it_can_decode);
+    }
+
+    /// See [`Carriage::the_client_connects`].
+    pub(crate) fn the_client_connects(&self, session: &SessionId, way: Way, keys: Negotiation) {
+        self.carriage.the_client_connects(session, way, keys);
+    }
+
+    /// See [`Carriage::the_client_speaks`].
+    pub(crate) fn the_client_speaks(&self, session: &SessionId, what_it_is_sending: Negotiation) {
+        self.carriage.the_client_speaks(session, what_it_is_sending);
+    }
+
+    /// See [`Carriage::the_client_hears`].
+    pub(crate) fn the_client_hears(&self, session: &SessionId, carriage: &Carried) {
+        self.carriage.the_client_hears(session, carriage);
+    }
+
     /// See [`Carriage::these_should_hear`].
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn these_should_hear(&self, talker: &SessionId, audience: &Audience) {
         self.carriage.these_should_hear(talker, audience);
     }

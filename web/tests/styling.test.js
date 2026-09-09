@@ -169,16 +169,24 @@ test('every token a component uses is one app.css defines', () => {
 // v1 §8: motion is permitted in exactly one place, and that place is the talking indicator
 // (ADR-0033) — one fixed rate, one fixed shape, reading unambiguously as on or off. Cognitive
 // load is the thing being minimised, and a console that moves for any other reason spends the
-// operator's attention on something that is not an operation. The indicator arrives with #41,
-// and this is the check it will have to be written into rather than around.
+// operator's attention on something that is not an operation.
+//
+// The indicator is a component so that *exactly one place* is a path this file can name.
+// Written into the check rather than around it: the two tests below are the whole of the
+// permission, and widening it means editing this file, in a diff a reviewer reads.
+const theTalkingIndicator = 'lib/Talking.svelte';
+
 test('the console renders no motion', () => {
 	const moves = /^(animation|transition)(-|$)/;
 	const directives = /\s(transition|in|out|animate):[a-z]/i;
 
 	// `app.css` is in this one because the furniture is: a `transition` on the bare `button`
 	// rule would put motion under every control in the console at once, which is the largest
-	// version of what this refuses rather than an exception to it.
+	// version of what this refuses rather than an exception to it. The indicator's own
+	// permission does not reach it — furniture is not one place.
 	for (const path of [tokenFile, ...components()]) {
+		if (named(path) === theTalkingIndicator) continue;
+
 		const css = path === tokenFile ? stripped(read(path)) : styleOf(path);
 
 		for (const [property, value] of declarations(css)) {
@@ -199,6 +207,51 @@ test('the console renders no motion', () => {
 			markupOf(path),
 			directives,
 			`${named(path)} carries a Svelte motion directive — motion is permitted in exactly one place, and it is the talking indicator`
+		);
+	}
+});
+
+// And the one place is held to what it was permitted for. **One fixed rate, one fixed shape,
+// and never an implication of amplitude**: DTX means silence sends no packets at all, so a
+// meter would be inventing a signal, and a continuous ramp reads as one.
+test('the talking indicator moves at one fixed rate and implies no amplitude', () => {
+	const path = components().find((path) => named(path) === theTalkingIndicator);
+	assert.ok(path, `${theTalkingIndicator} is gone — so is the permission below it`);
+
+	const css = styleOf(path);
+	const animations = declarations(css).filter(([property]) => property === 'animation');
+	assert.equal(animations.length, 1, 'the indicator declares more than one animation');
+
+	const [, how] = animations[0];
+	assert.match(how, /\b\d+m?s\b/, `the indicator's rate is not a fixed duration: ${how}`);
+	assert.match(how, /\binfinite\b/, `the indicator does not run at one rate: ${how}`);
+	// `steps` is what makes it read as on or off. A smooth ramp between two states is a level,
+	// and a level is the one thing this may never imply.
+	assert.match(how, /\bsteps\(/, `the indicator eases rather than steps: ${how}`);
+
+	assert.equal(
+		[...css.matchAll(/@keyframes/g)].length,
+		1,
+		'the indicator declares more than one set of keyframes'
+	);
+	// Nothing that moves the glyph or resizes it: a shape that grows with a voice is a meter.
+	for (const [property] of declarations(css.slice(css.indexOf('@keyframes')))) {
+		assert.match(
+			property,
+			/^opacity$/,
+			`the indicator animates ${property} — the glyph is one fixed shape, and only its presence changes`
+		);
+	}
+
+	// The motion is refused everywhere else, so the indicator has to be a component rather
+	// than markup either view writes for itself — which is also what keeps the two views
+	// showing the same indicator.
+	for (const view of ['lib/Board.svelte', 'lib/Ledger.svelte']) {
+		const path = components().find((path) => named(path) === view);
+		assert.match(
+			read(path),
+			/import Talking from '\.\/Talking\.svelte'/,
+			`${view} does not render the talking indicator`
 		);
 	}
 });

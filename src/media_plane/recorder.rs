@@ -25,7 +25,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::{Audience, Carriage, MediaPlane, Reported, Reporting, Reports};
+use super::{
+    Audience, Carriage, Carried, MediaPlane, Negotiated, Negotiation, Reported, Reporting, Reports,
+    Telling, Way,
+};
 use crate::state::SessionId;
 
 /// One thing the media plane was told to do, in the words it was told it in.
@@ -37,6 +40,23 @@ use crate::state::SessionId;
 pub(crate) enum Instructed {
     APathWasOpenedFor(SessionId),
     ThePathWasClosedFor(SessionId),
+    ThisClientWillHear {
+        session: SessionId,
+        what_it_can_decode: Negotiation,
+    },
+    ThisClientConnected {
+        session: SessionId,
+        way: Way,
+        keys: Negotiation,
+    },
+    ThisClientSpeaks {
+        session: SessionId,
+        what_it_is_sending: Negotiation,
+    },
+    ThisClientHears {
+        session: SessionId,
+        carriage: Carried,
+    },
     TheseShouldHear {
         talker: SessionId,
         audience: Audience,
@@ -51,6 +71,12 @@ pub(crate) enum Instructed {
 pub(crate) struct Recording {
     instructed: Mutex<Vec<Instructed>>,
     reporting: Reporting,
+    /// Where each session's signalling was told to go, kept so a test can play the worker's
+    /// half of a negotiation without a worker.
+    ///
+    /// Keeping it is not deciding anything: the channel arrives as an argument like every
+    /// other, and what goes down it is whatever [`Recording::the_worker_tells`] is handed.
+    telling: Mutex<Vec<(SessionId, Telling)>>,
 }
 
 /// A media plane that carries nothing, and the tape it writes.
@@ -62,6 +88,7 @@ pub(crate) fn a_recording_media_plane() -> (MediaPlane, Reports, Arc<Recording>)
     let recording = Arc::new(Recording {
         instructed: Mutex::new(Vec::new()),
         reporting,
+        telling: Mutex::new(Vec::new()),
     });
 
     (
@@ -88,6 +115,24 @@ impl Recording {
         let _ = self.reporting.send(reported);
     }
 
+    /// Say to one session what the worker would have said to it.
+    ///
+    /// The same rule as [`Recording::the_worker_says`]: the message is passed through whole,
+    /// and nothing here decides that an instruction ought to produce one. A real worker
+    /// answers when ICE, DTLS and a browser say so, which is nothing a recorder can know.
+    pub(crate) fn the_worker_tells(&self, session: &SessionId, negotiated: Negotiated) {
+        let told = match self.telling.lock() {
+            Ok(told) => told,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        for (whose, telling) in told.iter() {
+            if whose == session {
+                let _ = telling.send(negotiated.clone());
+            }
+        }
+    }
+
     fn write(&self, instruction: Instructed) {
         self.tape().push(instruction);
     }
@@ -102,12 +147,45 @@ impl Recording {
 }
 
 impl Carriage for Recording {
-    fn open_a_path_for(&self, session: &SessionId) {
+    fn open_a_path_for(&self, session: &SessionId, telling: Telling) {
+        match self.telling.lock() {
+            Ok(mut told) => told.push((session.clone(), telling)),
+            Err(poisoned) => poisoned.into_inner().push((session.clone(), telling)),
+        }
         self.write(Instructed::APathWasOpenedFor(session.clone()));
     }
 
     fn close_the_path_of(&self, session: &SessionId) {
         self.write(Instructed::ThePathWasClosedFor(session.clone()));
+    }
+
+    fn the_client_will_hear(&self, session: &SessionId, what_it_can_decode: Negotiation) {
+        self.write(Instructed::ThisClientWillHear {
+            session: session.clone(),
+            what_it_can_decode,
+        });
+    }
+
+    fn the_client_connects(&self, session: &SessionId, way: Way, keys: Negotiation) {
+        self.write(Instructed::ThisClientConnected {
+            session: session.clone(),
+            way,
+            keys,
+        });
+    }
+
+    fn the_client_speaks(&self, session: &SessionId, what_it_is_sending: Negotiation) {
+        self.write(Instructed::ThisClientSpeaks {
+            session: session.clone(),
+            what_it_is_sending,
+        });
+    }
+
+    fn the_client_hears(&self, session: &SessionId, carriage: &Carried) {
+        self.write(Instructed::ThisClientHears {
+            session: session.clone(),
+            carriage: carriage.clone(),
+        });
     }
 
     fn these_should_hear(&self, talker: &SessionId, audience: &Audience) {

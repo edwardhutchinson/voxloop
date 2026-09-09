@@ -53,6 +53,17 @@ function where() {
  * - `onLost()` — the channel went away without saying anything. Nothing has ended; the
  *   console simply cannot see any more, and says so rather than blanking.
  *
+ * Four more arrive for the Audio module rather than for the console, and they are **not
+ * documents**: they carry the client's own media negotiation, which VoxLoop owns the channel
+ * for and has no opinion about (ADR-0006). Nothing on screen comes out of them — what the
+ * console draws about the audio path is `media_path` in the presence document.
+ *
+ * - `onPathToBuild(path)` — what this session's media library has to build.
+ * - `onUplinkCarried(carriage)` — the uplink is carried, under this name.
+ * - `onOneMoreTalker(talker)` — one more talker to hear, and what to build to hear them. **It
+ *   names nobody** (ADR-0033), and there is no field in it that could.
+ * - `onOneFewerTalker(carriage)` — that carriage is closed at the server's end.
+ *
  * Answers with the acts a tab can perform on its own session, and the way to close it.
  */
 export function openSignalling({
@@ -61,7 +72,11 @@ export function openSignalling({
 	onSessionEnded,
 	onRefused,
 	onEnded,
-	onLost
+	onLost,
+	onPathToBuild,
+	onUplinkCarried,
+	onOneMoreTalker,
+	onOneFewerTalker
 }) {
 	const socket = new WebSocket(where());
 	// A reason arrives before the close does, and a console that showed both would tell the
@@ -87,6 +102,14 @@ export function openSignalling({
 		} else if (said?.message === 'closing') {
 			told = true;
 			onEnded(said.reason ?? null);
+		} else if (said?.message === 'a-path-to-build') {
+			onPathToBuild(said.path);
+		} else if (said?.message === 'the-uplink-is-carried') {
+			onUplinkCarried(said.carriage);
+		} else if (said?.message === 'one-more-talker') {
+			onOneMoreTalker(said.talker);
+		} else if (said?.message === 'one-fewer-talker') {
+			onOneFewerTalker(said.carriage);
 		}
 	});
 
@@ -118,6 +141,44 @@ export function openSignalling({
 		 */
 		subscribe: (heldOn) => say(socket, { message: 'subscribe', loop: heldOn }),
 		unsubscribe: (heldOn) => say(socket, { message: 'unsubscribe', loop: heldOn }),
+		/**
+		 * Arm a loop as a destination for this session's voice, or disarm it.
+		 *
+		 * **Two acts rather than one toggle**, and independent of monitoring in both
+		 * directions (ADR-0013): arming puts a loop in nobody's ears and monitoring makes no
+		 * destination. The server refuses a loop this role may not emit on, and **that
+		 * refusal is the whole of the enforcement** — the fan-out is built from the arm set,
+		 * so a loop that never got past it has no route (ADR-0008).
+		 *
+		 * Arming and disarming are instant and cost no renegotiation: the uplink already
+		 * exists and does not address, so the change is a routing one at the server
+		 * (ADR-0007).
+		 */
+		arm: (heldOn) => say(socket, { message: 'arm', loop: heldOn }),
+		disarm: (heldOn) => say(socket, { message: 'disarm', loop: heldOn }),
+		/**
+		 * Say that this client is transmitting, or that it has stopped.
+		 *
+		 * **The client has already keyed by the time this is sent** (ADR-0008). The local
+		 * track went live first, because that is what buys key-to-first-audio under 100 ms;
+		 * this is the signal, and the server is the sole authority for telling anybody —
+		 * including this operator, whose own transmitting lamp lights on the document that
+		 * comes back and never on their own button going down.
+		 */
+		key: () => say(socket, { message: 'key' }),
+		unkey: () => say(socket, { message: 'unkey' }),
+		/**
+		 * The four halves of the client's own media negotiation, carried and never read here.
+		 *
+		 * They are the Audio module's, and this file's only part in them is that they go on
+		 * the one authorised channel rather than on a second one of their own (ADR-0006).
+		 */
+		mediaCanDecode: (whatItCanDecode) =>
+			say(socket, { message: 'media-can-decode', what_it_can_decode: whatItCanDecode }),
+		mediaConnect: (way, keys) => say(socket, { message: 'media-connect', way, keys }),
+		mediaSpeaks: (whatItIsSending) =>
+			say(socket, { message: 'media-speaks', what_it_is_sending: whatItIsSending }),
+		mediaHears: (carriage) => say(socket, { message: 'media-hears', carriage }),
 		/**
 		 * Say where this tab's media path stands: `connected`, `impaired` or `lost`.
 		 *
