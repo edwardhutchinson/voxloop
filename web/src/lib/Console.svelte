@@ -32,7 +32,7 @@
 	import Bindings from './Bindings.svelte';
 	import Board from './Board.svelte';
 	import Ledger from './Ledger.svelte';
-	import { keyingModes, LATCH, modes, MOMENTARY } from './modes.js';
+	import { keyingModes, LATCHED, modes, MOMENTARY } from './modes.js';
 
 	let {
 		presence,
@@ -114,6 +114,14 @@
 	// open, and the server would go on telling everybody a session with no audio path was
 	// transmitting. It also drops a latch, because key state never returns across a withdrawal
 	// (v1 §7).
+	//
+	// **The microphone's liveness is not this** and the two are never folded into one
+	// (ADR-0021). A microphone that is unplugged is Audio's to notice, and it arrives here as
+	// the media path; whether a key is being held is Input's, and it arrives as `dropped`. The
+	// bar says both, in that order, because *there is no audio path* and *your hand is still
+	// down* are two facts with two fixes — and a headset with an inline button produces both
+	// at once, which is the case one signal could not report. The rest of the emission
+	// predicate, and what else can withdraw it, is #43's.
 	$effect(() => {
 		keys.available(mayKey);
 	});
@@ -196,10 +204,10 @@
 			keyed={presence.keyed}
 			onToggle={toggle}
 			onArm={arming}
-			onKeyDown={keys.controls[MOMENTARY].down}
-			onKeyUp={keys.controls[MOMENTARY].up}
-			onLatchDown={keys.controls[LATCH].down}
-			onLatchUp={keys.controls[LATCH].up}
+			onKeyDown={keys.onScreen[MOMENTARY].down}
+			onKeyUp={keys.onScreen[MOMENTARY].up}
+			onLatchDown={keys.onScreen[LATCHED].down}
+			onLatchUp={keys.onScreen[LATCHED].up}
 		/>
 	{:else}
 		<Ledger
@@ -212,10 +220,10 @@
 			keyed={presence.keyed}
 			onToggle={toggle}
 			onArm={arming}
-			onKeyDown={keys.controls[MOMENTARY].down}
-			onKeyUp={keys.controls[MOMENTARY].up}
-			onLatchDown={keys.controls[LATCH].down}
-			onLatchUp={keys.controls[LATCH].up}
+			onKeyDown={keys.onScreen[MOMENTARY].down}
+			onKeyUp={keys.onScreen[MOMENTARY].up}
+			onLatchDown={keys.onScreen[LATCHED].down}
+			onLatchUp={keys.onScreen[LATCHED].up}
 		/>
 	{/if}
 
@@ -255,15 +263,19 @@
 		border-color: var(--ink);
 	}
 
-	/* Below the loops rather than beside the heading. Relinquishing is a full stop and the
-	   one act on this page, and putting it in the header would place the way off the air
-	   next to the name of the role somebody just took. */
+	/* Set off from the loops by a rule and the largest gap on the page, because it is the one
+	   thing here that is not the shift: everything above it changes minute to minute, and this
+	   is a setting somebody visits once. The gap is what stops it being read as another state
+	   of the console. */
 	.keys {
 		margin: var(--space-6) 0 0;
 		padding-top: var(--space-4);
 		border-top: 1px solid var(--rule);
 	}
 
+	/* Below the loops rather than beside the heading. Relinquishing is a full stop and the
+	   one act on this page, and putting it in the header would place the way off the air
+	   next to the name of the role somebody just took. */
 	.relinquish {
 		margin: var(--space-5) 0 0;
 	}

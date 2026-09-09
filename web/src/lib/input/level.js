@@ -64,10 +64,10 @@ export function levels({ onIntent, onDropped = () => {} }) {
 					const died = before.live && before.level && !live;
 
 					sources.set(named, { level, live });
-					const wanted = told;
+					const wasWanted = told;
 					settle();
 
-					if (died && wanted && !told) onDropped(named);
+					if (died && wasWanted && !told) onDropped(named);
 				}
 			};
 		}

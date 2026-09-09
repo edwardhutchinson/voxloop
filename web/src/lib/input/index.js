@@ -42,7 +42,7 @@ export { describe, fromEvent, refusal, stillReaching };
  */
 export function keying({ bindings, onIntent, onDropped = () => {}, on = globalThis }) {
 	const bound = { ...bindings };
-	const controls = {};
+	const onScreens = {};
 	const keyboards = {};
 
 	for (const named of Object.keys(bound)) {
@@ -54,7 +54,7 @@ export function keying({ bindings, onIntent, onDropped = () => {}, on = globalTh
 			onDropped: (source) => onDropped(named, source)
 		});
 
-		controls[named] = onScreen(reading);
+		onScreens[named] = onScreen(reading);
 		keyboards[named] = keyboard(reading, { on });
 		keyboards[named].bind(bound[named]);
 	}
@@ -65,13 +65,13 @@ export function keying({ bindings, onIntent, onDropped = () => {}, on = globalTh
 	const clash = (named, binding) =>
 		Object.entries(bound).some(([other, was]) => other !== named && theSame(was, binding));
 
-	const both = (act) => {
+	const each = (act) => {
 		for (const named of Object.keys(bound)) act(named);
 	};
 
 	return {
 		/** The on-screen control for each name: what a button on the transmit bar publishes. */
-		controls,
+		onScreen: onScreens,
 
 		/** The keys as they currently stand, for a console that has to show them. */
 		bound: () => ({ ...bound }),
@@ -84,8 +84,8 @@ export function keying({ bindings, onIntent, onDropped = () => {}, on = globalTh
 		 * screen or it is not, and the keyboard is listening for a key or it is not.
 		 */
 		available: (is) =>
-			both((named) => {
-				controls[named].present(is);
+			each((named) => {
+				onScreens[named].present(is);
 				keyboards[named].available(is);
 			}),
 
@@ -110,7 +110,19 @@ export function keying({ bindings, onIntent, onDropped = () => {}, on = globalTh
 			return null;
 		},
 
-		/** The listeners go when the console does. A role given up is not a role you can key. */
-		stop: () => both((named) => keyboards[named].stop())
+		/**
+		 * Everything this attached, released — and **every source publishes that it has gone**
+		 * on the way out.
+		 *
+		 * A console torn down under a held key is a source dying while keyed, which is the
+		 * one thing this seam may not let pass in silence (ADR-0021): without the publish the
+		 * key would simply stop being watched, and the microphone would still be live on a
+		 * page nobody is looking at.
+		 */
+		stop: () =>
+			each((named) => {
+				onScreens[named].present(false);
+				keyboards[named].stop();
+			})
 	};
 }

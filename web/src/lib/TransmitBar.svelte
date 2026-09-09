@@ -221,6 +221,9 @@
 		font-weight: 600;
 	}
 
+	/* A general sibling rather than an adjacent one: the latch control sits between the key and
+	   the lamp, and an adjacent combinator would quietly stop matching the day a third binding
+	   lands beside them (ADR-0046). */
 	.key[aria-pressed='false'] ~ .lamp {
 		color: var(--quiet);
 		font-weight: inherit;

@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { keyingModes, LATCH, MOMENTARY, modes } from '../src/lib/modes.js';
+import { keyingModes, LATCHED, MOMENTARY, modes } from '../src/lib/modes.js';
 
 /** Something for the keyboard sources to listen on, and a way to make them hear something. */
 function aWindow() {
@@ -69,7 +69,7 @@ test('the defaults are the backtick, and the backtick with shift', () => {
 		modes.map(({ named, binding }) => [named, binding]),
 		[
 			[MOMENTARY, { code: 'Backquote' }],
-			[LATCH, { code: 'Backquote', shift: true }]
+			[LATCHED, { code: 'Backquote', shift: true }]
 		]
 	);
 });
@@ -142,12 +142,12 @@ test('the key you hold does not close a latch', () => {
 test('the buttons on the bar reach both modes', () => {
 	const { keys, keyed, latched } = operating();
 
-	keys.controls[MOMENTARY].down();
-	keys.controls[MOMENTARY].up();
+	keys.onScreen[MOMENTARY].down();
+	keys.onScreen[MOMENTARY].up();
 	assert.deepEqual(keyed, [true, false]);
 
-	keys.controls[LATCH].down();
-	keys.controls[LATCH].up();
+	keys.onScreen[LATCHED].down();
+	keys.onScreen[LATCHED].up();
 	assert.deepEqual(keyed, [true, false, true]);
 	assert.deepEqual(latched, [true]);
 });
@@ -156,10 +156,10 @@ test('the buttons on the bar reach both modes', () => {
 // it. The button can go — the pointer leaves it, the view is switched — and the latch stands.
 test('a latch outlives the control that opened it', () => {
 	const { keys, keyed, latched, dropped } = operating();
-	keys.controls[LATCH].down();
-	keys.controls[LATCH].up();
+	keys.onScreen[LATCHED].down();
+	keys.onScreen[LATCHED].up();
 
-	keys.controls[LATCH].down();
+	keys.onScreen[LATCHED].down();
 	keys.available(false);
 
 	assert.deepEqual(latched, [true, false]);
@@ -198,7 +198,7 @@ test('a key held when keying is withdrawn drops, and names the source', () => {
 
 test('the key control going while it is held names itself', () => {
 	const { keys, dropped } = operating();
-	keys.controls[MOMENTARY].down();
+	keys.onScreen[MOMENTARY].down();
 
 	keys.available(false);
 
@@ -237,6 +237,30 @@ test('a mode can be bound to another key, and the refusals are the seam’s', ()
 	there.press(key('KeyF'));
 	assert.deepEqual(keyed, [true]);
 
-	assert.match(keys.rebind(LATCH, { code: 'Space' }) ?? '', /Space/);
-	assert.match(keys.rebind(LATCH, { code: 'KeyF' }) ?? '', /already in use/);
+	assert.match(keys.rebind(LATCHED, { code: 'Space' }) ?? '', /Space/);
+	assert.match(keys.rebind(LATCHED, { code: 'KeyF' }) ?? '', /already in use/);
+});
+
+// **A console going is keying stopping**, whatever was holding it open. A role given up under
+// a held key or under a latch has to reach Audio and the server as an unkey rather than as
+// listeners quietly going away (ADR-0021) — the microphone is the thing an operator cannot
+// see, and it is the thing they would most want to know about.
+test('relinquishing under a held key stops it', () => {
+	const { there, keys, keyed } = operating();
+	there.press(held());
+
+	keys.stop();
+
+	assert.deepEqual(keyed, [true, false]);
+});
+
+test('relinquishing under a latch stops it', () => {
+	const { there, keys, keyed, latched } = operating();
+	there.press(latching());
+	there.release(latching());
+
+	keys.stop();
+
+	assert.deepEqual(keyed, [true, false]);
+	assert.deepEqual(latched, [true, false]);
 });

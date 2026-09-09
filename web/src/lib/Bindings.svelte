@@ -125,6 +125,9 @@
 		border-top: 1px solid var(--rule);
 	}
 
+	/* The one monospaced thing in the console, and the only place it earns its keep: a key is
+	   read character by character rather than as a word, and `` ` `` beside `'` in a
+	   proportional face is a binding somebody can get wrong at a glance. */
 	.binding {
 		font-family: ui-monospace, monospace;
 	}
@@ -135,6 +138,11 @@
 	.meaning,
 	.refusal {
 		grid-column: 1 / -1;
+	}
+
+	/* `.meaning` is furniture and already sets this size; a refusal is furniture only for its
+	   colour, so it is set here and once. */
+	.refusal {
 		font-size: var(--type-1);
 	}
 </style>

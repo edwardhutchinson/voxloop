@@ -32,8 +32,12 @@ import { presses, releases } from '../bindings.js';
 /** Name it goes by where the console has to say which source it is talking about. */
 export const KEYBOARD = 'the keyboard';
 
-/** Where a press is refused: a text field, or a control a key might operate (ADR-0022). */
-const INTERACTIVE = 'input, textarea, select, button, a[href], [contenteditable], [tabindex]';
+// Where a press is refused: a text field, or a control a key might operate (ADR-0022). The
+// negative on `tabindex` is load-bearing — `-1` means *focusable by script, not by tab*, which
+// is how a scroll region or a dialog wrapper is written, and neither of those is a control an
+// operator's hands are resting on.
+const INTERACTIVE =
+	'input, textarea, select, button, a[href], [contenteditable], [tabindex]:not([tabindex="-1"])';
 
 // Asked of the event's target rather than of `document.activeElement`, because they are the
 // same element for a key event and only one of them is reachable from a test. Anything that
@@ -54,8 +58,8 @@ function guarded(node) {
  */
 export function keyboard(input, { on }) {
 	const publishing = input.add(KEYBOARD);
-	const listening = typeof on?.addEventListener === 'function';
 
+	let listening = typeof on?.addEventListener === 'function';
 	let binding = null;
 	let down = false;
 	let allowed = false;
@@ -66,7 +70,10 @@ export function keyboard(input, { on }) {
 	const say = () => publishing.publish(down, listening && allowed && binding !== null);
 
 	function pressed(event) {
-		if (!binding || !presses(event, binding)) return;
+		// Refused before the key is taken off the page, rather than after. A console with no
+		// role or no audio path is not one this key talks from (v1 §4), and swallowing a
+		// keystroke that does nothing would be this file claiming a key it is not using.
+		if (!allowed || !binding || !presses(event, binding)) return;
 		if (guarded(event.target)) return;
 		if (event.repeat && !down) return;
 
@@ -120,13 +127,22 @@ export function keyboard(input, { on }) {
 			if (is) down = false;
 			say();
 		},
-		/** The listeners go when the console does. A role given up is not a role you can key. */
+		/**
+		 * The listeners go when the console does. A role given up is not a role you can key.
+		 *
+		 * It **publishes that it has gone** rather than merely stopping: a console torn down
+		 * under a held key is a source dying while keyed, and a source that stopped being
+		 * watched without saying so would leave the microphone live on a page nobody is
+		 * looking at (ADR-0021).
+		 */
 		stop: () => {
 			if (!listening) return;
 
 			on.removeEventListener('keydown', pressed);
 			on.removeEventListener('keyup', released);
 			on.removeEventListener('blur', away);
+			listening = false;
+			say();
 		}
 	};
 }

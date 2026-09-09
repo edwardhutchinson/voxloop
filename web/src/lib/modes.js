@@ -27,7 +27,7 @@ import { keying } from './input/index.js';
 
 /** The two modes, by the names they are known by here and nowhere below the seam. */
 export const MOMENTARY = 'momentary';
-export const LATCH = 'latch';
+export const LATCHED = 'latched';
 
 /**
  * The keys they start on (ADR-0022), and what the console calls each of them.
@@ -49,7 +49,7 @@ export const modes = [
 		means: 'Hold this key to talk, and let go to stop.'
 	},
 	{
-		named: LATCH,
+		named: LATCHED,
 		binding: { code: 'Backquote', shift: true },
 		called: 'Latched',
 		means: 'Press this key to start talking, and press it again to stop.'
@@ -120,7 +120,7 @@ export function keyingModes({ onKeying, onLatched, onDropped = () => {}, on }) {
 
 	return {
 		/** The on-screen control for each mode: what the buttons on the transmit bar publish. */
-		controls: input.controls,
+		onScreen: input.onScreen,
 
 		/** The keys as they currently stand, for the console that has to show them. */
 		bound: input.bound,
@@ -142,7 +142,17 @@ export function keyingModes({ onKeying, onLatched, onDropped = () => {}, on }) {
 			settle();
 		},
 
-		/** Everything this attached, released. */
-		stop: input.stop
+		/**
+		 * Everything this attached, released, and **the key stops with it**.
+		 *
+		 * A console going is keying stopping, whatever was holding it open: a role given up
+		 * under a held key, or under a latch, has to reach Audio and the server as an unkey
+		 * rather than as listeners quietly going away (ADR-0021).
+		 */
+		stop: () => {
+			latch(false);
+			input.stop();
+			settle();
+		}
 	};
 }

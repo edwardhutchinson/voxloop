@@ -46,17 +46,25 @@ function aWindow() {
 	};
 }
 
-/** A key event, as a browser delivers one. `target` is what had focus when it happened. */
-const key = (code, how = {}) => ({
-	code,
-	shiftKey: how.shift === true,
-	ctrlKey: how.ctrl === true,
-	altKey: how.alt === true,
-	metaKey: how.meta === true,
-	repeat: how.repeat === true,
-	target: how.target ?? null,
-	preventDefault: () => {}
-});
+/**
+ * A key event, as a browser delivers one. `target` is what had focus when it happened, and
+ * `prevented` is whether the source took the key off the page.
+ */
+function key(code, how = {}) {
+	const event = {
+		code,
+		shiftKey: how.shift === true,
+		ctrlKey: how.ctrl === true,
+		altKey: how.alt === true,
+		metaKey: how.meta === true,
+		repeat: how.repeat === true,
+		target: how.target ?? null,
+		prevented: false,
+		preventDefault: () => (event.prevented = true)
+	};
+
+	return event;
+}
 
 /** An element, as far as the focus guard is concerned. */
 const focusedOn = (selectors) => ({
@@ -85,8 +93,8 @@ test('a control held down wants to emit, and a control released does not', () =>
 	const { wanted, input } = watching();
 	input.available(true);
 
-	input.controls.anything.down();
-	input.controls.anything.up();
+	input.onScreen.anything.down();
+	input.onScreen.anything.up();
 
 	assert.deepEqual(answers(wanted), [true, false]);
 });
@@ -97,7 +105,7 @@ test('a control held down wants to emit, and a control released does not', () =>
 test('a control that is not on screen cannot key', () => {
 	const { wanted, input } = watching();
 
-	input.controls.anything.down();
+	input.onScreen.anything.down();
 
 	assert.deepEqual(wanted, [], 'a control nobody can see keyed');
 });
@@ -109,7 +117,7 @@ test('a control that is not on screen cannot key', () => {
 test('a control that goes while it is held drops the key', () => {
 	const { wanted, dropped, input } = watching();
 	input.available(true);
-	input.controls.anything.down();
+	input.onScreen.anything.down();
 	assert.deepEqual(answers(wanted), [true]);
 
 	input.available(false);
@@ -129,7 +137,7 @@ test('a control that goes while it is held drops the key', () => {
 test('a control that comes back is not still holding what it held', () => {
 	const { wanted, input } = watching();
 	input.available(true);
-	input.controls.anything.down();
+	input.onScreen.anything.down();
 	input.available(false);
 
 	input.available(true);
@@ -144,10 +152,10 @@ test('saying the same thing twice is said once', () => {
 	const { wanted, input } = watching();
 	input.available(true);
 
-	input.controls.anything.down();
-	input.controls.anything.down();
-	input.controls.anything.up();
-	input.controls.anything.up();
+	input.onScreen.anything.down();
+	input.onScreen.anything.down();
+	input.onScreen.anything.up();
+	input.onScreen.anything.up();
 
 	assert.deepEqual(answers(wanted), [true, false]);
 });
@@ -258,7 +266,7 @@ test('nothing under the seam mentions a mode', async () => {
 test('the seam hands out no way to register a source', () => {
 	const { input } = watching();
 
-	assert.deepEqual(Object.keys(input), ['controls', 'bound', 'available', 'rebind', 'stop']);
+	assert.deepEqual(Object.keys(input), ['onScreen', 'bound', 'available', 'rebind', 'stop']);
 });
 
 // **Each name is read separately** (ADR-0022). One reading with every source in it would be
@@ -335,7 +343,15 @@ test('a release is taken however the modifiers stand', () => {
 // console must not place a focusable control where an operator's hands rest, and a key that
 // typed a backtick into a form and keyed at the same time would be the reason why.
 test('a press with focus in a text field or on a control does not key', async (t) => {
-	for (const where of ['input', 'textarea', 'select', 'button', 'a[href]', '[contenteditable]']) {
+	for (const where of [
+		'input',
+		'textarea',
+		'select',
+		'button',
+		'a[href]',
+		'[contenteditable]',
+		'[tabindex]:not([tabindex="-1"])'
+	]) {
 		await t.test(where, () => {
 			const there = aWindow();
 			const { wanted, input } = watching({ on: there.on });
@@ -346,6 +362,19 @@ test('a press with focus in a text field or on a control does not key', async (t
 			assert.deepEqual(wanted, [], `a key pressed with focus on ${where} keyed`);
 		});
 	}
+});
+
+// `tabindex="-1"` means *focusable by script, not by tab*, which is how a scroll region or a
+// dialog wrapper is written. Neither is a control an operator's hands are resting on, and a
+// console whose key went dead inside one would be a console with no way to explain itself.
+test('a press inside something merely focusable by script still keys', () => {
+	const there = aWindow();
+	const { wanted, input } = watching({ on: there.on });
+	input.available(true);
+
+	there.press(key('Backquote', { target: focusedOn(['[tabindex="-1"]']) }));
+
+	assert.deepEqual(answers(wanted), [true]);
 });
 
 // The refusal is on the press alone. Focus can move under a held key — a click lands
@@ -458,6 +487,57 @@ test('a stopped seam is listening to nothing', () => {
 
 	assert.equal(there.listening(), 0);
 	assert.deepEqual(wanted, []);
+});
+
+// **And a console torn down under a held key is a source dying while keyed** (ADR-0021).
+// Stopping has to publish that, rather than simply stopping: a source that went unwatched
+// without saying so would leave the microphone live on a page nobody is looking at.
+test('a seam stopped under a held key drops it', async (t) => {
+	await t.test('the keyboard', () => {
+		const there = aWindow();
+		const { wanted, input } = watching({ on: there.on });
+		input.available(true);
+		there.press(key('Backquote'));
+
+		input.stop();
+
+		assert.deepEqual(answers(wanted), [true, false], 'a relinquish left the key held');
+	});
+
+	await t.test('the key control', () => {
+		const { wanted, input } = watching();
+		input.available(true);
+		input.onScreen.anything.down();
+
+		input.stop();
+
+		assert.deepEqual(answers(wanted), [true, false], 'a relinquish left the key held');
+	});
+});
+
+// **A key being talked with does not also do what the browser would do with it**, and a key
+// that is not being talked with is left entirely alone. Swallowing a keystroke that keyed
+// nothing would be Input claiming a key it is not using — on a console with no audio path,
+// that is a backtick that stops being typeable for as long as the fault lasts.
+test('only a key that keys is taken off the page', async (t) => {
+	const pressing = (how, ready) => {
+		const there = aWindow();
+		const { input } = watching({ on: there.on });
+		input.available(ready);
+		const event = key(how.code ?? 'Backquote', how);
+		there.press(event);
+
+		return event.prevented;
+	};
+
+	await t.test('a key that keys', () => assert.equal(pressing({}, true), true));
+	await t.test('with no audio path', () => assert.equal(pressing({}, false), false));
+	await t.test('a key bound to nothing', () =>
+		assert.equal(pressing({ code: 'KeyG' }, true), false)
+	);
+	await t.test('with focus in a text field', () =>
+		assert.equal(pressing({ target: focusedOn(['input']) }, true), false)
+	);
 });
 
 // **The console is rendered on the server at build time**, where there is no window to listen
