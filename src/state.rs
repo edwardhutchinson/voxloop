@@ -97,6 +97,15 @@ pub(crate) enum Connection {
 }
 
 impl Connection {
+    /// The word this rung goes by, which is the word `CONTEXT.md` and the spec use.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::Unconfirmed => "unconfirmed",
+            Self::Disconnected => "disconnected",
+        }
+    }
+
     /// Whether emission stands at this rung.
     ///
     /// The whole of ADR-0018's server-side rule, in one place so that the fan-out and the
@@ -647,6 +656,33 @@ pub(crate) struct Presence {
     ///
     /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
     pub(crate) media_path: MediaPath,
+    /// Where the **server** has this session standing with the signalling channel
+    /// ([ADR-0018]).
+    ///
+    /// It is deliberately not the console's own reading, and the console does not replace its
+    /// reading with this one: **they are two facts and they merge pessimistically**, which is
+    /// the rule already used for the media path's two ends ([ADR-0042]) — green needs both,
+    /// red needs one.
+    ///
+    /// The two can honestly disagree, because the two ends measure different silences. This
+    /// end measures the answers it is not getting; the console measures the heartbeats it is
+    /// not getting. A console whose replies are lost while the server's still arrive is the
+    /// case that needs this field: the server reaches the disconnect threshold and closes the
+    /// fan-out, and without being told the console would go on offering a key control over a
+    /// route that is already closed — which is [ADR-0008]'s residual arriving as a feature.
+    ///
+    /// It cannot always arrive, and that is why the console runs its own clock rather than
+    /// waiting for this. A session that hears nothing is told nothing, by construction. What
+    /// this covers is the half of the failure where the server can still be heard.
+    ///
+    /// **The age is not here.** A running age would move the document's version five times a
+    /// second, and the version answers *is this the same state* (v1 §6). The console has its
+    /// own clock and the age is that clock's.
+    ///
+    /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    /// [ADR-0018]: ../../docs/adr/0018-no-signalling-channel-means-no-emission-path.md
+    /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
+    pub(crate) connection: Connection,
     /// Whether the server has this session down as transmitting.
     ///
     /// **This is the transmitting lamp** ([ADR-0008]). It is in the document because the
@@ -1115,6 +1151,7 @@ impl StateAuthority {
                 session: held.id.clone(),
                 role: held.role.clone(),
                 media_path: held.media_path(),
+                connection: held.connection(ladder, now),
                 keyed: held.is_transmitting(ladder, now),
                 // **The narrowing happens here and nowhere else.** The session's set holds
                 // whatever it holds; the reach handed in decides what is rendered, so a
@@ -1375,6 +1412,14 @@ impl Live {
     ///
     /// It is done here rather than by clearing the key, because the fan-out is per arm rather
     /// than per key: closing it means having no destinations, and that is this answer.
+    ///
+    /// **The loop is not told the transmission was cut, and [ADR-0018] says it should be** —
+    /// with the reason *signalling lost*, so that listeners hear a voice cut rather than
+    /// vanish. Nothing in v1 tells a loop anything about a transmission ending yet: the
+    /// machinery is [ADR-0014]'s Cut, which is not built. It is recorded here rather than
+    /// left to be discovered, and it lands with Cut.
+    ///
+    /// [ADR-0014]: ../../docs/adr/0014-authority-acts-on-emission-are-transient.md
     ///
     /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
     /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
@@ -2869,6 +2914,52 @@ mod tests {
             .presence(&talker, vec![a_loop_to_emit_on("air-to-ground")])
             .expect("a document");
         assert!(!presence.keyed);
+    }
+
+    /// **The server's own reading rides in the document** ([ADR-0018]), for the half of the
+    /// failure where it can still be heard: a console whose answers are being lost while the
+    /// server's heartbeats still arrive has no way of its own to know its fan-out has closed.
+    #[tokio::test]
+    async fn the_document_carries_the_server_s_reading_of_the_channel() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let reach = vec![a_loop_to_emit_on("air-to-ground")];
+
+        for (unheard_for, rung) in [
+            (Duration::ZERO, Connection::Confirmed),
+            (Duration::from_secs(5), Connection::Unconfirmed),
+            (Duration::from_secs(12), Connection::Disconnected),
+        ] {
+            live.unheard_from_for(&session, unheard_for);
+
+            let (_, presence) = live.presence(&session, reach.clone()).expect("a document");
+            assert_eq!(
+                presence.connection, rung,
+                "unheard from for {unheard_for:?}"
+            );
+        }
+    }
+
+    /// The rung moves the version, because the console renders it. The **age** is deliberately
+    /// not in the document for the opposite reason: a number that moved five times a second
+    /// would make *is this the same state* unanswerable, which is the one question versioning
+    /// is for.
+    #[tokio::test]
+    async fn the_version_moves_when_the_channel_s_rung_does_and_not_with_its_age() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let reach = vec![a_loop_to_emit_on("air-to-ground")];
+        let (first, _) = live.presence(&session, reach.clone()).expect("a document");
+
+        live.unheard_from_for(&session, Duration::from_secs(3));
+        let (aged, _) = live.presence(&session, reach.clone()).expect("a document");
+        assert_eq!(aged, first, "the version moved for an age nothing renders");
+
+        live.unheard_from_for(&session, Duration::from_secs(6));
+        let (moved, _) = live.presence(&session, reach).expect("a document");
+        assert_eq!(moved, first + 1);
     }
 
     /// A talker armed and a listener monitoring the same loop, which is the smallest thing

@@ -12,7 +12,8 @@ import {
 	DISCONNECTED,
 	THE_LADDER_V1_FIXES,
 	UNCONFIRMED,
-	theConnection
+	theConnection,
+	worse
 } from '../src/lib/connection.js';
 
 /** A channel opened at zero, and everything it has said since. */
@@ -157,4 +158,26 @@ test('a latch stands again once the channel is confirmed again', () => {
 	channel.confirmed(8100, THE_LADDER_V1_FIXES);
 
 	assert.equal(last().aLatchStands, true);
+});
+
+// **Green needs both, red needs one** — the same pessimistic merge the media path's two ends
+// already use (ADR-0042), applied to the other axis. This tab measures the heartbeats it is
+// not getting; the server measures the answers it is not getting. They are two different
+// silences and either of them is enough.
+test('two readings of one channel merge pessimistically', () => {
+	assert.equal(worse(CONFIRMED, CONFIRMED), CONFIRMED);
+	assert.equal(worse(CONFIRMED, UNCONFIRMED), UNCONFIRMED);
+	assert.equal(worse(UNCONFIRMED, CONFIRMED), UNCONFIRMED);
+	assert.equal(worse(CONFIRMED, DISCONNECTED), DISCONNECTED);
+	assert.equal(worse(DISCONNECTED, CONFIRMED), DISCONNECTED);
+	assert.equal(worse(UNCONFIRMED, DISCONNECTED), DISCONNECTED);
+});
+
+// A rung the console has no reading of is read as the best case rather than the worst, and
+// deliberately so: this merge is only ever the *other* reading, and treating a missing one as
+// red would withdraw emission on every document sent by a server that has not learned to say
+// it. The safe direction is the console's own clock, which is always there.
+test('a reading that is not a rung leaves the other one standing', () => {
+	assert.equal(worse(UNCONFIRMED, undefined), UNCONFIRMED);
+	assert.equal(worse(undefined, DISCONNECTED), DISCONNECTED);
 });

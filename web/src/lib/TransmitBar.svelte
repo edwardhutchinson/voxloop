@@ -47,7 +47,7 @@
 	// #56's.
 
 	import Icon from './Icon.svelte';
-	import { CONFIRMED, DISCONNECTED, UNCONFIRMED } from './connection.js';
+	import { CONFIRMED, DISCONNECTED, UNCONFIRMED } from './session.js';
 
 	// The media path as the presence document has it: `connected`, `impaired` or `lost`
 	// (ADR-0042). Anything else is read as `lost`, which is the safe direction and the honest
@@ -124,9 +124,9 @@
 		     closes the fan-out, independently, because the situation that makes the rule
 		     necessary is the one where this console may itself be wedged. -->
 		<p class="withdrawn" role="status">
-			VoxLoop cannot be reached, so it will not emit: nobody's console would show you talking, and
-			nobody could cut you. This is the connection to VoxLoop rather than the audio, which is a
-			different problem with a different fix.
+			VoxLoop and this console are not in touch, so it will not emit: nobody's console would show
+			you talking, and nobody could cut you. This is the connection to VoxLoop rather than the
+			audio, which is a different problem with a different fix.
 		</p>
 	{:else if !mayKey}
 		<p class="withdrawn" role="status">
@@ -138,7 +138,7 @@
 		     from *we know you are disconnected*, and it is the honest one here. Emission stands
 		     — cutting somebody off mid-word for a half-second blip is the failure this rung
 		     exists to prevent — but a latch does not, so the sentence says both. -->
-		<p class="impaired" role="status">
+		<p class="unconfirmed" role="status">
 			VoxLoop cannot confirm what you are doing, so a latched key will not be held open. You can
 			still talk by holding the key.
 		</p>
@@ -177,13 +177,12 @@
 		     is dropped, and this is the announcement that can still be made.
 
 		     It says what it cost and not what caused it: the sentence above is what names the
-		     rung, and this one is true whichever of them took the latch down. An operator who
-		     believes they are still transmitting is the failure the rule exists to remove,
-		     arriving through the other door — so it is an alert rather than a status, and it
-		     stands until they key again. -->
+		     rung, and this one is true whichever of them took the latch down — the channel
+		     going quiet, or the audio path going. An operator who believes they are still
+		     transmitting is the failure the rule exists to remove, arriving through the other
+		     door, so it is the one alert in this strip and it stands until they key again. -->
 		<p class="dropped" role="alert">
-			The latched key was dropped, so you are not transmitting. A latch VoxLoop cannot keep showing
-			you is a microphone nobody can be told about.
+			The latched key was dropped, so you are not transmitting. Press Latch again once this clears.
 		</p>
 	{/if}
 
@@ -239,14 +238,18 @@
 </section>
 
 <style>
-	/* Two names for one rendering, deliberately, the way `.refusal` and `.destructive` are:
-	   a fault that clears itself and a fault that has withdrawn emission read alike and are
-	   not the same thing, so a rule that later tells them apart has somewhere to go.
+	/* Four names for one rendering, deliberately, the way `.refusal` and `.destructive` are:
+	   a fault that clears itself, a channel that cannot confirm, a fault that has withdrawn
+	   emission and a latch that was taken away read alike and are not the same thing, so a
+	   rule that later tells them apart has somewhere to go. `.impaired` is the media path's
+	   rung and `.unconfirmed` is the signalling channel's, and they are two classes rather
+	   than one because the two ladders are two ladders (`CONTEXT.md`).
 
 	   The colour is v1 §8's — *this is true and you should look at it* — and it is never what
 	   carries the state: the sentence says which of the two withdrawal conditions applies and
 	   would still say it in monochrome. */
 	.impaired,
+	.unconfirmed,
 	.withdrawn,
 	.dropped {
 		margin: 0;

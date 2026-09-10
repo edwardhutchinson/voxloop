@@ -32,7 +32,7 @@
 	import Bindings from './Bindings.svelte';
 	import Board from './Board.svelte';
 	import Ledger from './Ledger.svelte';
-	import { DISCONNECTED, UNCONFIRMED } from './connection.js';
+	import { CONFIRMED, DISCONNECTED, UNCONFIRMED, worse } from './session.js';
 	import { keyingModes, LATCHED, modes, MOMENTARY } from './modes.js';
 
 	// `connection` is where this tab stands with the signalling channel, measured here rather
@@ -110,6 +110,47 @@
 		inOrder.filter((reachable) => reachable.armed).map((reachable) => reachable.name)
 	);
 
+	// **Everything the transmit bar renders, as one value.** It is one component so that it is
+	// one wording (ADR-0034), and it is one prop for the same reason a rung further down: the
+	// views carry the bar and place it, and neither of them has a name for anything inside it,
+	// so neither can forward half of it or word a word of it. It is also what keeps the next
+	// state the bar gains off both views entirely.
+	const bar = $derived({
+		mediaPath: presence.media_path,
+		connection: standing,
+		armedOn,
+		keyed: presence.keyed,
+		mayKey,
+		latched,
+		dropped,
+		latchDropped,
+		onDown: keys.onScreen[MOMENTARY].down,
+		onUp: keys.onScreen[MOMENTARY].up,
+		onLatchDown: keys.onScreen[LATCHED].down,
+		onLatchUp: keys.onScreen[LATCHED].up
+	});
+
+	// **Where the channel stands, from both ends, merged pessimistically** — green needs both,
+	// red needs one (ADR-0018, and the rule ADR-0042 already applies to the media path). This
+	// tab measures the heartbeats it is not getting; the server measures the answers it is not
+	// getting and says so in the document. They are two different silences and they can
+	// honestly disagree, and the disagreement that matters is a console whose answers are
+	// being lost while the server's heartbeats still arrive: the server has closed its fan-out
+	// and nothing this tab could measure would say so.
+	const standing = $derived(worse(connection.state, presence.connection));
+
+	// **Whose reading it is**, because the two failures want different sentences: *VoxLoop
+	// cannot be reached* and *VoxLoop is not hearing this console* send an operator to look at
+	// different things, and only the first of them is a console that has gone blind.
+	const heardFromVoxLoop = $derived(connection.state === CONFIRMED);
+
+	// How long ago this tab last heard VoxLoop, in whole seconds. **The running age is what
+	// stops a frozen console being mistaken for a live one** (ADR-0018): last-known state is
+	// not blanked, because an empty page reads as *nothing is happening* when everything may
+	// be — so what makes it honest is the number beside it moving. It is this tab's own clock,
+	// so it is said only where this tab's own clock is what is reporting.
+	const staleFor = $derived(Math.floor(connection.since / 1000));
+
 	// **Whether emission stands at all**, decided once here rather than in the bar, because
 	// two things read it: the bar, which draws the key control, and Input, which is told
 	// whether that control is on screen.
@@ -132,14 +173,8 @@
 	const anAudioPath = $derived(
 		presence.media_path === 'connected' || presence.media_path === 'impaired'
 	);
-	const aStateChannel = $derived(connection.state !== DISCONNECTED);
+	const aStateChannel = $derived(standing !== DISCONNECTED);
 	const mayKey = $derived(anAudioPath && aStateChannel);
-
-	// How long ago VoxLoop was last confirmed, in whole seconds. **The running age is what
-	// stops a frozen console being mistaken for a live one** (ADR-0018): last-known state is
-	// not blanked, because an empty page reads as *nothing is happening* when everything may
-	// be — so what makes it honest is the number beside it moving.
-	const staleFor = $derived(Math.floor(connection.since / 1000));
 
 	// **Every source dies together, because they die of the same thing** (ADR-0021). A source
 	// that dies while keyed forces an unkey: a key control that vanished under a held pointer
@@ -217,17 +252,34 @@
 	     was rejected too, because it disarms an operator at the exact moment things are going
 	     wrong. So the loops stay where they are, under a sentence saying how old they are.
 
+	     **The freeze needs no code and has none.** Documents and heartbeats travel on one
+	     socket and heartbeats are the more frequent of the two, so a document arriving means a
+	     heartbeat arrived more recently still — this console cannot be reading a rung above
+	     `confirmed` and taking in fresh state at the same time. What was needed was the mark,
+	     and that is what this is.
+
 	     What each rung costs the *transmit bar* is said there, beside the key control, because
 	     that is the half an operator acts on and it is the strip both views carry. -->
-	{#if connection.state === UNCONFIRMED}
-		<p class="lost" role="status">
+	{#if standing === DISCONNECTED && heardFromVoxLoop}
+		<!-- The half of the failure this console cannot see for itself: VoxLoop is still
+		     reaching it, so what is on screen is current — and VoxLoop is not hearing its
+		     answers, so it has closed the fan-out and nothing this tab could measure would
+		     have said so. It is a different problem from the one below and gets a different
+		     sentence, because *your console is blind* and *your console is unheard* send an
+		     operator to look at different things. -->
+		<p class="lost" role="alert">
+			VoxLoop is not hearing this console, so it will not emit. What is on screen is current; what
+			this console sends is not arriving.
+		</p>
+	{:else if standing === DISCONNECTED}
+		<p class="lost" role="alert">
+			The connection to VoxLoop was lost {staleFor} s ago. This is what it last said, and it is not being
+			kept up to date.
+		</p>
+	{:else if standing === UNCONFIRMED}
+		<p class="stale" role="status">
 			VoxLoop was last confirmed {staleFor} s ago. This is what it last said, and it is not being kept
 			up to date.
-		</p>
-	{:else if connection.state === DISCONNECTED}
-		<p class="lost" role="alert">
-			The connection to VoxLoop was lost. This is what it last said, and it is not being kept up to
-			date.
 		</p>
 	{/if}
 
@@ -251,41 +303,9 @@
 	</div>
 
 	{#if showing === 'board'}
-		<Board
-			loops={inOrder}
-			mediaPath={presence.media_path}
-			connection={connection.state}
-			{armedOn}
-			{mayKey}
-			{latched}
-			{dropped}
-			{latchDropped}
-			keyed={presence.keyed}
-			onToggle={toggle}
-			onArm={arming}
-			onKeyDown={keys.onScreen[MOMENTARY].down}
-			onKeyUp={keys.onScreen[MOMENTARY].up}
-			onLatchDown={keys.onScreen[LATCHED].down}
-			onLatchUp={keys.onScreen[LATCHED].up}
-		/>
+		<Board loops={inOrder} {bar} onToggle={toggle} onArm={arming} />
 	{:else}
-		<Ledger
-			loops={inOrder}
-			mediaPath={presence.media_path}
-			connection={connection.state}
-			{armedOn}
-			{mayKey}
-			{latched}
-			{dropped}
-			{latchDropped}
-			keyed={presence.keyed}
-			onToggle={toggle}
-			onArm={arming}
-			onKeyDown={keys.onScreen[MOMENTARY].down}
-			onKeyUp={keys.onScreen[MOMENTARY].up}
-			onLatchDown={keys.onScreen[LATCHED].down}
-			onLatchUp={keys.onScreen[LATCHED].up}
-		/>
+		<Ledger loops={inOrder} {bar} onToggle={toggle} onArm={arming} />
 	{/if}
 
 	<!-- Under the loops rather than among them: the keys are a setting, and a setting beside

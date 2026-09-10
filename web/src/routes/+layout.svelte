@@ -22,13 +22,12 @@
 	import '../app.css';
 
 	import ChangePassword from '$lib/ChangePassword.svelte';
-	import { CONFIRMED } from '$lib/connection.js';
 	import Enrol from '$lib/Enrol.svelte';
 	import SignIn from '$lib/SignIn.svelte';
 	import { holdFrame } from '$lib/frame.js';
 	import { openAudio } from '$lib/audio.js';
 	import { principal, signOut } from '$lib/server.js';
-	import { openSignalling } from '$lib/session.js';
+	import { CONFIRMED, openSignalling } from '$lib/session.js';
 
 	let { children } = $props();
 

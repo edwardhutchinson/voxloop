@@ -166,12 +166,19 @@ th {
 	flex-wrap: wrap;
 }
 
-/* What the console last saw, frozen and marked because the signalling channel went away.
-   Not a refusal and not a destructive act, so it is not written like one: what is on screen
-   stays rather than being blanked, because an empty page reads as *nothing is happening* when
-   everything may be (ADR-0018). The sentence carries the state; the colour only makes it hard
-   to walk past. It is furniture because the lobby and the operating console both say it, and
-   the three-state ladder this is the first step of will be said in more places still. */
+/* What the console last saw, frozen and marked because the signalling channel is no longer
+   confirming it. Not a refusal and not a destructive act, so it is not written like one: what
+   is on screen stays rather than being blanked, because an empty page reads as *nothing is
+   happening* when everything may be (ADR-0018). The sentence carries the state; the colour
+   only makes it hard to walk past.
+
+   **Two names because they are two rungs** — `unconfirmed`, where the state is merely old and
+   emission still stands, and `disconnected`, where the channel is gone and emission is
+   withdrawn. They are drawn alike and are not the same thing, so a rule that later tells them
+   apart has somewhere to go; naming one of them after the other would be the console
+   borrowing the wrong word from the ladder. Furniture because the lobby and the operating
+   console both say them. */
+.stale,
 .lost {
 	margin: 0 0 var(--space-4);
 	color: var(--warning);

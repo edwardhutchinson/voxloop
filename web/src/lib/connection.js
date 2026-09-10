@@ -40,6 +40,29 @@ export const UNCONFIRMED = 'unconfirmed';
 /** Past the threshold. Emission is withdrawn here and at the server both. */
 export const DISCONNECTED = 'disconnected';
 
+// The rungs in order, so that two readings of the channel can be merged without anybody
+// writing the comparison out again.
+const THE_LADDER = [CONFIRMED, UNCONFIRMED, DISCONNECTED];
+
+/**
+ * The worse of two readings of the same channel — **green needs both, red needs one**.
+ *
+ * This console measures the heartbeats it is not getting; the server measures the answers it
+ * is not getting, and says so in the presence document. **They are two facts and they can
+ * honestly disagree**, because they are two different silences: a console whose answers are
+ * being lost while the server's heartbeats still arrive reads `confirmed` while its fan-out
+ * is already closed, which is the console offering a key control over a route that no longer
+ * exists.
+ *
+ * So neither replaces the other. It is the same pessimistic merge the media path's two ends
+ * already use (ADR-0042), applied to the other axis for the same reason.
+ */
+export function worse(mine, theirs) {
+	const at = (rung) => Math.max(THE_LADDER.indexOf(rung), 0);
+
+	return THE_LADDER[Math.max(at(mine), at(theirs))];
+}
+
 /**
  * The ladder v1 §7 fixes, in the shape a heartbeat carries it.
  *

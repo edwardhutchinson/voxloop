@@ -66,14 +66,24 @@ const eachView = (props) => Promise.all(views.map((view) => rendered(view, props
 // A view as a session with a working audio path sees it. The media path is passed rather
 // than left out wherever a question is not about it, because the document always carries one
 // (ADR-0042) and a view rendered without it is a view no session ever sees.
-const carrying = {
-	loops: inReach,
+const theBar = {
 	mediaPath: 'connected',
 	connection: 'confirmed',
 	armedOn: ['FLIGHT'],
 	keyed: false,
 	mayKey: true
 };
+
+const carrying = { loops: inReach, bar: theBar };
+
+/**
+ * A view carrying a bar in whatever state the test is about.
+ *
+ * The bar reaches a view as one value it has no name for any part of (ADR-0034), so a test
+ * that wants the bar in a particular state says so here rather than by handing a view a prop
+ * the view could not have read.
+ */
+const inAView = (bar, loops = inReach) => ({ loops, bar: { ...theBar, ...bar } });
 
 /**
  * The whole console, on a healthy channel.
@@ -87,6 +97,7 @@ const theConsole = {
 		session: 'a-session',
 		role: { id: 'r-1', name: 'Flight Director' },
 		media_path: 'connected',
+		connection: 'confirmed',
 		loops: inReach
 	},
 	connection: { state: 'confirmed', since: 0, aLatchStands: true }
@@ -127,16 +138,16 @@ test('a loop that leaves reach leaves both views', async () => {
 	const [left] = namesOf(inReach);
 	const stillThere = inReach.slice(1);
 
-	for (const [at, body] of (await eachView({ ...carrying, loops: stillThere })).entries()) {
+	for (const [at, body] of (await eachView(inAView({}, stillThere))).entries()) {
 		assert.doesNotMatch(body, new RegExp(left), `${views[at]} still shows ${left}`);
 		for (const name of namesOf(stillThere)) assert.match(body, new RegExp(name));
 	}
 });
 
 test('an empty reach is a view with no loops rather than no view', async () => {
-	for (const [at, body] of (await eachView({ ...carrying, loops: [], armedOn: [] })).entries()) {
+	for (const [at, body] of (await eachView(inAView({ armedOn: [] }, []))).entries()) {
 		assert.ok(
-			body.includes(await rendered('TransmitBar.svelte', { mediaPath: 'connected', mayKey: true })),
+			body.includes(await rendered('TransmitBar.svelte', { ...theBar, armedOn: [] })),
 			`${views[at]} lost its bar`
 		);
 	}
@@ -158,12 +169,12 @@ test('the board says a word where the ledger says a sentence', async () => {
 // anything.
 test('the transmit bar is in both views, worded identically, in every state it has', async () => {
 	for (const mediaPath of ['connected', 'impaired', 'lost']) {
-		const mayKey = mediaPath !== 'lost';
-		const bar = await rendered('TransmitBar.svelte', { mediaPath, mayKey });
+		const carried = { ...theBar, mediaPath, mayKey: mediaPath !== 'lost' };
+		const bar = await rendered('TransmitBar.svelte', carried);
 
 		// The same bytes, because it is the same component: two views cannot word one bar
 		// differently if neither of them writes the wording.
-		for (const [at, body] of (await eachView({ loops: inReach, mediaPath, mayKey })).entries()) {
+		for (const [at, body] of (await eachView(inAView(carried))).entries()) {
 			assert.ok(body.includes(bar), `${views[at]} does not carry the ${mediaPath} bar`);
 		}
 	}
@@ -174,7 +185,7 @@ test('the transmit bar is in both views, worded identically, in every state it h
 // different fixes, and one wording for both sends an operator to look at the wrong thing.
 test('the bar tells a lost audio path apart from a lost connection, in both views', async () => {
 	for (const [at, body] of (
-		await eachView({ loops: inReach, mediaPath: 'lost', mayKey: false })
+		await eachView(inAView({ mediaPath: 'lost', mayKey: false }))
 	).entries()) {
 		assert.match(body, /audio path/, `${views[at]} does not say what is missing`);
 		assert.match(body, /will not emit/, `${views[at]} does not say emission is withdrawn`);
@@ -280,8 +291,8 @@ test('both views say whether each loop is being monitored', async () => {
 // photograph, in high contrast, or out loud.
 test('neither view carries the subscription in anything but words', async () => {
 	const every = (subscribed) => inReach.map((reachable) => ({ ...reachable, subscribed }));
-	const monitored = await eachView({ ...carrying, loops: every(true) });
-	const not = await eachView({ ...carrying, loops: every(false) });
+	const monitored = await eachView(inAView({}, every(true)));
+	const not = await eachView(inAView({}, every(false)));
 	// The markup with every attribute value taken out: what is left is what a person reads.
 	const words = (body) => body.replaceAll(/="[^"]*"/g, '');
 
@@ -381,7 +392,7 @@ test('both views name a blind arm in words', async () => {
 // may not misrepresent what a person can do (ADR-0016).
 test('neither view offers an arm on a loop this role may only monitor', async () => {
 	const monitorOnly = [{ ...inReach[2] }];
-	const [board, ledger] = await eachView({ ...carrying, loops: monitorOnly, armed: [] });
+	const [board, ledger] = await eachView(inAView({ armedOn: [] }, monitorOnly));
 
 	assert.doesNotMatch(board, />\s*Arm\s*</, 'the board offers an arm on a loop it may not emit on');
 	assert.doesNotMatch(
@@ -424,7 +435,7 @@ test('a loop being spoken on is marked whether or not this console is hearing it
 	const indicator = await rendered('Talking.svelte');
 	const blind = inReach.map((reachable) => ({ ...reachable, subscribed: false }));
 
-	for (const [at, body] of (await eachView({ ...carrying, loops: blind })).entries()) {
+	for (const [at, body] of (await eachView(inAView({}, blind))).entries()) {
 		assert.ok(body.includes(indicator), `${views[at]} shows the mark only where a loop is heard`);
 	}
 });
@@ -441,9 +452,7 @@ test('the transmit bar carries the armed set in words, identically in both views
 
 	assert.match(bar, /Armed on FLIGHT and SIM\./);
 
-	for (const [at, body] of (
-		await eachView({ ...carrying, armedOn: ['FLIGHT', 'SIM'] })
-	).entries()) {
+	for (const [at, body] of (await eachView(inAView({ armedOn: ['FLIGHT', 'SIM'] }))).entries()) {
 		assert.ok(body.includes(bar), `${views[at]} does not carry the armed set as the other does`);
 	}
 });
@@ -528,9 +537,10 @@ test('the console tells Input when keying does not stand', async () => {
 		/keys\.available\(mayKey\)/,
 		'a source can go under a held key without Input hearing about it'
 	);
-	// One derivation, handed to both the views and the seam, so the control the operator sees
-	// and the source Input reads can never disagree about whether it is there.
-	assert.equal(source.match(/\{mayKey\}/g)?.length, 2, 'the two views are not handed one answer');
+	// One derivation, and it reaches the bar in the one value both views carry — so the control
+	// the operator sees and the source Input reads can never disagree about whether it is
+	// there, and neither view has a name for it to get wrong.
+	assert.equal(source.match(/\bmayKey,/g)?.length, 1, 'the two views are not handed one answer');
 });
 
 // **Two acts rather than one toggle, and the decision is held above both views**, exactly as
@@ -619,7 +629,7 @@ test('both views offer both ways to talk, and each names its act', async () => {
 // console does: neither has to be read as the other, and the state is never carried by
 // `aria-pressed` alone.
 test('a latched key says so in words in both views', async () => {
-	const latched = await eachView({ ...carrying, latched: true });
+	const latched = await eachView(inAView({ latched: true }));
 	const not = await eachView(carrying);
 
 	for (const [at, body] of latched.entries()) {
@@ -653,7 +663,7 @@ test('latching lights no lamp', async () => {
 // names the source: *the key control went* and *your keyboard went* send an operator to look
 // at two different things.
 test('both views say when a source went while the key was held', async () => {
-	const dropped = await eachView({ ...carrying, dropped: 'the keyboard' });
+	const dropped = await eachView(inAView({ dropped: 'the keyboard' }));
 
 	for (const [at, body] of dropped.entries()) {
 		assert.match(
@@ -715,8 +725,10 @@ test('the console says which keys talk, and what each of them does', async () =>
 
 // A view whose transmit bar stands on a healthy channel, so a test about one rung of the
 // signalling ladder is not also a test about the audio path.
+// The bar on one rung of the signalling ladder, with a healthy audio path underneath — so a
+// test about one rung is not also a test about the other axis.
 const onARung = (connection) => ({
-	...carrying,
+	...theBar,
 	connection,
 	mayKey: connection !== 'disconnected'
 });
@@ -733,7 +745,7 @@ test('both views say where the console stands with the signalling channel', asyn
 	for (const connection of ['unconfirmed', 'disconnected']) {
 		const bar = await rendered('TransmitBar.svelte', onARung(connection));
 
-		for (const [at, body] of (await eachView(onARung(connection))).entries()) {
+		for (const [at, body] of (await eachView(inAView(onARung(connection)))).entries()) {
 			assert.ok(body.includes(bar), `${views[at]} does not carry the ${connection} bar`);
 		}
 	}
@@ -745,7 +757,7 @@ test('both views say where the console stands with the signalling channel', asyn
 test('a lost channel and a lost audio path are not worded alike', async () => {
 	const noChannel = await rendered('TransmitBar.svelte', onARung('disconnected'));
 	const noAudio = await rendered('TransmitBar.svelte', {
-		...carrying,
+		...theBar,
 		mediaPath: 'lost',
 		mayKey: false
 	});
@@ -785,7 +797,7 @@ test('each rung of the signalling ladder says something the others do not', asyn
 // transmitting is the failure the whole rule exists to remove.
 test('both views say when a latch was dropped for the operator', async () => {
 	for (const [at, body] of (
-		await eachView({ ...onARung('unconfirmed'), latchDropped: true })
+		await eachView(inAView({ ...onARung('unconfirmed'), latchDropped: true }))
 	).entries()) {
 		assert.match(
 			asRead(body),
@@ -808,8 +820,16 @@ test('the console withdraws emission at the bottom of either ladder', async () =
 	);
 	assert.match(
 		source,
-		/connection\.state !== DISCONNECTED/,
+		/const aStateChannel = \$derived\(standing !== DISCONNECTED\)/,
 		'a session with no signalling channel was left an emission path'
+	);
+	// **Both ends of the channel, merged pessimistically** — green needs both, red needs one.
+	// A console reading only its own clock goes on offering a key control over a fan-out the
+	// server has already closed, which is the one failure a single reading cannot see.
+	assert.match(
+		source,
+		/worse\(connection\.state, presence\.connection\)/,
+		'the console reads one end of the channel and calls it the answer'
 	);
 });
 
@@ -834,6 +854,39 @@ test('the console says the connection was lost once it is past the threshold', a
 		connection: { state: 'disconnected', since: 13_000, aLatchStands: false }
 	});
 
-	assert.match(asRead(body), /The connection to VoxLoop was lost/);
+	assert.match(asRead(body), /The connection to VoxLoop was lost 13 s ago/);
 	for (const name of namesOf(inReach)) assert.match(body, new RegExp(name));
+});
+
+// **The half of the failure a console cannot see for itself.** Its answers are being lost
+// while VoxLoop's heartbeats still arrive, so its own clock reads `confirmed` — and VoxLoop
+// has reached the disconnect threshold and closed the fan-out. Without the document's reading
+// the console would go on offering a key control over a route that no longer exists, which is
+// ADR-0008's residual arriving as a feature.
+test('the server’s reading withdraws emission even where this tab’s clock is happy', async () => {
+	const body = await rendered('Console.svelte', {
+		presence: { ...theConsole.presence, connection: 'disconnected' },
+		connection: { state: 'confirmed', since: 0, aLatchStands: true }
+	});
+
+	assert.match(asRead(body), /VoxLoop is not hearing this console, so it will not emit/);
+	assert.match(asRead(body), /What is on screen is current/);
+	assert.doesNotMatch(body, />\s*Key\s*</, 'the key control outlived a closed fan-out');
+});
+
+// The two failures want different sentences: *your console is blind* and *your console is
+// unheard* send an operator to look at different things, and only the first of them is a
+// console that has stopped being told anything.
+test('a console that cannot hear VoxLoop and one VoxLoop cannot hear are not worded alike', async () => {
+	const blind = await rendered('Console.svelte', {
+		...theConsole,
+		connection: { state: 'disconnected', since: 13_000, aLatchStands: false }
+	});
+	const unheard = await rendered('Console.svelte', {
+		presence: { ...theConsole.presence, connection: 'disconnected' },
+		connection: { state: 'confirmed', since: 0, aLatchStands: true }
+	});
+
+	assert.match(asRead(blind), /The connection to VoxLoop was lost 13 s ago/);
+	assert.doesNotMatch(asRead(unheard), /was lost/);
 });

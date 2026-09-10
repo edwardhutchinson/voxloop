@@ -564,6 +564,21 @@ struct Presence {
     ///
     /// [ADR-0042]: ../../../docs/adr/0042-the-media-path-has-its-own-ladder.md
     media_path: &'static str,
+    /// Where the **server** has this session standing with the signalling channel
+    /// ([ADR-0018]).
+    ///
+    /// The console keeps its own reading and merges this with it pessimistically, the way the
+    /// media path's two ends already merge — green needs both, red needs one. The two
+    /// measure different silences and can honestly disagree, and the disagreement that
+    /// matters is a console whose answers are lost while the server's heartbeats still
+    /// arrive: the server closes the fan-out and this is the only way that console learns it
+    /// has happened.
+    ///
+    /// **It cannot always arrive, which is why it never replaces the console's own clock.** A
+    /// session that hears nothing is told nothing, by construction.
+    ///
+    /// [ADR-0018]: ../../../docs/adr/0018-no-signalling-channel-means-no-emission-path.md
+    connection: &'static str,
     /// Whether the server has this session down as transmitting.
     ///
     /// **The transmitting lamp, and the whole of it** ([ADR-0008]). The console lights it
@@ -707,14 +722,19 @@ impl Conversation {
             }
         }
 
-        // **The channel has gone, and the server knows it rather than merely failing to hear
-        // it** ([ADR-0018]). Nothing here ends the session — occupancy survives the loss and
-        // is held for the reconnection window (#50) — but the fan-out closes at once, because
-        // a closed socket is a fact and there is nothing to wait out. The routing is handed
-        // down one last time so that it closes now rather than whenever somebody else's
-        // socket next happens to ask.
-        //
-        // [ADR-0018]: ../../../docs/adr/0018-no-signalling-channel-means-no-emission-path.md
+        self.the_channel_went();
+    }
+
+    /// This socket has gone, and the session behind it has lost its channel.
+    ///
+    /// **The server knows it rather than merely failing to hear it** ([ADR-0018]), so there
+    /// is no ladder to wait out. Nothing here ends the session — occupancy survives the loss
+    /// and is held for the reconnection window (#50) — but the fan-out closes at once, and
+    /// the routing is handed down one last time so that it closes now rather than whenever
+    /// somebody else's socket next happens to ask.
+    ///
+    /// [ADR-0018]: ../../../docs/adr/0018-no-signalling-channel-means-no-emission-path.md
+    fn the_channel_went(&self) {
         if let Some(session) = &self.session {
             self.api.state.the_channel_is_gone(session);
             self.hand_down_the_routing();
@@ -1329,6 +1349,7 @@ impl Conversation {
                     name: named.name,
                 },
                 media_path: presence.media_path.as_str(),
+                connection: presence.connection.as_str(),
                 keyed: presence.keyed,
                 loops: presence
                     .loops
@@ -2668,12 +2689,14 @@ mod tests {
         assert_eq!(said["loops"][0]["armed"], false);
         assert_eq!(said["loops"][0]["talking"], false);
         assert_eq!(said["media_path"], "lost");
+        assert_eq!(said["connection"], "confirmed");
         assert_eq!(said["keyed"], false);
         let mut named: Vec<&String> = said.as_object().expect("a document").keys().collect();
         named.sort();
         assert_eq!(
             named,
             [
+                "connection",
                 "keyed",
                 "loops",
                 "media_path",
@@ -4041,6 +4064,28 @@ mod tests {
         );
     }
 
+    /// **The server's own reading rides in the document**, for the half of the failure where
+    /// it can still be heard: a console whose answers are being lost while these heartbeats
+    /// still arrive has nothing of its own to measure, and would go on offering a key control
+    /// over a fan-out that is already closed.
+    #[tokio::test]
+    async fn the_document_carries_the_server_s_reading_of_the_channel() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        let confirmed = said(&mut socket, &assuming(&flight)).await;
+        assert_eq!(the_presence(&confirmed).1.connection, "confirmed");
+        let session = socket.session.clone().expect("a session");
+
+        lobby
+            .api
+            .state
+            .unheard_from_for(&session, Duration::from_secs(12));
+
+        let disconnected = said(&mut socket, HELLO).await;
+        assert_eq!(the_presence(&disconnected).1.connection, "disconnected");
+    }
+
     /// **The channel going takes the fan-out with it, and takes nothing else** (ADR-0018).
     /// The client's half alone would be a courtesy in exactly the situation where the client
     /// may be wedged, so the route closes here — and the session stands, because occupancy
@@ -4068,7 +4113,7 @@ mod tests {
             "there was no route to close"
         );
 
-        the_socket_went(&talker);
+        talker.the_channel_went();
 
         assert_eq!(
             lobby.api.state.connection_of(&talking),
@@ -4083,15 +4128,6 @@ mod tests {
             lobby.api.state.the_role_of(&talking).is_some(),
             "losing the channel ended the session, which is the reconnection window's call"
         );
-    }
-
-    /// What `talk` does on its way out, driven by hand because a test drives `received`
-    /// rather than the loop.
-    fn the_socket_went(socket: &Conversation) {
-        if let Some(session) = &socket.session {
-            socket.api.state.the_channel_is_gone(session);
-            socket.hand_down_the_routing();
-        }
     }
 
     /// Who the media plane was last told hears this talker.

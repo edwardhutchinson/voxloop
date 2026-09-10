@@ -118,14 +118,14 @@ impl Media {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub(crate) struct Ladder {
     /// How often each end says it is still there.
-    #[serde(default = "Ladder::every_two_seconds")]
+    #[serde(default = "Ladder::the_default_heartbeat")]
     heartbeat: u64,
     /// How long a session goes unheard from before its state is no longer confirmed.
     ///
     /// The middle rung is what makes disabling push-to-talk safe rather than fragile: a
     /// single threshold would mean a VPN reroute mutes the Flight Director mid-sentence,
     /// trading a state-honesty problem for a worse availability one.
-    #[serde(default = "Ladder::after_five_seconds")]
+    #[serde(default = "Ladder::the_default_unconfirmed")]
     unconfirmed: u64,
     /// How long a **latched** emission survives once the state is unconfirmed.
     ///
@@ -134,28 +134,32 @@ pub(crate) struct Ladder {
     /// from cutting a genuine latched transmission; past it, the latch dies. It is the client
     /// that runs this one, because it is the end holding the microphone — which is why it is
     /// carried to the console on every heartbeat rather than kept here.
-    #[serde(default = "Ladder::after_two_seconds")]
+    #[serde(default = "Ladder::the_default_latch_grace")]
     latch_dropped: u64,
     /// How long a session goes unheard from before emission is withdrawn at both ends.
-    #[serde(default = "Ladder::after_twelve_seconds")]
+    #[serde(default = "Ladder::the_default_disconnected")]
     disconnected: u64,
 }
 
 impl Ladder {
     /// The numbers v1 §7 fixes, which are what a deployment that says nothing runs on.
-    fn every_two_seconds() -> u64 {
+    ///
+    /// One per setting rather than one per value, even where two of them are the same number:
+    /// serde wants a function per field, and a function named for the number it returns would
+    /// be a name that stops being true the day one of them is tuned.
+    fn the_default_heartbeat() -> u64 {
         2
     }
 
-    fn after_five_seconds() -> u64 {
+    fn the_default_unconfirmed() -> u64 {
         5
     }
 
-    fn after_two_seconds() -> u64 {
+    fn the_default_latch_grace() -> u64 {
         2
     }
 
-    fn after_twelve_seconds() -> u64 {
+    fn the_default_disconnected() -> u64 {
         12
     }
 
@@ -194,11 +198,14 @@ impl Ladder {
     /// Whether these four numbers are a ladder, and one VoxLoop will run on.
     ///
     /// The ceilings are the rule ADR-0018 asks for. The ordering is the same rule arriving
-    /// from the other side: a file where `unconfirmed` is past `disconnected` describes a
-    /// ladder whose middle rung is never reached, so the band that makes withdrawing
-    /// emission safe would silently not exist. Neither is clamped, for the reason the type
-    /// gives.
-    fn checked(self, path: &Path) -> Result<Self, DeploymentError> {
+    /// from the other side: **a rung nothing can reach is a rule that silently does not
+    /// exist**, and neither of the two ways to write one is individually alarming to read.
+    /// `unconfirmed` past `disconnected` takes away the band that makes withdrawing emission
+    /// safe; a latch grace that runs past `disconnected` means a latched emission is never
+    /// dropped for being unshowable and only ever for the general withdrawal, which is the
+    /// rule ADR-0018 wrote this setting for not happening. Nothing is clamped, for the reason
+    /// the type gives.
+    fn check(self, path: &Path) -> Result<(), DeploymentError> {
         for (setting, said, ceiling) in self.ceilings() {
             if said == 0 {
                 return Err(DeploymentError::NotALadder {
@@ -227,17 +234,31 @@ impl Ladder {
             });
         }
 
-        Ok(self)
+        if self.unconfirmed + self.latch_dropped >= self.disconnected {
+            return Err(DeploymentError::NotALadder {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "connection.latch_dropped ({}s) leaves a latch standing {}s past the \
+                     last heartbeat, at or past connection.disconnected ({}s), so a latched \
+                     emission would never be dropped for being unshowable",
+                    self.latch_dropped,
+                    self.unconfirmed + self.latch_dropped,
+                    self.disconnected
+                ),
+            });
+        }
+
+        Ok(())
     }
 }
 
 impl Default for Ladder {
     fn default() -> Self {
         Self {
-            heartbeat: Self::every_two_seconds(),
-            unconfirmed: Self::after_five_seconds(),
-            latch_dropped: Self::after_two_seconds(),
-            disconnected: Self::after_twelve_seconds(),
+            heartbeat: Self::the_default_heartbeat(),
+            unconfirmed: Self::the_default_unconfirmed(),
+            latch_dropped: Self::the_default_latch_grace(),
+            disconnected: Self::the_default_disconnected(),
         }
     }
 }
@@ -319,7 +340,7 @@ impl Deployment {
         // The one section that is refused for what it says rather than for how it is
         // written. Everything else here is a path or an address, where *unreadable* is the
         // whole of what can be wrong with it.
-        deployment.connection.checked(path)?;
+        deployment.connection.check(path)?;
 
         Ok(deployment)
     }
@@ -577,6 +598,27 @@ mod tests {
     fn refuses_a_timer_of_zero() {
         figment::Jail::expect_with(|jail| {
             jail.create_file("voxloop.toml", &with_a_ladder("heartbeat = 0"))?;
+
+            let Err(refusal) = Deployment::load(Path::new("voxloop.toml")) else {
+                panic!("expected a refusal to start");
+            };
+
+            assert!(
+                matches!(refusal, DeploymentError::NotALadder { .. }),
+                "expected a refusal, got {refusal:?}"
+            );
+            Ok(())
+        });
+    }
+
+    /// **A rung nothing can reach is a rule that silently does not exist.** A latch grace
+    /// running past the disconnect threshold means a latched emission is only ever dropped by
+    /// the general withdrawal, and never for the reason ADR-0018 gave the setting — with no
+    /// number in the file individually alarming to read.
+    #[test]
+    fn refuses_a_latch_grace_that_outlives_the_disconnect_threshold() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("voxloop.toml", &with_a_ladder("latch_dropped = 10"))?;
 
             let Err(refusal) = Deployment::load(Path::new("voxloop.toml")) else {
                 panic!("expected a refusal to start");

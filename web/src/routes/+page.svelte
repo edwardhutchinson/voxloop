@@ -12,8 +12,8 @@
 	// because a console that remembered would keep rendering a session the server had ended.
 	import Console from '$lib/Console.svelte';
 	import Lobby from '$lib/Lobby.svelte';
-	import { DISCONNECTED } from '$lib/connection.js';
 	import { theFrame } from '$lib/frame.js';
+	import { DISCONNECTED } from '$lib/session.js';
 
 	const frame = theFrame();
 </script>

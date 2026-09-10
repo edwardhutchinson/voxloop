@@ -32,7 +32,20 @@
 // performs and the one the machine performs sit side by side below without being written the
 // same way.
 
-import { SETTLES_EVERY, theConnection } from './connection.js';
+import {
+	CONFIRMED,
+	DISCONNECTED,
+	SETTLES_EVERY,
+	UNCONFIRMED,
+	theConnection,
+	worse
+} from './connection.js';
+
+// **The ladder's words are the Session module's, and this is the way in to them** — the same
+// rule that makes `$lib/input` the only way into Input (`modules.md`, ADR-0061). The console
+// renders the rungs and merges the server's reading with this tab's, so it needs the
+// vocabulary; what it must not need is the file that runs the clock.
+export { CONFIRMED, DISCONNECTED, UNCONFIRMED, worse };
 
 const HELLO = JSON.stringify({ message: 'hello' });
 
