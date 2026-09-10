@@ -344,17 +344,18 @@ identically** and **never scrolled away**
 ([ADR-0034](docs/adr/0034-the-transmit-bar-is-always-visible-and-the-audience-is-a-count.md)):
 on the board it closes the field along the bottom edge, and in the ledger it rides above the
 rows rather than under a table of unknown length. It is one component so that it is one
-wording. It carries **media path state**, the **armed set in words** and the **key state**;
-the two audience counts arrive with
+wording. It carries **media path state**, the **armed set in words**, the **key
+state** and the two ways to key; the two audience counts arrive with
 [#49](https://github.com/edwardhutchinson/voxloop/issues/49) and the presets with
 [#56](https://github.com/edwardhutchinson/voxloop/issues/56).
 
 **Nothing renders optimistically**
 ([ADR-0016](docs/adr/0016-displayed-state-is-observed-or-asserted.md)). Neither view keeps any
 state of its own: what is on screen came out of the last document and can be nothing else, so
-a toggle will visibly lag a round trip and switching views loses nothing. The console
-remembers exactly one thing, and it is which view is showing — a fact about the reader rather
-than about the world.
+a toggle will visibly lag a round trip and switching views loses nothing. **Nothing about the
+world is held on the page.** What it does hold is four things that are not the world's to say
+— which view is showing, which keys talk, whether the key is latched open, and the source that
+went while it was being held — and a test names them, so a fifth has to be argued for.
 
 **The console renders no motion**, and the one exception is a file the check names. Motion is
 permitted in exactly one place, the talking indicator
@@ -514,12 +515,33 @@ liveness is what expresses *the headset was unplugged while you were holding it*
 of the source rather than of anything it could have sent. **A source that dies while keyed
 forces an unkey**, because it leaves the OR rather than being remembered in it.
 
-v1 ships one source, the **on-screen key control**. The keyboard bindings and the two emission
-modes are [#42](https://github.com/edwardhutchinson/voxloop/issues/42) and live **above** the
-seam — a source that decided its own mode could latch by accident. `$lib/input` is the way in
-and `web/eslint.input-seam.js` fails the build for anything that reaches past it, which is
-what makes ADR-0020's promise — the Tauri wrapper may only ever *add a source* — a check rather
-than a paragraph.
+Two sources ship: the **on-screen key control**, live while its control is on screen, and the
+**keyboard**, live while there is a window to listen on and a role to key under. A keystroke
+footswitch is a keyboard and needed no code — it is the only PTT peripheral v1 supports, and
+VoxLoop ships none. `$lib/input` is the way in and `web/eslint.input-seam.js` fails the build
+for anything that reaches past it, which is what makes ADR-0020's promise — the Tauri wrapper
+may only ever *add a source* — a check rather than a paragraph.
+
+**Two modes and no third**: momentary (held) and latched (press to open, press to close). They
+live in `web/src/lib/modes.js`, **above** the seam and above the names — Input is handed a
+binding per name and reports under the same names, so nothing under `input/` has a word for
+what any of them means, and `npm test` fails if that stops being true. **Latch has its own
+binding and is read off the rising edge alone**
+([ADR-0022](docs/adr/0022-latch-is-never-derived-from-a-momentary-press.md)) — no tap, no
+double tap, no held duration, because a button that stopped reporting its release is
+indistinguishable from a deliberate tap, and deriving latch from one would make an open mic
+the failure mode of a hardware fault. **A single-button device is therefore momentary only.**
+
+The defaults are `` ` `` and `` Shift+` ``, changed from the console and refused in three
+places: Space activates focused controls, `CapsLock` does not reliably report being released,
+and a key another mode already holds would be one press meaning two things. **PTT keys are
+inert while focus is in a text field or on an interactive control**, so the key controls on
+the transmit bar do not take focus when they are pressed. Autorepeat may not raise a level
+that is low and a window losing focus drops what it was holding, which is
+[v1 §7](docs/spec/v1.md#7-reconnection)'s stale-high rule arriving from the two cases in a
+browser that produce it. A binding lasts as long as the console until
+[#55](https://github.com/edwardhutchinson/voxloop/issues/55) persists it, and the third
+binding — priority — is [#45](https://github.com/edwardhutchinson/voxloop/issues/45).
 
 ## The admin console
 

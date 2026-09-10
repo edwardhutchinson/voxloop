@@ -35,7 +35,21 @@
 	import TransmitBar from './TransmitBar.svelte';
 	import { carries } from './rungs.js';
 
-	let { loops, mediaPath, armedOn, keyed, mayKey, onToggle, onArm, onKeyDown, onKeyUp } = $props();
+	let {
+		loops,
+		mediaPath,
+		armedOn,
+		keyed,
+		mayKey,
+		latched,
+		dropped,
+		onToggle,
+		onArm,
+		onKeyDown,
+		onKeyUp,
+		onLatchDown,
+		onLatchUp
+	} = $props();
 
 	// Which loops carry an arm control at all. **Reach is the grid and only the grid**: a role
 	// that may hear a loop and not speak on it gets no control, rather than one that is
@@ -84,7 +98,18 @@
      the cards are scanned rather than read, and the bar is the one thing on the page that is
      not a loop. The page's own `--space-page-bottom` is what keeps the last row clear of it. -->
 <div class="transmit">
-	<TransmitBar {mediaPath} {armedOn} {keyed} {mayKey} onDown={onKeyDown} onUp={onKeyUp} />
+	<TransmitBar
+		{mediaPath}
+		{armedOn}
+		{keyed}
+		{mayKey}
+		{latched}
+		{dropped}
+		onDown={onKeyDown}
+		onUp={onKeyUp}
+		{onLatchDown}
+		{onLatchUp}
+	/>
 </div>
 
 <style>

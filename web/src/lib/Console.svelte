@@ -18,19 +18,21 @@
 	// role is taken up. Audio genuinely stops in between, and offering a control that hid
 	// that would be the class of lie this product exists to avoid.
 	//
-	// **Input is a seam and this is the only thing above it** (ADR-0021, ADR-0061). The console
-	// registers the sources and reads one answer — *does anything live want to emit* — and it
-	// never asks a source anything. That is what lets the Tauri wrapper add a native hotkey
-	// and change nothing here (ADR-0020), and it is why `$lib/input` is imported rather than
-	// anything underneath it.
+	// **Input is a seam and everything here goes through its interface** (ADR-0021, ADR-0061).
+	// This page reads one answer — *is this session keying* — and never asks a source anything;
+	// which key was pressed, and whether holding it or pressing it once is what talks, are
+	// `modes.js`'s and the seam's. The only other thing that reaches Input at all is the list
+	// of keys below, which asks it what a binding is called and what may be bound. That is
+	// what lets the Tauri wrapper add a native hotkey and change nothing here (ADR-0020).
 	//
 	// **Nothing here lights the transmitting lamp.** Intent goes down: the local track is
 	// keyed and the server is told, in that order, because that order is what buys
 	// key-to-first-audio under 100 ms (ADR-0008). The lamp comes back up in the presence
 	// document, like every other state on this page.
-	import { keying } from '$lib/input';
+	import Bindings from './Bindings.svelte';
 	import Board from './Board.svelte';
 	import Ledger from './Ledger.svelte';
+	import { keyingModes, LATCHED, modes, MOMENTARY } from './modes.js';
 
 	let {
 		presence,
@@ -44,10 +46,36 @@
 		onKeying
 	} = $props();
 
-	// One Input for the life of this console. The on-screen key control is its only source in
-	// v1 and #42 puts the keyboard bindings beside it; **the console ORs nothing itself** —
-	// that is the seam's job, and reaching in to do it here is the thing the lint rule refuses.
-	const input = keying({ onIntent: (wants) => onKeying(wants) });
+	// **Whether the key is latched open, and the source that went while it was held.** Both are
+	// facts about the input on this desk rather than state the server has committed to
+	// (ADR-0016) — knowable here, and true the moment they are said. Nothing about the *world*
+	// is held on this page: that all arrives in the presence document, and the bar renders
+	// these two as the local assertions they are rather than beside the lamp.
+	let latched = $state(false);
+	let dropped = $state(null);
+
+	// One reading of the modes for the life of this console. **The console ORs nothing and
+	// times nothing** — the OR is the seam's and the modes are `modes.js`'s, and doing either
+	// here is how a latch ends up derived from a press (ADR-0022).
+	const keys = keyingModes({
+		onKeying: (wants) => {
+			// A key going down is the answer to whatever the last one dropped, so the notice
+			// goes when the operator keys again rather than sitting under a live transmission.
+			if (wants) dropped = null;
+			onKeying(wants);
+		},
+		onLatched: (is) => (latched = is),
+		onDropped: (source) => (dropped = source)
+	});
+
+	// The listeners go when this page does. A role given up is not a role anybody can key, and
+	// a keyboard binding that outlived the console would be exactly the source ADR-0022 says
+	// must be inert outside an assumed role.
+	$effect(() => () => keys.stop());
+
+	// The keys as they stand, mirrored so that changing one redraws the list. #55 is what makes
+	// a change outlive the console; until then this is the whole of where one lives.
+	let bound = $state(keys.bound());
 
 	// The board is what a control room reads at a glance, so it is what a console opens on.
 	// Which view somebody lands in becomes theirs — personalisation per (user, role), from a
@@ -79,15 +107,23 @@
 		presence.media_path === 'connected' || presence.media_path === 'impaired'
 	);
 
-	// **The control going is the source dying, and a source that dies while keyed forces an
-	// unkey** (ADR-0021). This is the case that makes liveness load-bearing rather than
-	// reserved: a key control that vanished under a held pointer delivers no release, so
-	// without this the level would stay high, the microphone would stay open, and the server
-	// would go on telling everybody a session with no audio path was transmitting. Publishing
-	// presence drops the source out of the OR, which unkeys through the same path a release
-	// does.
+	// **Every source dies together, because they die of the same thing** (ADR-0021). A source
+	// that dies while keyed forces an unkey: a key control that vanished under a held pointer
+	// delivers no release, and a keyboard binding that went inert under a held key delivers no
+	// release either, so without this the level would stay high, the microphone would stay
+	// open, and the server would go on telling everybody a session with no audio path was
+	// transmitting. It also drops a latch, because key state never returns across a withdrawal
+	// (v1 §7).
+	//
+	// **The microphone's liveness is not this** and the two are never folded into one
+	// (ADR-0021). A microphone that is unplugged is Audio's to notice, and it arrives here as
+	// the media path; whether a key is being held is Input's, and it arrives as `dropped`. The
+	// bar says both, in that order, because *there is no audio path* and *your hand is still
+	// down* are two facts with two fixes — and a headset with an inline button produces both
+	// at once, which is the case one signal could not report. The rest of the emission
+	// predicate, and what else can withdraw it, is #43's.
 	$effect(() => {
-		input.onScreen.present(mayKey);
+		keys.available(mayKey);
 	});
 
 	// **Clicking a loop toggles monitoring**, and the toggle is decided here rather than in
@@ -163,11 +199,15 @@
 			mediaPath={presence.media_path}
 			{armedOn}
 			{mayKey}
+			{latched}
+			{dropped}
 			keyed={presence.keyed}
 			onToggle={toggle}
 			onArm={arming}
-			onKeyDown={input.onScreen.down}
-			onKeyUp={input.onScreen.up}
+			onKeyDown={keys.onScreen[MOMENTARY].down}
+			onKeyUp={keys.onScreen[MOMENTARY].up}
+			onLatchDown={keys.onScreen[LATCHED].down}
+			onLatchUp={keys.onScreen[LATCHED].up}
 		/>
 	{:else}
 		<Ledger
@@ -175,13 +215,32 @@
 			mediaPath={presence.media_path}
 			{armedOn}
 			{mayKey}
+			{latched}
+			{dropped}
 			keyed={presence.keyed}
 			onToggle={toggle}
 			onArm={arming}
-			onKeyDown={input.onScreen.down}
-			onKeyUp={input.onScreen.up}
+			onKeyDown={keys.onScreen[MOMENTARY].down}
+			onKeyUp={keys.onScreen[MOMENTARY].up}
+			onLatchDown={keys.onScreen[LATCHED].down}
+			onLatchUp={keys.onScreen[LATCHED].up}
 		/>
 	{/if}
+
+	<!-- Under the loops rather than among them: the keys are a setting, and a setting beside
+	     the thing it is about would be one more thing on a page an operator reads at a glance.
+	     What is on it is above; this is where somebody goes to change how they get there. -->
+	<div class="keys">
+		<Bindings
+			{modes}
+			{bound}
+			onRebind={(named, binding) => {
+				const no = keys.rebind(named, binding);
+				if (!no) bound = keys.bound();
+				return no;
+			}}
+		/>
+	</div>
 
 	<p class="relinquish">
 		<button class="destructive" onclick={onRelinquish}>Relinquish {presence.role.name}</button>
@@ -202,6 +261,16 @@
 	   itself, and `aria-pressed` is what says it to a screen reader. */
 	.views button[aria-pressed='true'] {
 		border-color: var(--ink);
+	}
+
+	/* Set off from the loops by a rule and the largest gap on the page, because it is the one
+	   thing here that is not the shift: everything above it changes minute to minute, and this
+	   is a setting somebody visits once. The gap is what stops it being read as another state
+	   of the console. */
+	.keys {
+		margin: var(--space-6) 0 0;
+		padding-top: var(--space-4);
+		border-top: 1px solid var(--rule);
 	}
 
 	/* Below the loops rather than beside the heading. Relinquishing is a full stop and the

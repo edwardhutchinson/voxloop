@@ -224,13 +224,20 @@ test('nothing that renders the presence document keeps state of its own', async 
 	}
 });
 
-test('the operating console remembers which view is on screen, and nothing else', async () => {
+// The console itself keeps three things, and each is named here so that a fourth has to be
+// argued for in a diff a reviewer reads. Which view is showing is a fact about the reader;
+// the latch and the source that went while it was held are facts about the input on this
+// desk, knowable here and true the moment they are said (ADR-0016, ADR-0021). Nothing about
+// the world is among them — that all arrives in the presence document.
+test('the operating console keeps only what is not the server’s to say', async () => {
 	const source = read(join(lib, 'Console.svelte'));
 
-	assert.equal(
-		source.match(/\$state\(/g)?.length,
-		1,
-		'the console keeps state beyond which view is showing — every other fact is the server’s'
+	const kept = [...source.matchAll(/let (\w+) = \$state\(/g)].map(([, named]) => named);
+
+	assert.deepEqual(
+		kept.toSorted(),
+		['bound', 'dropped', 'latched', 'showing'],
+		'the console keeps a state of its own — every fact about the world is the server’s'
 	);
 });
 
@@ -493,13 +500,13 @@ test('a lost audio path leaves no key control to press', async () => {
 // console tells Input whether the control is on screen, from the same answer the bar draws it
 // from. Without it a path that dropped under a held pointer would deliver no release, and the
 // key would hang — the open mic the level was chosen to prevent.
-test('the console tells Input when the key control is not on screen', async () => {
+test('the console tells Input when keying does not stand', async () => {
 	const source = read(join(lib, 'Console.svelte'));
 
 	assert.match(
 		source,
-		/input\.onScreen\.present\(mayKey\)/,
-		'the key control can vanish under a held pointer without Input hearing about it'
+		/keys\.available\(mayKey\)/,
+		'a source can go under a held key without Input hearing about it'
 	);
 	// One derivation, handed to both the views and the seam, so the control the operator sees
 	// and the source Input reads can never disagree about whether it is there.
@@ -535,17 +542,33 @@ test('neither view decides whether a press is an arm or a disarm', async () => {
 // refuses — and a view that ORs its own sources would be mode logic below the line.
 test('the views know nothing about where a key press comes from', async () => {
 	for (const view of views) {
+		const source = read(join(lib, view));
+
 		assert.doesNotMatch(
-			read(join(lib, view)),
+			source,
 			/\$lib\/input/,
 			`${view} reaches Input itself — the console is the only thing above that seam`
 		);
+		// Nor the modes above it: a view that knew which of the two a button served would be
+		// a view that could decide, and deciding is what makes a latch derived (ADR-0022).
+		assert.doesNotMatch(
+			source,
+			/modes\.js/,
+			`${view} knows which emission mode a control serves — that is settled above it`
+		);
 	}
 
+	// The console reads the modes and the modes read the seam, and there is no other way in
+	// to either (ADR-0061).
 	assert.match(
 		read(join(lib, 'Console.svelte')),
-		/from '\$lib\/input'/,
-		'the console does not go through the Input seam'
+		/from '\.\/modes\.js'/,
+		'the console does not go through the modes'
+	);
+	assert.match(
+		read(join(lib, 'modes.js')),
+		/from '\.\/input\/index\.js'/,
+		'the modes do not go through the Input seam'
 	);
 });
 
@@ -564,4 +587,120 @@ test('the console offers both views and opens on the board', async () => {
 	// The board is the view a control room reads at a glance, and it is what the operator
 	// wanted; which view somebody lands in becomes theirs with #55.
 	assert.ok(body.includes(await rendered('Board.svelte', carrying)));
+});
+
+// ---- The emission modes (#42) --------------------------------------------------------------
+
+// **Two modes and no third** (v1 §4), and two controls because they are two bindings
+// (ADR-0022). Latch is never reached by how the key control was pressed, so the console
+// offers a second control rather than a gesture — and a state that renders in only one view
+// is a bug, so both of them carry it.
+test('both views offer both ways to talk, and each names its act', async () => {
+	for (const [at, body] of (await eachView(carrying)).entries()) {
+		assert.match(body, />\s*Key\s*</, `${views[at]} offers no key control`);
+		assert.match(body, />\s*Latch\s*</, `${views[at]} offers no latch`);
+	}
+});
+
+// The button names the act and the sentence says what is true, the way every control on the
+// console does: neither has to be read as the other, and the state is never carried by
+// `aria-pressed` alone.
+test('a latched key says so in words in both views', async () => {
+	const latched = await eachView({ ...carrying, latched: true });
+	const not = await eachView(carrying);
+
+	for (const [at, body] of latched.entries()) {
+		assert.match(
+			body,
+			/You have latched the key open\./,
+			`${views[at]} does not say it is latched`
+		);
+		assert.match(body, />\s*Unlatch\s*</, `${views[at]} offers no way out of a latch`);
+		assert.doesNotMatch(not[at], /You have latched the key open\./);
+	}
+});
+
+// **The latch is the console's own state and the lamp is the server's** (ADR-0008, ADR-0016).
+// Latching lights nothing: the lamp is `keyed` out of the presence document, and a bar that
+// pre-lit it from a local press would be exactly the optimistic rendering the standing
+// requirement bans.
+test('latching lights no lamp', async () => {
+	const body = await rendered('TransmitBar.svelte', {
+		mediaPath: 'connected',
+		mayKey: true,
+		armedOn: ['FLIGHT'],
+		latched: true,
+		keyed: false
+	});
+
+	assert.match(body, />\s*Not keyed\s*</, 'the lamp lit itself off a local latch');
+});
+
+// **A source that dies while keyed forces an unkey and says so locally** (ADR-0021), and it
+// names the source: *the key control went* and *your keyboard went* send an operator to look
+// at two different things.
+test('both views say when a source went while the key was held', async () => {
+	const dropped = await eachView({ ...carrying, dropped: 'the keyboard' });
+
+	for (const [at, body] of dropped.entries()) {
+		assert.match(
+			body,
+			/still holding the keyboard/,
+			`${views[at]} says nothing about a key that dropped under its own operator`
+		);
+	}
+});
+
+// The case that produces it is the audio path going under a held key, which takes the key
+// control away with it (ADR-0042). A notice drawn beside that control would be a notice
+// nobody in that case ever reads.
+test('a dropped key is said where there is no longer a key control', async () => {
+	const body = await rendered('TransmitBar.svelte', {
+		mediaPath: 'lost',
+		mayKey: false,
+		armedOn: ['FLIGHT'],
+		dropped: 'the key control'
+	});
+
+	assert.match(body, /still holding the key control/);
+	assert.match(body, /will not emit/, 'the withdrawal it explains went unsaid');
+});
+
+// **The console must not place a focusable control where an operator's hands rest** (v1 §4).
+// A key pressed with focus on a control is refused (ADR-0022), so a key control that took
+// focus when it was clicked would leave the operator's keyboard binding dead until they
+// clicked elsewhere — on the two controls where that matters most, and with nothing on screen
+// to explain it.
+test('the keying controls do not take focus when they are pressed', async () => {
+	const source = read(join(lib, 'TransmitBar.svelte'));
+
+	const pressed = [...source.matchAll(/onpointerdown=\{(\w+)\}/g)].map(([, named]) => named);
+	assert.equal(pressed.length, 2, 'the bar has grown a keying control this does not know about');
+
+	for (const named of pressed) {
+		assert.match(
+			source,
+			new RegExp(`const ${named} = \\(event\\) => \\{\\s*event\\.preventDefault\\(\\);`),
+			`${named} lets focus land on the control an operator's hand rests on`
+		);
+	}
+});
+
+// **Bindings are the user's** (ADR-0021) — a keybinding is not reach — and the defaults are
+// ADR-0022's: `` ` `` for the key you hold, `` Shift+` `` for the latch. Space and `CapsLock`
+// are refused, and the refusal is the seam's rather than this page's.
+test('the console says which keys talk, and what each of them does', async () => {
+	const body = await rendered('Console.svelte', {
+		presence: {
+			session: 'a-session',
+			role: { id: 'r-1', name: 'Flight Director' },
+			media_path: 'connected',
+			loops: inReach
+		}
+	});
+
+	assert.match(body, /Momentary/);
+	assert.match(body, /Latched/);
+	assert.match(body, /Shift \+ `/, 'the latch key is not on the page');
+	assert.match(body, /Change/, 'the keys are shown and cannot be changed');
 });

@@ -1,4 +1,5 @@
-// The on-screen key control: the first source, and the only one until #42.
+// The on-screen key control: a button on the transmit bar, and the source an operator keys
+// with when their hand is on the mouse rather than the keyboard.
 //
 // It is here rather than in the component that draws it because **the seam is the thing
 // being built** (ADR-0021), and a source that lived in a component would be a source the
@@ -15,7 +16,9 @@
 // case that can produce one.
 //
 // **It does not know which emission mode it serves** and there is nothing here that could
-// find out. Momentary and latch are #42's, above the seam; this reports intent.
+// find out. It is registered once per binding, so the same file is the button an operator
+// holds and the button they press once — and which of those two a press means is settled
+// above the seam, where the modes are (ADR-0022).
 //
 // [ADR-0021]: ../../../../docs/adr/0021-ptt-input-is-a-level-with-liveness.md
 
@@ -48,14 +51,19 @@ export function onScreen(input) {
 		/**
 		 * Whether the control is on screen at all.
 		 *
-		 * Going away **drops whatever was held**, rather than leaving it to be picked up if
-		 * the control comes back: a key an operator's hand has left is one that must not
-		 * return on its own, which is the whole class of surprise this seam exists to
-		 * prevent.
+		 * Going away **publishes what was held**: not being live is what takes the source out
+		 * of the OR, so the level stays truthful on the way out and the seam can see that
+		 * this was a source dying with the key held rather than a release (ADR-0021).
+		 *
+		 * Coming back **drops it**, rather than leaving it to be picked up: a key an
+		 * operator's hand has left is one that must not return on its own, which is the whole
+		 * class of surprise this seam exists to prevent. There is no release coming for it
+		 * either — the control that was pressed is gone, and a pointer let go over the space
+		 * it left reaches nothing.
 		 */
 		present: (is) => {
 			present = is;
-			if (!is) held = false;
+			if (is) held = false;
 			say();
 		}
 	};
