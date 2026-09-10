@@ -12,6 +12,7 @@
 	// because a console that remembered would keep rendering a session the server had ended.
 	import Console from '$lib/Console.svelte';
 	import Lobby from '$lib/Lobby.svelte';
+	import { DISCONNECTED } from '$lib/connection.js';
 	import { theFrame } from '$lib/frame.js';
 
 	const frame = theFrame();
@@ -20,7 +21,7 @@
 {#if frame.presence}
 	<Console
 		presence={frame.presence}
-		lost={frame.lost}
+		connection={frame.connection}
 		refused={frame.refused}
 		onRelinquish={frame.relinquish}
 		onSubscribe={frame.subscribe}
@@ -30,9 +31,12 @@
 		onKeying={frame.keying}
 	/>
 {:else}
+	<!-- The lobby marks a channel that has gone and does not otherwise read the ladder: there
+	     is no audio to withdraw here and nothing an operator is acting on, so the rung that
+	     matters is the bottom one. -->
 	<Lobby
 		lobby={frame.lobby}
-		lost={frame.lost}
+		lost={frame.connection.state === DISCONNECTED}
 		refused={frame.refused}
 		relinquished={frame.relinquished}
 		onAssume={frame.assume}

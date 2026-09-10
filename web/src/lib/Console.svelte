@@ -32,11 +32,15 @@
 	import Bindings from './Bindings.svelte';
 	import Board from './Board.svelte';
 	import Ledger from './Ledger.svelte';
+	import { DISCONNECTED, UNCONFIRMED } from './connection.js';
 	import { keyingModes, LATCHED, modes, MOMENTARY } from './modes.js';
 
+	// `connection` is where this tab stands with the signalling channel, measured here rather
+	// than pushed (ADR-0018) — the one state on this page the server did not say, because the
+	// one thing a server cannot do to a console it has lost is tell it that it has been lost.
 	let {
 		presence,
-		lost,
+		connection,
 		refused,
 		onRelinquish,
 		onSubscribe,
@@ -53,6 +57,12 @@
 	// these two as the local assertions they are rather than beside the lamp.
 	let latched = $state(false);
 	let dropped = $state(null);
+	// **The one user-facing message in the product that does not originate at the server**
+	// (ADR-0018). A latch taken down by the network is the single case where VoxLoop cuts
+	// audio it cannot announce, so the announcement that *can* still be made is made: this
+	// console tells its own operator. An operator who believes they are still transmitting is
+	// the failure the rule was written to remove, arriving through the other door.
+	let latchDropped = $state(false);
 
 	// One reading of the modes for the life of this console. **The console ORs nothing and
 	// times nothing** — the OR is the seam's and the modes are `modes.js`'s, and doing either
@@ -61,11 +71,15 @@
 		onKeying: (wants) => {
 			// A key going down is the answer to whatever the last one dropped, so the notice
 			// goes when the operator keys again rather than sitting under a live transmission.
-			if (wants) dropped = null;
+			if (wants) {
+				dropped = null;
+				latchDropped = false;
+			}
 			onKeying(wants);
 		},
 		onLatched: (is) => (latched = is),
-		onDropped: (source) => (dropped = source)
+		onDropped: (source) => (dropped = source),
+		onLatchDropped: () => (latchDropped = true)
 	});
 
 	// The listeners go when this page does. A role given up is not a role anybody can key, and
@@ -98,14 +112,34 @@
 
 	// **Whether emission stands at all**, decided once here rather than in the bar, because
 	// two things read it: the bar, which draws the key control, and Input, which is told
-	// whether that control is on screen. `impaired` is a transient fault that routinely clears
-	// itself and emission stands through it; `lost` is where emission is withdrawn
-	// (ADR-0042). Anything the console has no reading of is read as `lost`, which is the safe
-	// direction — a console that cannot tell what the audio path is doing has no business
-	// offering a key control over it. The rest of the emission predicate is #43's.
-	const mayKey = $derived(
+	// whether that control is on screen.
+	//
+	// **Two independent withdrawal conditions, and both of them are here** (ADR-0018,
+	// ADR-0042). The audio path answers *can anybody hear me*: `impaired` is a transient fault
+	// that routinely clears itself and emission stands through it, and `lost` is where it is
+	// withdrawn. The state channel answers *can anybody be told what I am doing*: at
+	// `disconnected` no listener's console would show this session talking, no loop would
+	// attribute it and no authority holder could cut it — the audio would arrive and the
+	// accountability would not.
+	//
+	// They are kept as two answers rather than folded into one because the bar has to say
+	// **which** applies: they are different problems with different fixes, and one wording for
+	// both sends an operator to look at the wrong thing.
+	//
+	// Anything the console has no reading of is read as withdrawn, which is the safe direction
+	// — a console that cannot tell what its own paths are doing has no business offering a key
+	// control over them.
+	const anAudioPath = $derived(
 		presence.media_path === 'connected' || presence.media_path === 'impaired'
 	);
+	const aStateChannel = $derived(connection.state !== DISCONNECTED);
+	const mayKey = $derived(anAudioPath && aStateChannel);
+
+	// How long ago VoxLoop was last confirmed, in whole seconds. **The running age is what
+	// stops a frozen console being mistaken for a live one** (ADR-0018): last-known state is
+	// not blanked, because an empty page reads as *nothing is happening* when everything may
+	// be — so what makes it honest is the number beside it moving.
+	const staleFor = $derived(Math.floor(connection.since / 1000));
 
 	// **Every source dies together, because they die of the same thing** (ADR-0021). A source
 	// that dies while keyed forces an unkey: a key control that vanished under a held pointer
@@ -120,10 +154,20 @@
 	// the media path; whether a key is being held is Input's, and it arrives as `dropped`. The
 	// bar says both, in that order, because *there is no audio path* and *your hand is still
 	// down* are two facts with two fixes — and a headset with an inline button produces both
-	// at once, which is the case one signal could not report. The rest of the emission
-	// predicate, and what else can withdraw it, is #43's.
+	// at once, which is the case one signal could not report.
 	$effect(() => {
 		keys.available(mayKey);
+	});
+
+	// **A latched emission is dropped after a couple of seconds of `unconfirmed`, while a
+	// momentary key survives** (ADR-0018). The asymmetry is the whole rule: a held button is a
+	// human continuously asserting intent, and a latch is an assertion made once, possibly
+	// minutes ago, whose entire safety story is that this console will show it to you. That
+	// story is void the moment this console cannot be trusted, so the latch dies well before
+	// emission itself is withdrawn — and the operator is told, locally, because there is
+	// nobody left to tell them.
+	$effect(() => {
+		if (!connection.aLatchStands) keys.theLatchCannotBeShown();
 	});
 
 	// **Clicking a loop toggles monitoring**, and the toggle is decided here rather than in
@@ -167,7 +211,20 @@
 		</p>
 	</header>
 
-	{#if lost}
+	<!-- **The console's own state, marked stale rather than blanked** (ADR-0018). Blanking
+	     was rejected as its own lie: an empty console implies *nothing is happening*, when in
+	     fact everything may be happening and this tab simply cannot see it. Blocking the page
+	     was rejected too, because it disarms an operator at the exact moment things are going
+	     wrong. So the loops stay where they are, under a sentence saying how old they are.
+
+	     What each rung costs the *transmit bar* is said there, beside the key control, because
+	     that is the half an operator acts on and it is the strip both views carry. -->
+	{#if connection.state === UNCONFIRMED}
+		<p class="lost" role="status">
+			VoxLoop was last confirmed {staleFor} s ago. This is what it last said, and it is not being kept
+			up to date.
+		</p>
+	{:else if connection.state === DISCONNECTED}
 		<p class="lost" role="alert">
 			The connection to VoxLoop was lost. This is what it last said, and it is not being kept up to
 			date.
@@ -197,10 +254,12 @@
 		<Board
 			loops={inOrder}
 			mediaPath={presence.media_path}
+			connection={connection.state}
 			{armedOn}
 			{mayKey}
 			{latched}
 			{dropped}
+			{latchDropped}
 			keyed={presence.keyed}
 			onToggle={toggle}
 			onArm={arming}
@@ -213,10 +272,12 @@
 		<Ledger
 			loops={inOrder}
 			mediaPath={presence.media_path}
+			connection={connection.state}
 			{armedOn}
 			{mayKey}
 			{latched}
 			{dropped}
+			{latchDropped}
 			keyed={presence.keyed}
 			onToggle={toggle}
 			onArm={arming}

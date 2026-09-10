@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use super::{Api, answers, unmet};
 use crate::authorisation::{self, Caller, Outcome, Presented, Requirement};
 use crate::configuration::{
-    AuditEntry, AuditEvent, AuditLog, Eligibilities, Grid, LoopId, Occupancy, Permission,
+    AuditEntry, AuditEvent, AuditLog, Eligibilities, Grid, Ladder, LoopId, Occupancy, Permission,
     Personalisation, Role, RoleId, Roles, SignInToken, SignIns, StoreError, Transaction, UserId,
     Users,
 };
@@ -149,6 +149,22 @@ struct Conversation {
 #[derive(Deserialize)]
 #[serde(tag = "message", rename_all = "kebab-case")]
 enum Incoming {
+    /// The client answering a heartbeat: it is still there, and the channel still carries.
+    ///
+    /// `SignedIn` rather than `Session`, because it is a fact about the **socket** and every
+    /// socket has one tier or the other. What it moves is a session's connection state where
+    /// there is a session, and nothing at all where there is not — a lobby has nothing to
+    /// withdraw.
+    ///
+    /// It answers the server's heartbeat rather than arriving on its own clock, so a client
+    /// that has stopped reading its socket stops answering by construction. The two ends
+    /// then measure the same gap from opposite sides, which is what lets the client withdraw
+    /// its own push-to-talk at the moment the server closes its fan-out.
+    ///
+    /// The WebSocket's own ping and pong would have been the obvious carriage and are not
+    /// available: a browser cannot send a ping or observe a pong from script, so the one end
+    /// that has to run this clock could not see it.
+    Heartbeat,
     /// The client saying it has arrived and is ready to render.
     ///
     /// The server answers with whatever document this socket's tier calls for rather than
@@ -279,7 +295,7 @@ impl Incoming {
     /// [ADR-0054]: ../../../docs/adr/0054-every-operation-declares-its-authorisation.md
     fn requirement(&self) -> Requirement {
         match self {
-            Self::Hello | Self::Assume { .. } => Requirement::SignedIn,
+            Self::Heartbeat | Self::Hello | Self::Assume { .. } => Requirement::SignedIn,
             Self::Relinquish
             | Self::MediaPath { .. }
             // **Keying carries no grid check and that is the design** (ADR-0008). What a
@@ -335,7 +351,13 @@ impl Incoming {
             // The machine noticing something about its own transport, and the four messages
             // its media library sends on its own account. A laptop left open on a desk
             // negotiating ICE with itself must not renew its own sign-in.
-            Self::MediaPath { .. }
+            //
+            // **A heartbeat is the least deliberate act in the product** and the one that
+            // would break the window most thoroughly: it arrives every two seconds from a
+            // tab nobody is looking at, so counting it would mean no sign-in ever expired
+            // again.
+            Self::Heartbeat
+            | Self::MediaPath { .. }
             | Self::MediaCanDecode { .. }
             | Self::MediaConnect { .. }
             | Self::MediaSpeaks { .. }
@@ -346,6 +368,7 @@ impl Incoming {
     /// The name for a refusal to say back, so an operator is told which message it was about.
     fn named(&self) -> &'static str {
         match self {
+            Self::Heartbeat => "heartbeat",
             Self::Hello => "hello",
             Self::Assume { .. } => "assume",
             Self::Relinquish => "relinquish",
@@ -368,6 +391,21 @@ impl Incoming {
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(tag = "message", rename_all = "kebab-case")]
 enum Outgoing {
+    /// The server is still there, and this is the clock both ends read the channel by.
+    ///
+    /// It is **not a document** and carries no state: it says one thing, and the client
+    /// answers it with the same word. What each end does with the silence that follows a
+    /// missed one is the ladder ([ADR-0018]).
+    ///
+    /// **It carries the ladder every time.** The four timers are fixed for the life of the
+    /// process, so a client could be told them once — but then the one message the console
+    /// depends on to run its own half of the ladder would have an ordering dependency on a
+    /// message it may have missed, in the one situation where messages go missing. A
+    /// heartbeat that describes its own clock is a heartbeat a console can start from
+    /// whenever it arrives.
+    ///
+    /// [ADR-0018]: ../../../docs/adr/0018-no-signalling-channel-means-no-emission-path.md
+    Heartbeat { ladder: TheLadder },
     /// The lobby, whole. It is rendered atomically and never merged into what is on screen
     /// ([ADR-0019]).
     ///
@@ -419,6 +457,38 @@ enum Outgoing {
     OneMoreTalker { talker: Negotiation },
     /// One fewer. That carriage is closed at this end and the client should let it go.
     OneFewerTalker { carriage: Carried },
+}
+
+/// The four timers of the connection ladder, as the console runs them.
+///
+/// **In milliseconds**, because that is what the console's own clock is in and a conversion
+/// on the way out of one file is cheaper than one on the way in to several. The deployment
+/// file is in seconds, which is what a human reads it in ([`Ladder`]).
+///
+/// Three of the four are the console's own business and the fourth is here so that nothing
+/// has to guess: the client withdraws its push-to-talk at `disconnected_ms` and drops a
+/// latched emission `latch_dropped_ms` after `unconfirmed_ms`, and both of those are the
+/// **client's** half of ADR-0018 — the half that has to run when the server can no longer
+/// say anything at all.
+///
+/// [`Ladder`]: crate::configuration::Ladder
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+struct TheLadder {
+    heartbeat_ms: u64,
+    unconfirmed_ms: u64,
+    latch_dropped_ms: u64,
+    disconnected_ms: u64,
+}
+
+impl TheLadder {
+    fn of(ladder: Ladder) -> Self {
+        Self {
+            heartbeat_ms: ladder.heartbeat().as_millis() as u64,
+            unconfirmed_ms: ladder.unconfirmed().as_millis() as u64,
+            latch_dropped_ms: ladder.latch_dropped().as_millis() as u64,
+            disconnected_ms: ladder.disconnected().as_millis() as u64,
+        }
+    }
 }
 
 /// The lobby, as the console renders it.
@@ -574,6 +644,12 @@ impl Conversation {
         lobby.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut presence = tokio::time::interval(PRESENCE_TICK);
         presence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // **The heartbeat is the deployment's, not this file's** (v1 §7). It is spaced by the
+        // ladder the process was started with, and the first tick lands at once — so a
+        // console knows the clock it is running before it has had time to miss anything.
+        let ladder = self.api.state.ladder();
+        let mut beat = tokio::time::interval(ladder.heartbeat());
+        beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             let said = tokio::select! {
@@ -588,6 +664,9 @@ impl Conversation {
                 },
                 _ = lobby.tick() => self.pushed_lobby().await,
                 _ = presence.tick() => self.pushed_presence().await,
+                // Whichever tier the socket is at. The ladder is about the channel, and a
+                // socket standing in the lobby has one of those like any other.
+                _ = beat.tick() => Ok(vec![Outgoing::Heartbeat { ladder: TheLadder::of(ladder) }]),
                 // The media plane, saying something to this session. It is carried straight
                 // out: this socket is the channel VoxLoop owns for it (ADR-0006) and nothing
                 // here reads a word of what it is carrying.
@@ -627,6 +706,31 @@ impl Conversation {
                 break;
             }
         }
+
+        // **The channel has gone, and the server knows it rather than merely failing to hear
+        // it** ([ADR-0018]). Nothing here ends the session — occupancy survives the loss and
+        // is held for the reconnection window (#50) — but the fan-out closes at once, because
+        // a closed socket is a fact and there is nothing to wait out. The routing is handed
+        // down one last time so that it closes now rather than whenever somebody else's
+        // socket next happens to ask.
+        //
+        // [ADR-0018]: ../../../docs/adr/0018-no-signalling-channel-means-no-emission-path.md
+        if let Some(session) = &self.session {
+            self.api.state.the_channel_is_gone(session);
+            self.hand_down_the_routing();
+        }
+    }
+
+    /// The client answered a heartbeat.
+    ///
+    /// It says nothing back: a heartbeat is answered by the next heartbeat, and a socket that
+    /// replied to every reply would be two clocks talking rather than one.
+    fn the_client_is_there(&self) -> Vec<Outgoing> {
+        if let Some(session) = &self.session {
+            self.api.state.the_client_is_there(session);
+        }
+
+        Vec::new()
     }
 
     /// Answer one message from the client.
@@ -660,6 +764,7 @@ impl Conversation {
         }
 
         match message {
+            Incoming::Heartbeat => Ok(self.the_client_is_there()),
             Incoming::Hello => self.whatever_this_socket_renders().await,
             Incoming::Assume { role } => self.assume(RoleId::presented(role)).await,
             Incoming::Relinquish => self.relinquish().await,
@@ -1549,7 +1654,7 @@ mod tests {
     };
     use crate::identity::Identity;
     use crate::media_plane::{Instructed, Recording, Reports, a_recording_media_plane};
-    use crate::state::StateAuthority;
+    use crate::state::{Connection, StateAuthority};
     use std::sync::Arc;
 
     /// A deployment with one signed-in user, and whatever roles the test asked for.
@@ -3841,5 +3946,178 @@ mod tests {
             .await
             .expect("the clock to be moved back");
         transaction.commit().await.expect("the clock to land");
+    }
+
+    // ---- #43: connection state and the emission predicate --------------------------------
+
+    const HEARTBEAT: &str = r#"{"message":"heartbeat"}"#;
+
+    /// **A heartbeat carries the clock it is part of.** The four timers are fixed for the
+    /// life of the process, so a client could be told them once — but the console runs the
+    /// half of the ladder that has to work when the server can no longer say anything, and a
+    /// message it depends on must not have an ordering dependency on one it may have missed.
+    #[tokio::test]
+    async fn a_heartbeat_carries_the_whole_ladder() {
+        let lobby = ALobby::with(&[]).await;
+        let socket = lobby.a_socket();
+
+        let beat = Outgoing::Heartbeat {
+            ladder: TheLadder::of(socket.api.state.ladder()),
+        };
+
+        assert_eq!(
+            as_json(&beat),
+            serde_json::json!({
+                "message": "heartbeat",
+                "ladder": {
+                    "heartbeat_ms": 2000,
+                    "unconfirmed_ms": 5000,
+                    "latch_dropped_ms": 2000,
+                    "disconnected_ms": 12000,
+                },
+            }),
+            "the console was not handed the clock v1 §7 fixes"
+        );
+    }
+
+    /// It is answered on a lobby socket like any other, and says nothing back: a heartbeat is
+    /// answered by the next heartbeat, and a socket replying to every reply would be two
+    /// clocks talking rather than one.
+    #[tokio::test]
+    async fn a_heartbeat_is_answered_at_either_tier_and_says_nothing_back() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let mut socket = lobby.a_socket();
+
+        assert!(all(&mut socket, HEARTBEAT).await.is_empty());
+
+        let flight = lobby.role_named("Flight Director").await;
+        all(&mut socket, &assuming(&flight)).await;
+
+        assert!(all(&mut socket, HEARTBEAT).await.is_empty());
+    }
+
+    /// **A heartbeat is the least deliberate act in the product** (v1 §2). It arrives every
+    /// two seconds from a tab nobody is looking at, so a sign-in renewed by one would be a
+    /// sign-in that never expired again — which is the whole failure the window exists to
+    /// prevent.
+    #[tokio::test]
+    async fn a_heartbeat_does_not_renew_a_sign_in() {
+        let lobby = ALobby::with(&[]).await;
+        let mut socket = lobby.a_socket();
+        aged(
+            &lobby.api.store,
+            &lobby.sign_in,
+            Duration::from_secs(25 * 60 * 60),
+        )
+        .await;
+
+        all(&mut socket, HEARTBEAT).await;
+
+        assert_eq!(
+            reaped(&lobby.api.store).await,
+            vec![lobby.user.clone()],
+            "a heartbeat kept an abandoned sign-in alive"
+        );
+    }
+
+    /// **A heartbeat moves the ladder back down**, which is the one thing it does.
+    #[tokio::test]
+    async fn a_heartbeat_confirms_the_session_behind_the_socket() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        let session = socket.session.clone().expect("a session");
+        lobby
+            .api
+            .state
+            .unheard_from_for(&session, Duration::from_secs(30));
+
+        all(&mut socket, HEARTBEAT).await;
+
+        assert_eq!(
+            lobby.api.state.connection_of(&session),
+            Some(Connection::Confirmed)
+        );
+    }
+
+    /// **The channel going takes the fan-out with it, and takes nothing else** (ADR-0018).
+    /// The client's half alone would be a courtesy in exactly the situation where the client
+    /// may be wedged, so the route closes here — and the session stands, because occupancy
+    /// survives the loss of the channel and is held for the reconnection window (#50).
+    #[tokio::test]
+    async fn a_socket_going_closes_the_fan_out_and_leaves_the_session_standing() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+
+        let mut talker = lobby.a_socket();
+        all(&mut talker, &assuming(&flight)).await;
+        let talking = talker.session.clone().expect("a session");
+        let mut listener = lobby.somebody_else("capcom", &flight).await;
+        all(&mut listener, &assuming(&flight)).await;
+        all(&mut talker, &arming(&air_to_ground)).await;
+        all(&mut listener, &subscribing(&air_to_ground)).await;
+        a_turn_of_the_loop(&talker);
+        assert_eq!(
+            the_audience_last_handed_down(&lobby, &talking).len(),
+            1,
+            "there was no route to close"
+        );
+
+        the_socket_went(&talker);
+
+        assert_eq!(
+            lobby.api.state.connection_of(&talking),
+            Some(Connection::Disconnected),
+            "a socket that closed was left waiting out a ladder it had no need of"
+        );
+        assert!(
+            the_audience_last_handed_down(&lobby, &talking).is_empty(),
+            "a session nobody could be told about was still routed to its loops"
+        );
+        assert!(
+            lobby.api.state.the_role_of(&talking).is_some(),
+            "losing the channel ended the session, which is the reconnection window's call"
+        );
+    }
+
+    /// What `talk` does on its way out, driven by hand because a test drives `received`
+    /// rather than the loop.
+    fn the_socket_went(socket: &Conversation) {
+        if let Some(session) = &socket.session {
+            socket.api.state.the_channel_is_gone(session);
+            socket.hand_down_the_routing();
+        }
+    }
+
+    /// Who the media plane was last told hears this talker.
+    ///
+    /// The recorder keeps every instruction, and closing a fan-out is an instruction like
+    /// opening one — an audience with nobody in it — so the question is about the last
+    /// answer rather than about all of them.
+    fn the_audience_last_handed_down(lobby: &ALobby, talker: &SessionId) -> Vec<String> {
+        lobby
+            .recording
+            .instructions()
+            .into_iter()
+            .rev()
+            .find_map(|instruction| match instruction {
+                Instructed::TheseShouldHear {
+                    talker: whose,
+                    audience,
+                } if &whose == talker => Some(
+                    audience
+                        .hearing
+                        .into_iter()
+                        .map(|hearing| hearing.listener.as_str().to_owned())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 }

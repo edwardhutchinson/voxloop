@@ -6,7 +6,7 @@
 // facts about the protocol, not about the page.
 
 import assert from 'node:assert/strict';
-import test, { beforeEach } from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 
 import { openSignalling } from '../src/lib/session.js';
 
@@ -73,6 +73,14 @@ beforeEach(() => {
 	ASocket.opened = [];
 	globalThis.WebSocket = ASocket;
 	globalThis.window = { location: { protocol: 'https:', host: 'voxloop.example:8443' } };
+});
+
+afterEach(() => {
+	// The connection ladder runs on a real interval, and a test that opened a socket and
+	// walked away would leave one ticking for the life of the process. Closing the socket is
+	// what a tab does and it is what stops it — so this is the tab being closed rather than a
+	// cleanup this file invented.
+	for (const socket of ASocket.opened) if (!socket.closed) socket.close();
 });
 
 const lastSocket = () => ASocket.opened.at(-1);
@@ -392,3 +400,126 @@ test('anything unreadable on the wire is not read as a document', () => {
 
 	assert.deepEqual(page.told, []);
 });
+
+// ---- #43: the heartbeat and the connection ladder -----------------------------------------
+
+// The ladder is a clock, so these hold the clock. `Date.now` is what the module reads and the
+// interval is what asks it, and both are the test's here — nothing sleeps and nothing waits.
+const theRealNow = Date.now;
+let now = 0;
+
+/** A console on an open channel, with the ladder's clock in this test's hand. */
+function openWatching() {
+	const standing = [];
+	let tick = null;
+
+	now = 0;
+	Date.now = () => now;
+
+	const channel = openSignalling({
+		...listening(),
+		onConnection: (said) => standing.push(said),
+		ticking: (act) => {
+			tick = act;
+
+			return () => {
+				tick = null;
+			};
+		}
+	});
+	const socket = lastSocket();
+	socket.happens('open');
+
+	return {
+		channel,
+		socket,
+		standing,
+		last: () => standing.at(-1),
+		/** Move the clock to `when` and let the console look at its watch. */
+		at: (when) => {
+			now = when;
+			tick?.();
+		},
+		ticking: () => tick !== null
+	};
+}
+
+afterEach(() => {
+	Date.now = theRealNow;
+});
+
+// **Answered rather than merely counted.** Both ends measure the same gap from opposite
+// sides, which is what lets a tab withdraw its own push-to-talk at the moment the server
+// closes its fan-out (ADR-0018).
+test('a heartbeat is answered, so the server measures the same gap from its side', () => {
+	const page = openWatching();
+
+	page.socket.says({ message: 'heartbeat', ladder: THE_LADDER });
+
+	assert.deepEqual(page.socket.sent, ['{"message":"hello"}', '{"message":"heartbeat"}']);
+});
+
+// It is not a document and nothing on the page comes out of it. What the console draws about
+// the channel is where the ladder stands, which is worked out here.
+test('a heartbeat reaches nothing the console renders', () => {
+	const page = listening();
+	openSignalling(page);
+	lastSocket().happens('open');
+
+	lastSocket().says({ message: 'heartbeat', ladder: THE_LADDER });
+
+	assert.deepEqual(page.told, []);
+});
+
+// **The clock is the deployment's** (v1 §7), and it arrives on every heartbeat rather than
+// once — so a console that missed one still runs the site's ladder rather than the spec's.
+test('the console runs the ladder the heartbeat carried', () => {
+	const page = openWatching();
+
+	page.socket.says({
+		message: 'heartbeat',
+		ladder: {
+			heartbeat_ms: 3000,
+			unconfirmed_ms: 8000,
+			latch_dropped_ms: 2000,
+			disconnected_ms: 20_000
+		}
+	});
+	page.at(12_000);
+
+	assert.equal(page.last().state, 'unconfirmed');
+
+	page.at(20_000);
+	assert.equal(page.last().state, 'disconnected');
+});
+
+// **Only a heartbeat confirms the channel**, and not the documents arriving beside it five
+// times a second. Measuring off *anything arrived* would make the ladder a function of how
+// busy the deployment is, so a quiet console would freeze where a busy one would not.
+test('a document arriving does not confirm the channel', () => {
+	const page = openWatching();
+
+	page.at(6000);
+	page.socket.says({ message: 'presence', version: 4, loops: [] });
+	page.at(6500);
+
+	assert.equal(page.last().state, 'unconfirmed');
+});
+
+// **A socket that closed is a fact rather than a silence**, so there is nothing to wait out.
+// The rungs are for the gap nobody reported.
+test('a socket that closed is disconnected at once, and stops the clock', () => {
+	const page = openWatching();
+
+	page.socket.close();
+
+	assert.equal(page.last().state, 'disconnected');
+	assert.equal(page.ticking(), false, 'the ladder went on being read after the socket went');
+});
+
+const THE_LADDER = {
+	heartbeat_ms: 2000,
+	unconfirmed_ms: 5000,
+	latch_dropped_ms: 2000,
+	disconnected_ms: 12_000
+};

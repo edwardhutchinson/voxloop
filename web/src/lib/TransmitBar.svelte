@@ -9,13 +9,21 @@
 	// anything. Placing it is the view's business; wording it is this file's, and there is
 	// nowhere else to write a word of it.
 	//
-	// **Emission has two independent withdrawal conditions**, and the bar has to say *which*
-	// (ADR-0042, v1 §6). A lost signalling channel and a lost audio path are different
-	// problems with different fixes — one is *nobody can be told what you are doing* and the
-	// other is *nobody can hear you* — and one wording for both would send an operator to
-	// look at the wrong thing. What is here today is the audio path. The state channel's
-	// ladder is the console's `lost` banner until ADR-0018's rungs are built, and when they
-	// are, they are said **here**, beside this, in these words.
+	// **Emission has two independent withdrawal conditions, and the bar says which**
+	// (ADR-0018, ADR-0042, v1 §6). A lost signalling channel and a lost audio path are
+	// different problems with different fixes — one is *nobody can be told what you are
+	// doing* and the other is *nobody can hear you* — and one wording for both would send an
+	// operator to look at the wrong thing.
+	//
+	// **Where both apply, the signalling channel is named**, and the other is not stacked
+	// underneath it. It is the one that also blinds this console, so it is the one to fix
+	// first — and the media path drawn beside it is the last thing this console was told,
+	// which is exactly the reading it has no business presenting as current.
+	//
+	// **The middle rungs are said too, and neither of them withdraws anything.** `impaired`
+	// and `unconfirmed` exist for the same reason: a binary reading would cut audio for a
+	// reroute or a blip that heals itself in a second. So they read as what they are — this
+	// is true, and emission still stands.
 	//
 	// **The transmitting lamp is the server's answer and nothing else** (ADR-0008). It is
 	// `keyed` out of the presence document, which is the only thing this component reads it
@@ -39,6 +47,7 @@
 	// #56's.
 
 	import Icon from './Icon.svelte';
+	import { CONFIRMED, DISCONNECTED, UNCONFIRMED } from './connection.js';
 
 	// The media path as the presence document has it: `connected`, `impaired` or `lost`
 	// (ADR-0042). Anything else is read as `lost`, which is the safe direction and the honest
@@ -56,15 +65,23 @@
 	// what a pointer is doing to it, and which of the two modes that serves is settled in
 	// `modes.js`, above the seam.
 	//
-	// `latched` is whether the key is latched open, and `dropped` is the source that went
-	// while it was being held, if one has.
+	// `connection` is where this tab stands with the signalling channel, in the ladder's own
+	// words: `confirmed`, `unconfirmed` or `disconnected` (ADR-0018). It is measured by this
+	// console rather than pushed by the server, because the one thing a server cannot do to a
+	// console it has lost is tell it that it has been lost.
+	//
+	// `latched` is whether the key is latched open, `dropped` is the source that went while it
+	// was being held, if one has, and `latchDropped` is whether a latch was taken down by
+	// something other than the operator.
 	let {
 		mediaPath,
+		connection = CONFIRMED,
 		armedOn = [],
 		keyed = false,
 		mayKey = false,
 		latched = false,
 		dropped = null,
+		latchDropped = false,
 		onDown,
 		onUp,
 		onLatchDown,
@@ -97,17 +114,40 @@
 </script>
 
 <section aria-label="Transmit bar">
-	{#if mediaPath === 'impaired'}
-		<!-- A transient fault, of the kind that routinely clears itself in a second or two.
-		     Emission stands: a binary reading would cut audio for a reroute that heals, which
-		     is exactly what the middle rung exists to prevent (ADR-0042). -->
-		<p class="impaired" role="status">
-			The audio path is faulty. This usually clears itself, and emission still stands.
+	<!-- The rungs, loudest first, and one of them at a time. Which one is on screen is what
+	     tells an operator where to look; two at once would make them choose. -->
+	{#if connection === DISCONNECTED}
+		<!-- **A session with no signalling channel has no emission path** (ADR-0018). Every
+		     talking indicator anyone sees is a server broadcast, so keying here would put
+		     voice into a system where nobody's console shows it, no loop attributes it and no
+		     authority holder can cut it. This console disables the key control and the server
+		     closes the fan-out, independently, because the situation that makes the rule
+		     necessary is the one where this console may itself be wedged. -->
+		<p class="withdrawn" role="status">
+			VoxLoop cannot be reached, so it will not emit: nobody's console would show you talking, and
+			nobody could cut you. This is the connection to VoxLoop rather than the audio, which is a
+			different problem with a different fix.
 		</p>
 	{:else if !mayKey}
 		<p class="withdrawn" role="status">
 			There is no audio path, so VoxLoop will not emit. This is the audio rather than the connection
 			to VoxLoop, which is a different problem with a different fix.
+		</p>
+	{:else if connection === UNCONFIRMED}
+		<!-- *We cannot confirm your transmission right now* is a materially different statement
+		     from *we know you are disconnected*, and it is the honest one here. Emission stands
+		     — cutting somebody off mid-word for a half-second blip is the failure this rung
+		     exists to prevent — but a latch does not, so the sentence says both. -->
+		<p class="impaired" role="status">
+			VoxLoop cannot confirm what you are doing, so a latched key will not be held open. You can
+			still talk by holding the key.
+		</p>
+	{:else if mediaPath === 'impaired'}
+		<!-- A transient fault, of the kind that routinely clears itself in a second or two.
+		     Emission stands: a binary reading would cut audio for a reroute that heals, which
+		     is exactly what the middle rung exists to prevent (ADR-0042). -->
+		<p class="impaired" role="status">
+			The audio path is faulty. This usually clears itself, and emission still stands.
 		</p>
 	{/if}
 
@@ -126,6 +166,24 @@
 		     hand is still down, and nothing it does from there talks until it comes up. -->
 		<p class="dropped" role="status">
 			You were still holding {dropped} when VoxLoop stopped emitting. Let go and press again to talk.
+		</p>
+	{/if}
+
+	{#if latchDropped}
+		<!-- **The one user-facing message in the product that does not originate at the
+		     server** (ADR-0018). A latch is an assertion made once, possibly minutes ago, and
+		     its entire safety story is that this console will show it to you; the moment this
+		     console cannot be trusted, the latch is a hot mic nobody can be told about. So it
+		     is dropped, and this is the announcement that can still be made.
+
+		     It says what it cost and not what caused it: the sentence above is what names the
+		     rung, and this one is true whichever of them took the latch down. An operator who
+		     believes they are still transmitting is the failure the rule exists to remove,
+		     arriving through the other door — so it is an alert rather than a status, and it
+		     stands until they key again. -->
+		<p class="dropped" role="alert">
+			The latched key was dropped, so you are not transmitting. A latch VoxLoop cannot keep showing
+			you is a microphone nobody can be told about.
 		</p>
 	{/if}
 

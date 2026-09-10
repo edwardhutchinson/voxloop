@@ -38,11 +38,13 @@
 	let {
 		loops,
 		mediaPath,
+		connection,
 		armedOn,
 		keyed,
 		mayKey,
 		latched,
 		dropped,
+		latchDropped,
 		onToggle,
 		onArm,
 		onKeyDown,
@@ -100,11 +102,13 @@
 <div class="transmit">
 	<TransmitBar
 		{mediaPath}
+		{connection}
 		{armedOn}
 		{keyed}
 		{mayKey}
 		{latched}
 		{dropped}
+		{latchDropped}
 		onDown={onKeyDown}
 		onUp={onKeyUp}
 		{onLatchDown}

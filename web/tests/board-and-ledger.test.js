@@ -69,9 +69,27 @@ const eachView = (props) => Promise.all(views.map((view) => rendered(view, props
 const carrying = {
 	loops: inReach,
 	mediaPath: 'connected',
+	connection: 'confirmed',
 	armedOn: ['FLIGHT'],
 	keyed: false,
 	mayKey: true
+};
+
+/**
+ * The whole console, on a healthy channel.
+ *
+ * Where this tab stands with the signalling channel is the one state on the page the server
+ * did not say (ADR-0018), so it is a prop of the console like the document is — and a test
+ * that left it out would be testing a console with no reading of its own channel.
+ */
+const theConsole = {
+	presence: {
+		session: 'a-session',
+		role: { id: 'r-1', name: 'Flight Director' },
+		media_path: 'connected',
+		loops: inReach
+	},
+	connection: { state: 'confirmed', since: 0, aLatchStands: true }
 };
 
 test('both views render every loop in the document', async () => {
@@ -224,11 +242,13 @@ test('nothing that renders the presence document keeps state of its own', async 
 	}
 });
 
-// The console itself keeps three things, and each is named here so that a fourth has to be
+// The console itself keeps four things, and each is named here so that a fifth has to be
 // argued for in a diff a reviewer reads. Which view is showing is a fact about the reader;
-// the latch and the source that went while it was held are facts about the input on this
-// desk, knowable here and true the moment they are said (ADR-0016, ADR-0021). Nothing about
-// the world is among them — that all arrives in the presence document.
+// the latch, the source that went while it was held, and a latch taken down by something
+// other than the operator are facts about the input on this desk, knowable here and true the
+// moment they are said (ADR-0016, ADR-0021, ADR-0018). Nothing about the world is among them
+// — that all arrives in the presence document, and where this tab stands with the channel
+// arrives as a prop from the one place that measures it.
 test('the operating console keeps only what is not the server’s to say', async () => {
 	const source = read(join(lib, 'Console.svelte'));
 
@@ -236,7 +256,7 @@ test('the operating console keeps only what is not the server’s to say', async
 
 	assert.deepEqual(
 		kept.toSorted(),
-		['bound', 'dropped', 'latched', 'showing'],
+		['bound', 'dropped', 'latchDropped', 'latched', 'showing'],
 		'the console keeps a state of its own — every fact about the world is the server’s'
 	);
 });
@@ -573,14 +593,7 @@ test('the views know nothing about where a key press comes from', async () => {
 });
 
 test('the console offers both views and opens on the board', async () => {
-	const body = await rendered('Console.svelte', {
-		presence: {
-			session: 'a-session',
-			role: { id: 'r-1', name: 'Flight Director' },
-			media_path: 'connected',
-			loops: inReach
-		}
-	});
+	const body = await rendered('Console.svelte', theConsole);
 
 	assert.match(body, /Board/);
 	assert.match(body, /Ledger/);
@@ -690,17 +703,137 @@ test('the keying controls do not take focus when they are pressed', async () => 
 // ADR-0022's: `` ` `` for the key you hold, `` Shift+` `` for the latch. Space and `CapsLock`
 // are refused, and the refusal is the seam's rather than this page's.
 test('the console says which keys talk, and what each of them does', async () => {
-	const body = await rendered('Console.svelte', {
-		presence: {
-			session: 'a-session',
-			role: { id: 'r-1', name: 'Flight Director' },
-			media_path: 'connected',
-			loops: inReach
-		}
-	});
+	const body = await rendered('Console.svelte', theConsole);
 
 	assert.match(body, /Momentary/);
 	assert.match(body, /Latched/);
 	assert.match(body, /Shift \+ `/, 'the latch key is not on the page');
 	assert.match(body, /Change/, 'the keys are shown and cannot be changed');
+});
+
+// ---- #43: connection state and the emission predicate ---------------------------------------
+
+// A view whose transmit bar stands on a healthy channel, so a test about one rung of the
+// signalling ladder is not also a test about the audio path.
+const onARung = (connection) => ({
+	...carrying,
+	connection,
+	mayKey: connection !== 'disconnected'
+});
+
+// A sentence as somebody reads it, rather than as the markup wraps it. The wording is what
+// these are about, and a line break inside it is the formatter's business rather than the
+// operator's.
+const asRead = (body) => body.replace(/\s+/g, ' ');
+
+// **The stale banner and the disconnected banner render in both views** (v1 §6, ADR-0018).
+// The bar is the strip both views carry and never scroll away (ADR-0034), so what each rung
+// costs an operator is said there — where they are standing when they need it.
+test('both views say where the console stands with the signalling channel', async () => {
+	for (const connection of ['unconfirmed', 'disconnected']) {
+		const bar = await rendered('TransmitBar.svelte', onARung(connection));
+
+		for (const [at, body] of (await eachView(onARung(connection))).entries()) {
+			assert.ok(body.includes(bar), `${views[at]} does not carry the ${connection} bar`);
+		}
+	}
+});
+
+// **The bar has to say which** of the two withdrawal conditions applies (ADR-0018, ADR-0042):
+// *nobody can be told what you are doing* and *nobody can hear you* are different problems
+// with different fixes, and one wording for both sends an operator to look at the wrong thing.
+test('a lost channel and a lost audio path are not worded alike', async () => {
+	const noChannel = await rendered('TransmitBar.svelte', onARung('disconnected'));
+	const noAudio = await rendered('TransmitBar.svelte', {
+		...carrying,
+		mediaPath: 'lost',
+		mayKey: false
+	});
+
+	assert.match(asRead(noChannel), /connection to VoxLoop rather than the audio/);
+	assert.match(asRead(noAudio), /audio rather than the connection to VoxLoop/);
+	assert.notEqual(noChannel, noAudio);
+});
+
+// **Push-to-talk stays live at `unconfirmed`** (ADR-0018). *We cannot confirm your
+// transmission right now* is a materially different statement from *we know you are
+// disconnected*, and cutting somebody off mid-word for a half-second blip is the failure the
+// middle rung exists to prevent. The latch is what does not survive it, so the bar says so.
+test('the middle rung keeps the key control and says the latch will not be held', async () => {
+	const unconfirmed = await rendered('TransmitBar.svelte', onARung('unconfirmed'));
+
+	assert.match(unconfirmed, />\s*Key\s*</, 'the key control went at a rung that keeps it');
+	assert.match(asRead(unconfirmed), /cannot confirm what you are doing/);
+	assert.match(asRead(unconfirmed), /latched key will not be held open/);
+});
+
+// Every rung says something the others do not, or an operator reading one of them learns
+// nothing about which it is.
+test('each rung of the signalling ladder says something the others do not', async () => {
+	const said = await Promise.all(
+		['confirmed', 'unconfirmed', 'disconnected'].map((connection) =>
+			rendered('TransmitBar.svelte', onARung(connection))
+		)
+	);
+
+	assert.equal(new Set(said).size, 3, 'two rungs of the signalling ladder read alike');
+});
+
+// **The one user-facing message in the product that does not originate at the server**
+// (ADR-0018). It says what it cost rather than what caused it — the rung above it is what
+// names the cause — and it is in both views because an operator who believes they are still
+// transmitting is the failure the whole rule exists to remove.
+test('both views say when a latch was dropped for the operator', async () => {
+	for (const [at, body] of (
+		await eachView({ ...onARung('unconfirmed'), latchDropped: true })
+	).entries()) {
+		assert.match(
+			asRead(body),
+			/latched key was dropped, so you are not transmitting/,
+			`${views[at]} does not say the latch went, or what it cost`
+		);
+	}
+});
+
+// **Emission has two independent withdrawal conditions and the console reads both** (ADR-0018,
+// ADR-0042). There is one derivation above both views rather than one in each, so a rung
+// nobody has a reading of leaves emission withdrawn whichever ladder it is on.
+test('the console withdraws emission at the bottom of either ladder', async () => {
+	const source = read(join(lib, 'Console.svelte'));
+
+	assert.match(
+		source,
+		/const mayKey = \$derived\(anAudioPath && aStateChannel\)/,
+		'the console decides whether emission stands from something other than the two ladders'
+	);
+	assert.match(
+		source,
+		/connection\.state !== DISCONNECTED/,
+		'a session with no signalling channel was left an emission path'
+	);
+});
+
+// **Frozen and marked stale with a running age** (ADR-0018). Blanking was rejected as its own
+// lie — an empty console implies *nothing is happening*, when everything may be — so what
+// makes the freeze honest is the number beside it moving.
+test('the console marks its own state stale, with a running age', async () => {
+	const body = await rendered('Console.svelte', {
+		...theConsole,
+		connection: { state: 'unconfirmed', since: 7400, aLatchStands: false }
+	});
+
+	assert.match(asRead(body), /VoxLoop was last confirmed 7 s ago/);
+	// The loops are still there. A console that blanked would be telling an operator nothing
+	// is happening at the moment everything may be.
+	for (const name of namesOf(inReach)) assert.match(body, new RegExp(name));
+});
+
+test('the console says the connection was lost once it is past the threshold', async () => {
+	const body = await rendered('Console.svelte', {
+		...theConsole,
+		connection: { state: 'disconnected', since: 13_000, aLatchStands: false }
+	});
+
+	assert.match(asRead(body), /The connection to VoxLoop was lost/);
+	for (const name of namesOf(inReach)) assert.match(body, new RegExp(name));
 });

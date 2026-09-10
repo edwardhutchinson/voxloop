@@ -1,5 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use figment::Figment;
 use figment::providers::{Env, Format, Toml};
@@ -21,6 +22,8 @@ pub(crate) struct Deployment {
     pub(crate) tls: Tls,
     pub(crate) media: Media,
     pub(crate) store: StoreFile,
+    #[serde(default)]
+    pub(crate) connection: Ladder,
     #[serde(default)]
     pub(crate) log: Log,
 }
@@ -97,6 +100,148 @@ impl Media {
     }
 }
 
+/// The four timers of the signalling channel's health ladder ([ADR-0018], v1 §7).
+///
+/// They are **startup settings with a hard ceiling**, and both halves are the decision. The
+/// disconnect threshold is a safety parameter rather than a display preference — it sets how
+/// long a network hiccup can silence the loudest voice in the room, and it has to be tuned
+/// against the pilot's VPN. An unbounded knob lets a site set it to five minutes and
+/// reintroduce exactly the hot mic the rule removes, so a value past the ceiling is refused
+/// at startup rather than clamped: clamping would leave an administrator believing a number
+/// that is not in force.
+///
+/// Every value is **in seconds**. A duration written as a table of seconds and nanoseconds is
+/// what serde does with `Duration`, and a deployment file nobody can read by eye is a
+/// deployment file somebody gets wrong.
+///
+/// [ADR-0018]: ../../../docs/adr/0018-no-signalling-channel-means-no-emission-path.md
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+pub(crate) struct Ladder {
+    /// How often each end says it is still there.
+    #[serde(default = "Ladder::every_two_seconds")]
+    heartbeat: u64,
+    /// How long a session goes unheard from before its state is no longer confirmed.
+    ///
+    /// The middle rung is what makes disabling push-to-talk safe rather than fragile: a
+    /// single threshold would mean a VPN reroute mutes the Flight Director mid-sentence,
+    /// trading a state-honesty problem for a worse availability one.
+    #[serde(default = "Ladder::after_five_seconds")]
+    unconfirmed: u64,
+    /// How long a **latched** emission survives once the state is unconfirmed.
+    ///
+    /// A latch's entire safety story is that the console will show it to you, and that story
+    /// is void the moment the console cannot be trusted. The grace is what keeps a brief blip
+    /// from cutting a genuine latched transmission; past it, the latch dies. It is the client
+    /// that runs this one, because it is the end holding the microphone — which is why it is
+    /// carried to the console on every heartbeat rather than kept here.
+    #[serde(default = "Ladder::after_two_seconds")]
+    latch_dropped: u64,
+    /// How long a session goes unheard from before emission is withdrawn at both ends.
+    #[serde(default = "Ladder::after_twelve_seconds")]
+    disconnected: u64,
+}
+
+impl Ladder {
+    /// The numbers v1 §7 fixes, which are what a deployment that says nothing runs on.
+    fn every_two_seconds() -> u64 {
+        2
+    }
+
+    fn after_five_seconds() -> u64 {
+        5
+    }
+
+    fn after_two_seconds() -> u64 {
+        2
+    }
+
+    fn after_twelve_seconds() -> u64 {
+        12
+    }
+
+    /// Each setting's ceiling, which is the point past which it stops being the thing it was
+    /// named for.
+    ///
+    /// A heartbeat slower than this cannot measure the rungs below it, and a latch held
+    /// longer than this is held past any blip worth waiting out. The two thresholds are
+    /// capped at half a minute, which is already generous for a VPN reroute and well short of
+    /// the *five minutes* ADR-0018 names as the failure this bound exists to refuse.
+    fn ceilings(self) -> [(&'static str, u64, u64); 4] {
+        [
+            ("heartbeat", self.heartbeat, 10),
+            ("unconfirmed", self.unconfirmed, 30),
+            ("latch_dropped", self.latch_dropped, 10),
+            ("disconnected", self.disconnected, 30),
+        ]
+    }
+
+    pub(crate) fn heartbeat(self) -> Duration {
+        Duration::from_secs(self.heartbeat)
+    }
+
+    pub(crate) fn unconfirmed(self) -> Duration {
+        Duration::from_secs(self.unconfirmed)
+    }
+
+    pub(crate) fn latch_dropped(self) -> Duration {
+        Duration::from_secs(self.latch_dropped)
+    }
+
+    pub(crate) fn disconnected(self) -> Duration {
+        Duration::from_secs(self.disconnected)
+    }
+
+    /// Whether these four numbers are a ladder, and one VoxLoop will run on.
+    ///
+    /// The ceilings are the rule ADR-0018 asks for. The ordering is the same rule arriving
+    /// from the other side: a file where `unconfirmed` is past `disconnected` describes a
+    /// ladder whose middle rung is never reached, so the band that makes withdrawing
+    /// emission safe would silently not exist. Neither is clamped, for the reason the type
+    /// gives.
+    fn checked(self, path: &Path) -> Result<Self, DeploymentError> {
+        for (setting, said, ceiling) in self.ceilings() {
+            if said == 0 {
+                return Err(DeploymentError::NotALadder {
+                    path: path.to_path_buf(),
+                    detail: format!("connection.{setting} is zero, which is not a timer"),
+                });
+            }
+            if said > ceiling {
+                return Err(DeploymentError::PastTheCeiling {
+                    path: path.to_path_buf(),
+                    setting,
+                    said,
+                    ceiling,
+                });
+            }
+        }
+
+        if self.heartbeat >= self.unconfirmed || self.unconfirmed >= self.disconnected {
+            return Err(DeploymentError::NotALadder {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "connection.heartbeat ({}s), connection.unconfirmed ({}s) and \
+                     connection.disconnected ({}s) have to climb in that order",
+                    self.heartbeat, self.unconfirmed, self.disconnected
+                ),
+            });
+        }
+
+        Ok(self)
+    }
+}
+
+impl Default for Ladder {
+    fn default() -> Self {
+        Self {
+            heartbeat: Self::every_two_seconds(),
+            unconfirmed: Self::after_five_seconds(),
+            latch_dropped: Self::after_two_seconds(),
+            disconnected: Self::after_twelve_seconds(),
+        }
+    }
+}
+
 /// Where the one SQLite file lives.
 #[derive(Debug, Deserialize)]
 pub(crate) struct StoreFile {
@@ -132,6 +277,21 @@ pub(crate) enum DeploymentError {
 
     #[error("the deployment file at {path} could not be read: {detail}")]
     Unreadable { path: PathBuf, detail: String },
+
+    #[error(
+        "the deployment file at {path} sets connection.{setting} to {said}s, past the {ceiling}s \
+         VoxLoop accepts: a longer one is how long a network hiccup may leave a microphone \
+         open that nobody can be told about"
+    )]
+    PastTheCeiling {
+        path: PathBuf,
+        setting: &'static str,
+        said: u64,
+        ceiling: u64,
+    },
+
+    #[error("the deployment file at {path} does not describe a ladder: {detail}")]
+    NotALadder { path: PathBuf, detail: String },
 }
 
 impl Deployment {
@@ -147,14 +307,21 @@ impl Deployment {
             });
         }
 
-        Figment::new()
+        let deployment: Self = Figment::new()
             .merge(Toml::file(path))
             .merge(Env::prefixed("VOXLOOP_").split("__"))
             .extract()
             .map_err(|error| DeploymentError::Unreadable {
                 path: path.to_path_buf(),
                 detail: error.to_string(),
-            })
+            })?;
+
+        // The one section that is refused for what it says rather than for how it is
+        // written. Everything else here is a path or an address, where *unreadable* is the
+        // whole of what can be wrong with it.
+        deployment.connection.checked(path)?;
+
+        Ok(deployment)
     }
 }
 #[cfg(test)]
@@ -270,6 +437,162 @@ mod tests {
             assert_eq!(deployment.media.port, 44444);
             Ok(())
         });
+    }
+
+    /// The four numbers v1 §7 fixes. A deployment that says nothing about the ladder runs on
+    /// them, which is what makes the section optional rather than a fifth thing every site
+    /// has to get right.
+    #[test]
+    fn falls_back_to_the_ladder_v1_fixes() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("voxloop.toml", A_WHOLE_FILE)?;
+
+            let deployment = Deployment::load(Path::new("voxloop.toml")).expect("a deployment");
+
+            assert_eq!(deployment.connection.heartbeat(), Duration::from_secs(2));
+            assert_eq!(deployment.connection.unconfirmed(), Duration::from_secs(5));
+            assert_eq!(
+                deployment.connection.latch_dropped(),
+                Duration::from_secs(2)
+            );
+            assert_eq!(
+                deployment.connection.disconnected(),
+                Duration::from_secs(12)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn takes_a_ladder_the_deployment_tuned_for_itself() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "voxloop.toml",
+                &with_a_ladder("heartbeat = 3\nunconfirmed = 8\ndisconnected = 20"),
+            )?;
+
+            let deployment = Deployment::load(Path::new("voxloop.toml")).expect("a deployment");
+
+            assert_eq!(deployment.connection.heartbeat(), Duration::from_secs(3));
+            assert_eq!(deployment.connection.unconfirmed(), Duration::from_secs(8));
+            assert_eq!(
+                deployment.connection.disconnected(),
+                Duration::from_secs(20)
+            );
+            // Untouched, and still the number v1 fixes: the section is four settings and a
+            // file may say anything from one of them to all four.
+            assert_eq!(
+                deployment.connection.latch_dropped(),
+                Duration::from_secs(2)
+            );
+            Ok(())
+        });
+    }
+
+    /// **The disconnect threshold is a safety parameter, not a display preference**
+    /// (ADR-0018). It is how long a network hiccup may leave a microphone open that nobody
+    /// can be told about, so a site that asks for five minutes is refused rather than quietly
+    /// given thirty seconds — an administrator believing a number that is not in force is the
+    /// worse of the two failures.
+    #[test]
+    fn refuses_a_disconnect_threshold_past_the_ceiling() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("voxloop.toml", &with_a_ladder("disconnected = 300"))?;
+
+            let Err(refusal) = Deployment::load(Path::new("voxloop.toml")) else {
+                panic!("expected a refusal to start");
+            };
+
+            assert!(
+                matches!(
+                    refusal,
+                    DeploymentError::PastTheCeiling {
+                        setting: "disconnected",
+                        said: 300,
+                        ..
+                    }
+                ),
+                "expected a refusal naming the setting, got {refusal:?}"
+            );
+            Ok(())
+        });
+    }
+
+    /// All four are bounded, not only the one the ADR argues about. A heartbeat that cannot
+    /// measure the rungs below it and a latch held past any blip worth waiting out are the
+    /// same failure reached by other doors.
+    #[test]
+    fn refuses_any_of_the_four_past_its_ceiling() {
+        for (setting, said) in [
+            ("heartbeat", 60),
+            ("unconfirmed", 90),
+            ("latch_dropped", 45),
+            ("disconnected", 300),
+        ] {
+            figment::Jail::expect_with(|jail| {
+                jail.create_file(
+                    "voxloop.toml",
+                    &with_a_ladder(&format!("{setting} = {said}")),
+                )?;
+
+                let refusal = Deployment::load(Path::new("voxloop.toml"))
+                    .err()
+                    .unwrap_or_else(|| panic!("expected {setting} = {said} to be refused"));
+
+                assert!(
+                    matches!(refusal, DeploymentError::PastTheCeiling { setting: named, .. } if named == setting),
+                    "expected a refusal naming {setting}, got {refusal:?}"
+                );
+                Ok(())
+            });
+        }
+    }
+
+    /// A ladder whose middle rung is never reached is not a ladder. `unconfirmed` past
+    /// `disconnected` would take away the band that makes withdrawing emission safe, without
+    /// any number in the file being individually alarming.
+    #[test]
+    fn refuses_rungs_that_do_not_climb() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "voxloop.toml",
+                &with_a_ladder("unconfirmed = 20\ndisconnected = 12"),
+            )?;
+
+            let Err(refusal) = Deployment::load(Path::new("voxloop.toml")) else {
+                panic!("expected a refusal to start");
+            };
+
+            assert!(
+                matches!(refusal, DeploymentError::NotALadder { .. }),
+                "expected a refusal, got {refusal:?}"
+            );
+            Ok(())
+        });
+    }
+
+    /// A timer of nothing is not a fast deployment, it is a deployment with no band at all —
+    /// every session would be unconfirmed the instant it was heard from.
+    #[test]
+    fn refuses_a_timer_of_zero() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("voxloop.toml", &with_a_ladder("heartbeat = 0"))?;
+
+            let Err(refusal) = Deployment::load(Path::new("voxloop.toml")) else {
+                panic!("expected a refusal to start");
+            };
+
+            assert!(
+                matches!(refusal, DeploymentError::NotALadder { .. }),
+                "expected a refusal, got {refusal:?}"
+            );
+            Ok(())
+        });
+    }
+
+    /// A whole file, with a `[connection]` section saying whatever the test is about.
+    fn with_a_ladder(said: &str) -> String {
+        format!("{A_WHOLE_FILE}\n[connection]\n{said}\n")
     }
 
     #[test]
