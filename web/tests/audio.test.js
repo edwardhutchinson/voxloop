@@ -55,12 +55,12 @@ test('a loop the document has not described yet plays at unity', () => {
 // **A priority transmission plays at full gain whatever the loop is set to** (v1 §4, ADR-0045).
 // It is read off the same document as the volume, as the loop's priority mark, because the
 // mark and the gain are one fact arriving (ADR-0059).
-const urgent = (id, on = loops) =>
+const marked = (id, on = loops) =>
 	on.map((held) => (held.id === id ? { ...held, priority: true } : held));
 
 test('a talker on a loop carrying a priority transmission plays at full gain', () => {
-	assert.equal(theGain(['l-sim'], urgent('l-sim')), 1);
-	assert.equal(theGain(['l-thermal'], urgent('l-thermal')), 1, 'a loop turned right down hid it');
+	assert.equal(theGain(['l-sim'], marked('l-sim')), 1);
+	assert.equal(theGain(['l-thermal'], marked('l-thermal')), 1, 'a loop turned right down hid it');
 });
 
 test('with no priority anywhere, the gain is loudest-wins', () => {
@@ -72,13 +72,13 @@ test('with no priority anywhere, the gain is loudest-wins', () => {
 // **Priority bypasses loudest-wins rather than competing with it** (ADR-0045): there is no
 // rule run over the other loops, and one marked loop among several is enough.
 test('priority on one of several loops a talker is heard on wins outright', () => {
-	assert.equal(theGain(['l-thermal', 'l-sim'], urgent('l-sim')), 1);
+	assert.equal(theGain(['l-thermal', 'l-sim'], marked('l-sim')), 1);
 });
 
 // **Mute stays sovereign** (ADR-0045). A muted loop is not one a talker is heard on, so a
 // priority mark on it raises nothing — the mark still shows, and the audio does not arrive.
 test('priority does not defeat a mute', () => {
-	const muted = urgent('l-sim').map((held) =>
+	const muted = marked('l-sim').map((held) =>
 		held.id === 'l-sim' ? { ...held, muted: true } : held
 	);
 
@@ -89,7 +89,7 @@ test('priority does not defeat a mute', () => {
 // **Nothing in VoxLoop ever ducks** (v1 §4). A priority transmission somewhere else changes
 // nothing about a talker who is not on a marked loop: they play at exactly what they would have.
 test('priority lowers no other talker', () => {
-	const elsewhere = urgent('l-flight');
+	const elsewhere = marked('l-flight');
 
 	assert.equal(theGain(['l-sim'], elsewhere), 0.2);
 	assert.equal(theGain(['l-thermal'], elsewhere), 0);

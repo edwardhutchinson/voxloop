@@ -10,13 +10,13 @@
 --
 -- - `armed_on` — the armed loop set **at the moment of the press**, by name as the grid had
 --   them, one per line. A priority transmission applies to the whole arm set (ADR-0045), so the
---   set is what the override was keyed over; names rather than ids, for the reason the loop
+--   set is what the priority was keyed over; names rather than ids, for the reason the loop
 --   order is snapshotted by name: an entry is read by somebody asking *what did that press
 --   reach*, and a line of opaque ids answers nothing.
 -- - `pressed_at` — when the key went down, in milliseconds since the Unix epoch. `recorded_at`
 --   is when it came back up and the entry could be written, which is a different moment.
 -- - `lasted_ms` — how long it was held. **There is no floor**: a 200 ms fumble is still a
---   decision that overrode everybody's volume, and abuse may look like a hundred short jabs, so
+--   decision that defeated everybody's volume setting, and abuse may look like a hundred short jabs, so
 --   filtering belongs to whoever reads the log.
 ALTER TABLE audit_entries ADD COLUMN armed_on TEXT;
 ALTER TABLE audit_entries ADD COLUMN pressed_at INTEGER;

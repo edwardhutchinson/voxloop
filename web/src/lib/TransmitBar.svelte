@@ -126,7 +126,7 @@
 		onLatchDown();
 	};
 
-	const urging = (event) => {
+	const holdingPriority = (event) => {
 		event.preventDefault();
 		onPriorityDown();
 	};
@@ -246,7 +246,7 @@
 			     It names the act; what is true now is the lamp, lit by the document. -->
 			<button
 				aria-pressed={priority}
-				onpointerdown={urging}
+				onpointerdown={holdingPriority}
 				onpointerup={onPriorityUp}
 				onpointercancel={onPriorityUp}
 				onpointerleave={onPriorityUp}
@@ -257,7 +257,7 @@
 			<!-- The lamp, in words, and lit by the document alone. It is a separate thing from
 			     the control that asks for it, because *I pressed this* and *VoxLoop says you are
 			     on the air* are two facts and only the second one is worth showing. -->
-			<span class="lamp" class:urgent={keyed && priority} role="status">
+			<span class="lamp" class:priority={keyed && priority} role="status">
 				{lamp}
 			</span>
 		</p>
@@ -327,7 +327,7 @@
 
 	/* The same colour the priority mark takes on a card, for the same reason and never alone:
 	   the lamp's words say it. */
-	.lamp.urgent {
+	.lamp.priority {
 		color: var(--warning);
 	}
 

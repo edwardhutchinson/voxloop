@@ -24,7 +24,7 @@
 // under a latch elevates the latched transmission and releasing it lowers it again, with
 // nothing to restore; pressing it from cold keys and elevates, and releasing it ends both. A
 // modifier held beside the ordinary key would have been cheaper and is refused for ADR-0022's
-// reason with more force: a stuck priority control overrides *everybody's* volume.
+// reason with more force: a stuck priority control defeats *everybody's* volume setting.
 //
 // It is a module rather than something the console does inline because it is the piece with
 // the failure modes in it, and a piece with failure modes wants to be run without a browser.
@@ -41,9 +41,10 @@ export const LATCHED = 'latched';
 export const PRIORITY = 'priority';
 
 /**
- * The keys they start on (ADR-0022), and what the console calls each of them.
+ * The keys they start on (ADR-0022, ADR-0046), and what the console calls each of them. Priority
+ * is here beside the two modes because it is a binding like them, not because it is a third mode.
  *
- * Called by the words the domain uses — *momentary* and *latched* — rather than by a friendlier
+ * Called by the words the domain uses — *momentary*, *latched* and *priority* — rather than by a friendlier
  * paraphrase, because they are the words the spec, the audit log and the operator's own
  * manual are written in, and a console that renamed them would be the one place they differ.
  *
@@ -106,7 +107,7 @@ export function keyingModes({
 	let held = false;
 	let latched = false;
 	// The priority key's level, and what was last said about it.
-	let urgent = false;
+	let prioritised = false;
 	let elevated = false;
 
 	let emitting = false;
@@ -115,18 +116,18 @@ export function keyingModes({
 	// priority is the priority level. There is no case in here for *priority while latched* or
 	// *priority from cold*, because both fall out of these.
 	function settle() {
-		if (elevated && !urgent) {
+		if (elevated && !prioritised) {
 			elevated = false;
 			onPriority(false);
 		}
 
-		const wants = held || latched || urgent;
+		const wants = held || latched || prioritised;
 		if (wants !== emitting) {
 			emitting = wants;
 			onKeying(wants);
 		}
 
-		if (urgent && !elevated) {
+		if (prioritised && !elevated) {
 			elevated = true;
 			onPriority(true);
 		}
@@ -156,7 +157,7 @@ export function keyingModes({
 			// **Momentary only.** The level is taken as it is, the way the key you hold is, and
 			// nothing is read off an edge — so there is nothing here a press could latch.
 			if (named === PRIORITY) {
-				urgent = wants;
+				prioritised = wants;
 				settle();
 				return;
 			}

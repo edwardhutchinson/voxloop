@@ -85,7 +85,7 @@
 		// **Priority goes down as its own level** (ADR-0046), after the key on the way up and
 		// before it on the way down. The server marks the loops and audits the press; nothing
 		// here draws it, because whether a transmission is at priority is the document's.
-		onPriority: (is) => onPriority(is),
+		onPriority,
 		onLatched: (is) => (latched = is),
 		onDropped: (source) => (dropped = source),
 		onLatchDropped: () => (latchDropped = true)

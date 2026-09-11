@@ -18,6 +18,7 @@
 //! [ADR-0060]: ../../../docs/adr/0060-a-seam-names-domain-operations.md
 
 use std::net::IpAddr;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use sqlx::Row;
@@ -27,7 +28,7 @@ use super::grid::Cell;
 use super::loops::Loop;
 use super::records::Change;
 use super::roles::{Role, RoleId};
-use super::store::{StoreError, Transaction, now, unavailable};
+use super::store::{StoreError, Transaction, as_read, as_stored, now, unavailable};
 use super::users::{User, UserId};
 
 /// A decision worth recording.
@@ -68,7 +69,7 @@ pub(crate) enum AuditEvent {
     /// Somebody keyed priority, for as long as they held it (v1 §12).
     ///
     /// An **operational authority act**, and the first of them to land: every press, with no
-    /// minimum duration, because a 200 ms fumble still overrode everybody's volume and abuse may
+    /// minimum duration, because a 200 ms fumble still defeated everybody's volume setting and abuse may
     /// look like a hundred short jabs ([ADR-0046]). It is written by
     /// [`AuditLog::record_a_priority_press`] and by nothing else, because an entry without the
     /// arm set and the duration would be a press nobody could read.
@@ -318,10 +319,10 @@ pub(crate) struct PriorityPress {
     pub(crate) role_name: String,
     /// The armed loops at the moment the key went down, by name.
     pub(crate) armed_on: Vec<String>,
-    /// When the key went down, in milliseconds since the Unix epoch.
-    pub(crate) pressed_at: i64,
-    /// How long it was held, in milliseconds. Zero is a press like any other.
-    pub(crate) lasted_ms: i64,
+    /// When the key went down.
+    pub(crate) pressed_at: SystemTime,
+    /// How long it was held. Nothing is a press like any other.
+    pub(crate) lasted: Duration,
 }
 
 /// What a configuration change did: to which record, from what, to what, and to anything
@@ -734,8 +735,8 @@ impl AuditLog for Transaction {
         .bind(press.role.as_str())
         .bind(&press.role_name)
         .bind(press.armed_on.join("\n"))
-        .bind(press.pressed_at)
-        .bind(press.lasted_ms)
+        .bind(as_stored(press.pressed_at))
+        .bind(i64::try_from(press.lasted.as_millis()).unwrap_or(i64::MAX))
         .execute(self.connection())
         .await
         .map_err(unavailable)?;
@@ -818,8 +819,10 @@ impl AuditLog for Transaction {
                                 .filter(|name| !name.is_empty())
                                 .map(str::to_owned)
                                 .collect(),
-                            pressed_at: row.get::<Option<i64>, _>("pressed_at")?,
-                            lasted_ms: row.get::<Option<i64>, _>("lasted_ms")?,
+                            pressed_at: as_read(row.get::<Option<i64>, _>("pressed_at")?),
+                            lasted: Duration::from_millis(
+                                u64::try_from(row.get::<Option<i64>, _>("lasted_ms")?).unwrap_or(0),
+                            ),
                         })
                     })
                     .flatten();
@@ -1088,9 +1091,9 @@ mod tests {
             role: RoleId::presented("r-flight".to_owned()),
             role_name: "Flight Director".to_owned(),
             armed_on: vec!["AIR-TO-GROUND".to_owned(), "SIM".to_owned()],
-            pressed_at: 1_800_000_000_000,
+            pressed_at: SystemTime::UNIX_EPOCH + Duration::from_millis(1_800_000_000_000),
             // A fumble: shorter than anybody would mean, and recorded all the same.
-            lasted_ms: 0,
+            lasted: Duration::ZERO,
         };
 
         transaction
@@ -1128,8 +1131,8 @@ mod tests {
                 role: RoleId::presented("r-flight".to_owned()),
                 role_name: "Flight Director".to_owned(),
                 armed_on: Vec::new(),
-                pressed_at: 1_800_000_000_000,
-                lasted_ms: 250,
+                pressed_at: SystemTime::UNIX_EPOCH + Duration::from_millis(1_800_000_000_000),
+                lasted: Duration::from_millis(250),
             })
             .await
             .expect("the press to be recorded");
@@ -1140,7 +1143,7 @@ mod tests {
             .expect("the log to be readable");
         let press = entries[0].press.as_ref().expect("the press");
         assert!(press.armed_on.is_empty());
-        assert_eq!(press.lasted_ms, 250);
+        assert_eq!(press.lasted, Duration::from_millis(250));
     }
 
     /// A credential readable out of the audit log is one anybody who may read the log holds.

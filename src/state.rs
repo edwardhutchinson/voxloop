@@ -525,7 +525,7 @@ struct Tombstone {
 ///
 /// The two facts the audit entry needs from the moment of the press are taken **then**,
 /// because by the release they may have moved: the arm set can change under a held key, and
-/// the entry is about the set the override was keyed over (v1 §12).
+/// the entry is about the set the priority was keyed over (v1 §12).
 struct Pressing {
     began: Instant,
     /// The wall-clock time of the press, which is what the log is read by.
@@ -537,7 +537,7 @@ struct Pressing {
 /// A priority press that has ended, named well enough to audit (v1 §12).
 ///
 /// **Every press is one of these, with no minimum duration** ([ADR-0046]). A 200 ms fumble is
-/// still a decision that overrode everyone's volume, and abuse may look like a hundred short
+/// still a decision that defeated everyone's volume setting, and abuse may look like a hundred short
 /// jabs, so filtering belongs to whoever reads the log and nothing here decides what was too
 /// short to count.
 ///
@@ -1490,7 +1490,7 @@ impl StateAuthority {
             // it, and who that is never reaches the document ([ADR-0033]).
             let now = Instant::now();
             let spoken_on = live.the_loops_being_spoken_on(now);
-            let urgent = live.the_loops_spoken_on_at_priority(now);
+            let at_priority = live.the_loops_spoken_on_at_priority(now);
             let ladder = live.ladder;
 
             let held = live.sessions.iter_mut().find(|held| &held.id == session)?;
@@ -1511,7 +1511,7 @@ impl StateAuthority {
                         subscribed: held.subscriptions.contains(&held_on.id),
                         armed: held.arms.contains(&held_on.id),
                         talking: spoken_on.contains(&held_on.id),
-                        priority: urgent.contains(&held_on.id),
+                        priority: at_priority.contains(&held_on.id),
                         muted: held.mutes.contains(&held_on.id),
                         volume: held.volume_of(&held_on.id),
                         held_on: held_on.clone(),
@@ -1556,7 +1556,7 @@ impl StateAuthority {
     ///
     /// **It ends a priority press** and hands it back to be audited. A priority key held across
     /// an outage is suppressed until released ([ADR-0043]), so nothing is left standing to
-    /// override anybody's volume when a new socket comes back — and the socket that carried the
+    /// raise anybody's volume when a new socket comes back — and the socket that carried the
     /// release is the one that has gone, so the release will never arrive to end it otherwise.
     ///
     /// [ADR-0041]: ../../docs/adr/0041-a-session-is-resumed-by-name.md
@@ -3867,7 +3867,7 @@ mod tests {
 
     /// **Every press is handed back to be audited, with the armed set as it stood at the
     /// press** (v1 §12). A set that moved during the press is still recorded as it was when
-    /// the key went down, because that is the set the override was keyed over.
+    /// the key went down, because that is the set the priority was keyed over.
     #[tokio::test]
     async fn a_press_is_handed_back_when_it_ends_with_the_arm_set_it_was_keyed_over() {
         let (_directory, store) = a_temporary_store().await;
@@ -3929,7 +3929,7 @@ mod tests {
     }
 
     /// **A priority key held across an outage is suppressed until released** (ADR-0043), so a
-    /// socket that goes takes the press with it. Nothing is left standing to override anybody's
+    /// socket that goes takes the press with it. Nothing is left standing to raise anybody's
     /// volume when a new socket comes back.
     #[tokio::test]
     async fn a_press_ends_when_the_channel_goes() {

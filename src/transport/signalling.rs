@@ -1423,7 +1423,7 @@ impl Conversation {
     /// **The end of a press is audited** — every press, with no minimum duration (v1 §12). The
     /// live change has already landed by the time the entry is written, which is the right way
     /// round: the press happened whether or not the store is well, and a log that could not be
-    /// written is a fault to shout about rather than a reason to hold somebody's override up.
+    /// written is a fault to shout about rather than a reason to keep somebody's priority up.
     ///
     /// [ADR-0008]: ../../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
     async fn keying_priority(&mut self, now: Keyed) -> Result<Vec<Outgoing>, StoreError> {
@@ -2025,17 +2025,10 @@ async fn record_the_press(
             role: pressed.role.clone(),
             role_name: role.map_or_else(String::new, |role| role.name),
             armed_on: pressed.armed_on.clone(),
-            pressed_at: milliseconds_since_the_epoch(pressed.at),
-            lasted_ms: i64::try_from(pressed.lasted.as_millis()).unwrap_or(i64::MAX),
+            pressed_at: pressed.at,
+            lasted: pressed.lasted,
         })
         .await
-}
-
-/// A moment, in the unit the audit log keeps time in.
-fn milliseconds_since_the_epoch(at: std::time::SystemTime) -> i64 {
-    at.duration_since(std::time::UNIX_EPOCH).map_or(0, |since| {
-        i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
-    })
 }
 
 #[cfg(test)]
@@ -4793,8 +4786,8 @@ mod tests {
         assert_eq!(press.role, flight);
         assert_eq!(press.role_name, "Flight Director");
         assert_eq!(press.armed_on, ["Air-to-ground", "Sim"]);
-        assert!(press.pressed_at > 0);
-        assert!(press.lasted_ms >= 0);
+        assert!(press.pressed_at > std::time::UNIX_EPOCH);
+        assert!(press.lasted < Duration::from_secs(5));
         assert_eq!(
             pressed[1].press.as_ref().expect("the press").armed_on,
             ["Air-to-ground"]

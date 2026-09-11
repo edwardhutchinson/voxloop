@@ -67,7 +67,7 @@ function operating() {
 /** The default keys, pressed and released as a hand does it. */
 const held = () => key('Backquote');
 const latching = () => key('Backquote', { shift: true });
-const urgently = () => key('Backquote', { ctrl: true });
+const prioritising = () => key('Backquote', { ctrl: true });
 
 test('the defaults are the backtick, and the backtick with shift and with control', () => {
 	assert.deepEqual(
@@ -360,11 +360,11 @@ test('nothing is announced where there was no latch to drop', () => {
 test('the priority key from cold keys and elevates, and letting go ends both', () => {
 	const { there, keyed, elevated } = operating();
 
-	there.press(urgently());
+	there.press(prioritising());
 	assert.deepEqual(keyed, [true]);
 	assert.deepEqual(elevated, [true]);
 
-	there.release(urgently());
+	there.release(prioritising());
 	assert.deepEqual(keyed, [true, false]);
 	assert.deepEqual(elevated, [true, false]);
 });
@@ -376,8 +376,8 @@ test('the priority key over a latch elevates it and leaves the latch standing', 
 	there.press(latching());
 	there.release(latching());
 
-	there.press(urgently());
-	there.release(urgently());
+	there.press(prioritising());
+	there.release(prioritising());
 
 	assert.deepEqual(keyed, [true], 'priority interrupted a latched transmission');
 	assert.deepEqual(latched, [true]);
@@ -391,13 +391,13 @@ test('holding the ordinary key and the priority key is one transmission at prior
 	const { there, keyed, elevated } = operating();
 
 	there.press(held());
-	there.press(urgently());
+	there.press(prioritising());
 	assert.deepEqual(keyed, [true]);
 	assert.deepEqual(elevated, [true]);
 
 	// The priority key's release: letting go of `` ` `` releases every binding on it, because
 	// a release is matched on the key alone — so the ordinary key goes with it.
-	there.release(urgently());
+	there.release(prioritising());
 	assert.deepEqual(keyed, [true, false]);
 	assert.deepEqual(elevated, [true, false]);
 });
@@ -406,8 +406,8 @@ test('priority released under a held on-screen key lowers without ending', () =>
 	const { there, keys, keyed, elevated } = operating();
 	keys.onScreen[MOMENTARY].down();
 
-	there.press(urgently());
-	there.release(urgently());
+	there.press(prioritising());
+	there.release(prioritising());
 
 	assert.deepEqual(keyed, [true], 'letting go of priority ended a held transmission');
 	assert.deepEqual(elevated, [true, false]);
@@ -418,11 +418,11 @@ test('priority released under a held on-screen key lowers without ending', () =>
 test('the priority key never latches, however it is pressed', () => {
 	const { there, keyed, latched, elevated } = operating();
 
-	there.press(urgently());
-	there.release(urgently());
-	there.press(urgently());
+	there.press(prioritising());
+	there.release(prioritising());
+	there.press(prioritising());
 	there.press(key('Backquote', { ctrl: true, repeat: true }));
-	there.release(urgently());
+	there.release(prioritising());
 
 	assert.deepEqual(elevated, [true, false, true, false]);
 	assert.deepEqual(keyed, [true, false, true, false]);
@@ -439,11 +439,11 @@ test('the priority button on the bar is momentary too', () => {
 	assert.deepEqual(elevated, [true, false]);
 });
 
-// A stuck priority control overrides everybody's volume for as long as it is stuck (ADR-0046),
+// A stuck priority control defeats everybody's volume setting for as long as it is stuck (ADR-0046),
 // so the source going takes it down like any other held key, and says so.
 test('a priority key held when keying is withdrawn drops, and names the source', () => {
 	const { there, keys, keyed, elevated, dropped } = operating();
-	there.press(urgently());
+	there.press(prioritising());
 
 	keys.available(false);
 
@@ -457,7 +457,7 @@ test('a priority key held when keying is withdrawn drops, and names the source',
 // ordinary key.
 test('a priority key survives what takes the latch down', () => {
 	const { there, keys, keyed, elevated } = operating();
-	there.press(urgently());
+	there.press(prioritising());
 
 	keys.theLatchCannotBeShown();
 
@@ -467,7 +467,7 @@ test('a priority key survives what takes the latch down', () => {
 
 test('relinquishing under a held priority key stops it', () => {
 	const { there, keys, keyed, elevated } = operating();
-	there.press(urgently());
+	there.press(prioritising());
 
 	keys.stop();
 

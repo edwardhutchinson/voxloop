@@ -294,10 +294,10 @@ export function openAudio({ say, onMediaPath }) {
  *   document has them
  */
 export function theGain(heardOn, loops) {
-	const urgent = heardOn.some((id) =>
+	const atPriority = heardOn.some((id) =>
 		loops.some((reachable) => reachable.id === id && reachable.priority && !reachable.muted)
 	);
-	if (urgent) return 1;
+	if (atPriority) return 1;
 
 	return loudest(heardOn, loops);
 }
