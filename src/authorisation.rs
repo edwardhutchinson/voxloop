@@ -721,6 +721,7 @@ mod tests {
                 role,
                 limit: Some(1),
                 subscribed_to: Vec::new(),
+                volumes: Vec::new(),
             })
             .expect("the seat to be free");
 
@@ -752,6 +753,7 @@ mod tests {
                 role,
                 limit: Some(1),
                 subscribed_to: Vec::new(),
+                volumes: Vec::new(),
             })
             .expect("the seat to be free");
 
@@ -781,6 +783,7 @@ mod tests {
                 role,
                 limit: Some(1),
                 subscribed_to: Vec::new(),
+                volumes: Vec::new(),
             })
             .expect("the seat to be free");
         state
@@ -815,6 +818,7 @@ mod tests {
                 role,
                 limit: Some(1),
                 subscribed_to: Vec::new(),
+                volumes: Vec::new(),
             })
             .expect("the seat to be free");
 

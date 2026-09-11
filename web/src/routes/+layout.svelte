@@ -85,6 +85,11 @@
 		// and a wholly separate act (ADR-0013).
 		arm: () => {},
 		disarm: () => {},
+		// Muting a loop in this operator's own ears, and setting how loud one plays. Neither is
+		// rendered off here: the card changes when the document says so (ADR-0016).
+		mute: () => {},
+		unmute: () => {},
+		setVolume: () => {},
 		// Keying. **The local track goes first and the server is told second**, which is the
 		// order that buys key-to-first-audio under 100 ms (ADR-0008) — and nothing here
 		// renders off either half, because the transmitting lamp is the document's.
@@ -130,6 +135,9 @@
 			},
 			onPresence: (said) => {
 				frame.presence = said;
+				// **The level played is read off the same document as the level shown**, so a
+				// loop turned down is heard going down when its card says it has (ADR-0007).
+				audio?.theLoopsAre(said.loops);
 				// A role taken up is the answer to whatever the lobby was refusing, and it is
 				// the end of whatever ended before it.
 				frame.relinquished = null;
@@ -151,7 +159,7 @@
 			// `onConnection` is about to say.
 			onLost: () => {},
 			onConnection: (standing) => (frame.connection = standing),
-			// The four halves of the client's own media negotiation. They are handed straight
+			// The client's own media negotiation. They are handed straight
 			// to Audio: nothing here reads them, and nothing on screen comes out of them.
 			onPathToBuild: (path) => {
 				audio?.close();
@@ -159,10 +167,12 @@
 					say: channel,
 					onMediaPath: channel.mediaPath
 				});
+				audio.theLoopsAre(frame.presence?.loops ?? []);
 				audio.aPathToBuild(path);
 			},
 			onUplinkCarried: (carriage) => audio?.theUplinkIsCarried(carriage),
-			onOneMoreTalker: (talker) => audio?.oneMoreTalker(talker),
+			onOneMoreTalker: (talker, heardOn) => audio?.oneMoreTalker(talker, heardOn),
+			onHeardOn: (carriage, heardOn) => audio?.heardOn(carriage, heardOn),
 			onOneFewerTalker: (carriage) => audio?.oneFewerTalker(carriage)
 		});
 
@@ -191,6 +201,18 @@
 			frame.refused = null;
 			channel.disarm(held);
 		};
+		frame.mute = (held) => {
+			frame.refused = null;
+			channel.mute(held);
+		};
+		frame.unmute = (held) => {
+			frame.refused = null;
+			channel.unmute(held);
+		};
+		frame.setVolume = (held, volume) => {
+			frame.refused = null;
+			channel.setVolume(held, volume);
+		};
 		// **The track first, the signal second** (ADR-0008). The client is the one entitled to
 		// key, because it is the one that can do it without a round trip; the server is the
 		// one entitled to say it is happening, which is why the second half is a message and
@@ -208,6 +230,9 @@
 			frame.unsubscribe = () => {};
 			frame.arm = () => {};
 			frame.disarm = () => {};
+			frame.mute = () => {};
+			frame.unmute = () => {};
+			frame.setVolume = () => {};
 			frame.keying = () => {};
 			audio?.close();
 			channel.close();

@@ -31,6 +31,9 @@ const views = ['Board.svelte', 'Ledger.svelte'];
 // independent of subscription (ADR-0013), and the state the console has to name in words. It
 // is also being spoken on, which is what makes it the loop that proves an indicator reaches a
 // console that is not hearing the loop.
+//
+// `THERMAL` is monitored and muted, and `GNC` is monitored and turned down to 40% (#44). The
+// other loops are at unity, which is where every loop starts (v1 §10).
 const inReach = [
 	{
 		id: 'l-3',
@@ -38,10 +41,30 @@ const inReach = [
 		permission: 'control',
 		subscribed: true,
 		armed: false,
-		talking: false
+		talking: false,
+		muted: true,
+		volume: 100
 	},
-	{ id: 'l-1', name: 'FLIGHT', permission: 'emit', subscribed: false, armed: true, talking: true },
-	{ id: 'l-2', name: 'GNC', permission: 'monitor', subscribed: true, armed: false, talking: false }
+	{
+		id: 'l-1',
+		name: 'FLIGHT',
+		permission: 'emit',
+		subscribed: false,
+		armed: true,
+		talking: true,
+		muted: false,
+		volume: 100
+	},
+	{
+		id: 'l-2',
+		name: 'GNC',
+		permission: 'monitor',
+		subscribed: true,
+		armed: false,
+		talking: false,
+		muted: false,
+		volume: 40
+	}
 ];
 
 const namesOf = (loops) => loops.map((reachable) => reachable.name);
@@ -253,8 +276,9 @@ test('nothing that renders the presence document keeps state of its own', async 
 	}
 });
 
-// The console itself keeps four things, and each is named here so that a fifth has to be
-// argued for in a diff a reviewer reads. Which view is showing is a fact about the reader;
+// The console itself keeps these things, and each is named here so that one more has to be
+// argued for in a diff a reviewer reads. Which view is showing, and which loop's volume the
+// operator has opened, are facts about the reader;
 // the latch, the source that went while it was held, and a latch taken down by something
 // other than the operator are facts about the input on this desk, knowable here and true the
 // moment they are said (ADR-0016, ADR-0021, ADR-0018). Nothing about the world is among them
@@ -267,7 +291,7 @@ test('the operating console keeps only what is not the server’s to say', async
 
 	assert.deepEqual(
 		kept.toSorted(),
-		['bound', 'dropped', 'latchDropped', 'latched', 'showing'],
+		['bound', 'dropped', 'latchDropped', 'latched', 'showing', 'tuning'],
 		'the console keeps a state of its own — every fact about the world is the server’s'
 	);
 });
@@ -889,4 +913,140 @@ test('a console that cannot hear VoxLoop and one VoxLoop cannot hear are not wor
 
 	assert.match(asRead(blind), /The connection to VoxLoop was lost 13 s ago/);
 	assert.doesNotMatch(asRead(unheard), /was lost/);
+});
+
+// ---- Mute, per-loop volume and the cog (#44) ----------------------------------------------
+
+/** One card of the board, from its opening tag to its close, found by the loop's name. */
+const theCard = (board, name) => {
+	const opened = board.lastIndexOf('<li', board.indexOf(`>${name}<`));
+
+	return board.slice(opened, board.indexOf('</li>', opened));
+};
+
+/** One row of the ledger, found the same way. */
+const theRow = (ledger, name) => {
+	const opened = ledger.lastIndexOf('<tr', ledger.indexOf(`>${name}<`));
+
+	return ledger.slice(opened, ledger.indexOf('</tr>', opened));
+};
+
+// **A state that renders in only one view is a bug** (v1 §8), and mute is one. It is a word
+// on the card and a sentence in the row — and the sentence says the thing a word cannot: the
+// loop is still monitored, and nobody else is affected.
+test('both views say a muted loop is muted, in words', async () => {
+	const [board, ledger] = await eachView(carrying);
+
+	assert.match(theCard(board, 'THERMAL'), />\s*Muted\s*</, 'the card does not say it is muted');
+	assert.match(theCard(board, 'THERMAL'), />Monitoring</, 'the card lost the subscription');
+	assert.match(
+		theRow(ledger, 'THERMAL'),
+		/You have muted this loop\. It is still monitored, and nobody else is affected\./
+	);
+	assert.doesNotMatch(theCard(board, 'GNC'), />\s*Muted\s*</);
+	assert.doesNotMatch(theRow(ledger, 'GNC'), /muted/);
+});
+
+// **A mute presupposes a subscription** (ADR-0049), so a loop nobody is monitoring offers no
+// mute: there is nothing to silence on it, and a control that did nothing would be the console
+// misrepresenting what a press does.
+test('neither view offers a mute on a loop it is not monitoring', async () => {
+	const [board, ledger] = await eachView(carrying);
+
+	for (const [at, found] of [theCard(board, 'FLIGHT'), theRow(ledger, 'FLIGHT')].entries()) {
+		assert.doesNotMatch(found, />\s*(Mute|Unmute)\s*</, `${views[at]} offers a mute on FLIGHT`);
+	}
+	assert.match(theCard(board, 'GNC'), />\s*Mute\s*</);
+	assert.match(theRow(ledger, 'GNC'), />\s*Mute\s*</);
+	assert.match(theCard(board, 'THERMAL'), />\s*Unmute\s*</);
+	assert.match(theRow(ledger, 'THERMAL'), />\s*Unmute\s*</);
+});
+
+// **Per-loop volume is the one attenuation in VoxLoop that nothing warns anybody about** (v1
+// §4), so the operator who turned a loop down is at least shown it, in both views. A loop at
+// unity says nothing on the card, because a card cannot carry a word that is true of almost
+// every loop on it.
+test('both views say a loop is turned down, and the card says nothing of one at unity', async () => {
+	const [board, ledger] = await eachView(carrying);
+
+	assert.match(theCard(board, 'GNC'), />\s*40%\s*</);
+	assert.match(theRow(ledger, 'GNC'), /Plays at 40% of full volume\./);
+	assert.doesNotMatch(theCard(board, 'THERMAL'), /%/);
+	assert.match(theRow(ledger, 'THERMAL'), /Plays at full volume\./);
+});
+
+// **Behind a cog on the card and the row** (v1 §8, ADR-0034), and **not nudgeable from the
+// main surface**: the cog is the only way to the volume, on every loop in both views, and
+// neither view holds a control that sets one.
+test('both views put a cog on every loop and hold no volume control of their own', async () => {
+	for (const [at, body] of (await eachView(carrying)).entries()) {
+		for (const name of namesOf(inReach)) {
+			assert.match(
+				body,
+				new RegExp(`<button[^>]*aria-label="Volume for ${name}"`),
+				`${views[at]} has no cog on ${name}`
+			);
+		}
+		assert.doesNotMatch(body, /<input/, `${views[at]} holds a control on the main surface`);
+		assert.doesNotMatch(read(join(lib, views[at])), /type="range"/);
+	}
+});
+
+// **Arm, mute and cog must not propagate the card body's click** (v1 §8). The body is one
+// `<button>` and a button holds no control, so the mute and the cog are its siblings — and
+// neither of them is inside the thing a click on the card is read as.
+test('the mute and the cog sit beside the card body, never inside it', async () => {
+	const board = await rendered('Board.svelte', carrying);
+	const body = theCard(board, 'GNC').match(/<button class="body[^"]*"[^>]*>[\s\S]*?<\/button>/)[0];
+
+	assert.doesNotMatch(body, /Mute|Volume for/, 'a control is inside the card body');
+});
+
+// **Which of mute and unmute a press is comes from the document**, decided once above both
+// views, the way the toggle and the arm are — so the two views cannot come to disagree about
+// what a press on the same loop means.
+test('neither view decides whether a press mutes or unmutes', async () => {
+	for (const view of views) {
+		assert.doesNotMatch(read(join(lib, view)), /onUnmute|onSetVolume/, `${view} picks the act`);
+	}
+
+	const source = read(join(lib, 'Console.svelte'));
+	assert.equal(
+		source.match(/onMute=\{muting\}/g)?.length,
+		2,
+		'the two views are not handed one mute'
+	);
+	assert.equal(source.match(/onCog=\{tune\}/g)?.length, 2, 'the two views are not handed one cog');
+	assert.match(source, /\.muted\b/, 'the mute does not read the document');
+});
+
+// **A modal scoped to that loop and holding only volume in v1** (v1 §8). One control, for one
+// loop, at the level the document says — and the loop's name on it, so there is no doubt which
+// loop a change lands on.
+test('the volume modal holds one control, for one loop, at the level the document says', async () => {
+	const body = await rendered('LoopVolume.svelte', { loop: inReach[2] });
+
+	assert.equal(
+		body.match(/<(input|select|textarea)/g)?.length,
+		1,
+		'the modal holds more than volume'
+	);
+	assert.match(body, /<input[^>]*type="range"/);
+	assert.match(body, /<input[^>]*value="40"/);
+	assert.match(body, /GNC/);
+	assert.match(asRead(body), /40% of full volume/);
+	assert.match(asRead(body), /Only you hear this/);
+});
+
+// The modal is rendered above both views rather than inside either, so it is one modal and it
+// reads the loop out of the document it is given — which is what keeps it from showing a level
+// the server has not confirmed (ADR-0016).
+test('the console opens one volume modal, above both views, off the document', async () => {
+	const source = read(join(lib, 'Console.svelte'));
+
+	assert.equal(source.match(/<LoopVolume\b/g)?.length, 1);
+	for (const view of views) {
+		assert.doesNotMatch(read(join(lib, view)), /LoopVolume/, `${view} holds a modal of its own`);
+	}
+	assert.doesNotMatch(read(join(lib, 'LoopVolume.svelte')), /\$state\(/, 'the modal keeps a level');
 });

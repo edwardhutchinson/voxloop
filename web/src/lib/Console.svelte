@@ -32,6 +32,7 @@
 	import Bindings from './Bindings.svelte';
 	import Board from './Board.svelte';
 	import Ledger from './Ledger.svelte';
+	import LoopVolume from './LoopVolume.svelte';
 	import { CONFIRMED, DISCONNECTED, UNCONFIRMED, worse } from './session.js';
 	import { keyingModes, LATCHED, modes, MOMENTARY } from './modes.js';
 
@@ -47,6 +48,9 @@
 		onUnsubscribe,
 		onArm,
 		onDisarm,
+		onMute,
+		onUnmute,
+		onSetVolume,
 		onKeying
 	} = $props();
 
@@ -95,6 +99,13 @@
 	// Which view somebody lands in becomes theirs — personalisation per (user, role), from a
 	// role default — with #55.
 	let showing = $state('board');
+
+	// **Which loop's volume the operator has opened, by id** — a fact about the reader, like
+	// which view is showing, and nothing the server has to say. The loop itself is read out of
+	// the document every time rather than kept, so the modal shows the level VoxLoop last
+	// confirmed, and a loop that leaves reach while its modal is open takes the modal with it.
+	let tuning = $state(null);
+	const tuned = $derived(presence.loops.find((reachable) => reachable.id === tuning));
 
 	// **One order, and both views are handed it.** Reordering it reorders both, because there
 	// is only one of it: two independent orders would put the same loop third in one view and
@@ -227,6 +238,21 @@
 		if (reachable.armed) onDisarm(reachable.id);
 		else onArm(reachable.id);
 	}
+
+	// **Muting is the same shape again**, and it is not an unsubscribe: the loop stays
+	// monitored, so its talking indicator keeps arriving, and nobody else on it is touched
+	// (v1 §5). The document is what says which of the two a press is.
+	function muting(reachable) {
+		if (reachable.muted) onUnmute(reachable.id);
+		else onMute(reachable.id);
+	}
+
+	// The cog opens the volume for one loop. **It is the only way to a volume** (v1 §8): per-
+	// loop volume is personalisation rather than a live operational control, and nothing on
+	// the main surface may nudge it.
+	function tune(reachable) {
+		tuning = reachable.id;
+	}
 </script>
 
 <section>
@@ -303,9 +329,19 @@
 	</div>
 
 	{#if showing === 'board'}
-		<Board loops={inOrder} {bar} onToggle={toggle} onArm={arming} />
+		<Board loops={inOrder} {bar} onToggle={toggle} onArm={arming} onMute={muting} onCog={tune} />
 	{:else}
-		<Ledger loops={inOrder} {bar} onToggle={toggle} onArm={arming} />
+		<Ledger loops={inOrder} {bar} onToggle={toggle} onArm={arming} onMute={muting} onCog={tune} />
+	{/if}
+
+	<!-- One modal, above both views rather than inside either, so a cog pressed on the board and
+	     the same cog pressed in the ledger open the same thing. -->
+	{#if tuned}
+		<LoopVolume
+			loop={tuned}
+			onSet={(volume) => onSetVolume(tuned.id, volume)}
+			onClose={() => (tuning = null)}
+		/>
 	{/if}
 
 	<!-- Under the loops rather than among them: the keys are a setting, and a setting beside

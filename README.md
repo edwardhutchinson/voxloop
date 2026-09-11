@@ -242,7 +242,8 @@ moment.
 something the server has committed to keeping true. It carries the session, the role it is
 bound to, its **media path state**, whether the server has this session down as
 **transmitting**, and the loops in reach with **which of them the session is monitoring**,
-**which it has armed** and **which are being spoken on**; staffing state, loop health and the
+**which it has armed**, **which are being spoken on**, **which it has muted** and **how loud
+each plays**; staffing state, loop health and the
 audience land in it one ticket at a time.
 
 It is **scoped to reach** — only loops the session's role holds at least `monitor` on — and
@@ -414,8 +415,55 @@ loop that leaves reach and comes back comes back where it was.
 
 A pair with nothing remembered starts with nothing up. Seeding a first assume from the
 **role's default console** is [#27](https://github.com/edwardhutchinson/voxloop/issues/27)'s,
-along with the rest of the personalisation rules — per-loop volume, loop order and the
-default view.
+along with the rest of the personalisation rules — loop order and the default view.
+
+## Mute, volume and loudest-wins
+
+The three things an operator does to shape what they hear, and the rule that settles overlap
+(v1 §5).
+
+**Mute silences a loop in the operator's own ears and touches nobody else.** It is not an
+unsubscribe: the subscription stands, so the loop's talking indicator keeps arriving (and its
+loop health and priority mark will when they exist). It is enforced **in the fan-out rather
+than in the client** — a muted loop is one the state authority does not count the operator as
+hearing, so no talker is carried to them on it. That is also what makes a mute sovereign over
+priority ([ADR-0045](docs/adr/0045-priority-defeats-attenuation-and-nothing-else.md)): a priority
+transmission raises the gain on a carriage, and there is no carriage. Everybody else on the
+loop hears exactly what they did before.
+
+**A mute presupposes a subscription**
+([ADR-0049](docs/adr/0049-the-role-is-the-profile.md)), so a loop nobody is monitoring offers
+no mute, and dropping a loop drops its mute with it. **It is never remembered**
+([ADR-0050](docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md)) — a forgotten
+one silences a loop the moment its owner assumes the role again — and **it never expires**,
+because an unexpected un-mute mid-incident is its own hazard. Nothing but the operator's own
+hand, or dropping the loop, takes one away.
+
+**Per-loop volume is personalisation per (user, role, loop)**, from silence to unity and no
+further: it is an attenuation control, and every loop starts at unity. It is written through
+as it is set, best effort, exactly as the subscription set is, and it comes back at the next
+assume. It sits **behind a cog on the card and the row**, which opens a modal scoped to that
+loop holding only the volume — it is not a live operational control, so nothing on the main
+surface can nudge it. The modal is a native `<dialog>`, so the page behind it is inert and
+Escape closes it. The card says a loop is turned down (`40%`) and says nothing of one at unity;
+the ledger says it on every row. **Per-loop volume is the one attenuation in VoxLoop that
+nothing warns anybody about**, and the card is the only place the operator who turned it down
+is reminded.
+
+**Loudest-wins is settled at the client.** The downlink is one stream per audible talker, so a
+talker reaching an operator on several loops arrives once. Each carriage comes with **which of
+the operator's own loops it is heard on** — handed down with the audience, carried by the media
+plane as the labels it was given, and said again when they move — and the client plays it at
+the loudest volume among them, read off the same presence document the cards are drawn from.
+They are only ever loops the operator is monitoring, so the receiver still learns nothing about
+where else the talker went
+([ADR-0057](docs/adr/0057-the-receiver-is-never-told-where-else-a-transmission-went.md)). A loop
+turned all the way down is still a loop the fan-out carries: silencing one outright is what a
+mute is for.
+
+Mute and volume are `Session` rather than a grid check (`docs/spec/api-surface.md`) — they
+reach nothing and nobody — and neither is audited, because a user shaping what they hear is not
+a configuration change.
 
 ## Arming, keying and hearing
 

@@ -28,6 +28,9 @@
 		onUnsubscribe={frame.unsubscribe}
 		onArm={frame.arm}
 		onDisarm={frame.disarm}
+		onMute={frame.mute}
+		onUnmute={frame.unmute}
+		onSetVolume={frame.setVolume}
 		onKeying={frame.keying}
 	/>
 {:else}

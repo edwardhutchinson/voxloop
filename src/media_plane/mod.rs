@@ -177,14 +177,35 @@ pub(crate) enum Negotiated {
     /// It is what a client's own library waits for before it will call a microphone
     /// published: the stream exists on this server and has a name here.
     TheUplinkIsCarried(Carried),
-    /// One more talker to hear, and what to build in order to hear them.
+    /// One more talker to hear, what to build in order to hear them, and every destination
+    /// this listener hears them on.
     ///
     /// **One per audible talker and never per (talker, loop)** ([ADR-0007]): a listener
     /// monitoring two of a talker's destinations is one entry here, or they would hear the
     /// same voice twice.
     ///
+    /// **The destinations are the ones this listener was named on, handed back unchanged.**
+    /// The client plays the carriage at the loudest volume among them — loudest-wins, which
+    /// is settled where the volumes are (v1 §5) — and this module neither knows there is a
+    /// volume nor compares anything. They are only ever this listener's own: the audience
+    /// names a listener against the loops *they* monitor, so nothing here can tell a client
+    /// where else the talker went ([ADR-0057]).
+    ///
     /// [ADR-0007]: ../../docs/adr/0007-the-client-emits-one-stream.md
-    OneMoreTalker(Negotiation),
+    /// [ADR-0057]: ../../docs/adr/0057-the-receiver-is-never-told-where-else-a-transmission-went.md
+    OneMoreTalker {
+        talker: Negotiation,
+        heard_on: Vec<Destination>,
+    },
+    /// A carriage this session already has is now heard on these destinations.
+    ///
+    /// The talker armed or disarmed a loop this listener monitors, or the listener took one
+    /// up or muted it, and the stream itself did not change — so there is nothing to build,
+    /// and only the labels move. It is said only when they do.
+    HeardOn {
+        carriage: Carried,
+        on: Vec<Destination>,
+    },
     /// One fewer. This carriage is closed at the server's end and the client should let it go.
     OneFewerTalker(Carried),
 }
@@ -200,6 +221,33 @@ pub(crate) type Telling = UnboundedSender<Negotiated>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Audience {
     pub(crate) hearing: Vec<Hearing>,
+}
+
+impl Audience {
+    /// Each listener once, with every destination they hear this talker on, in the order the
+    /// answer named them.
+    ///
+    /// **It is a reading of the answer and not a second opinion about it** ([ADR-0063]):
+    /// every pair is kept and none is added, and the only thing done is to put a listener's
+    /// pairs side by side — which is the collapse the downlink needs, since it is one stream
+    /// per audible talker ([ADR-0007]).
+    ///
+    /// [ADR-0007]: ../../docs/adr/0007-the-client-emits-one-stream.md
+    /// [ADR-0063]: ../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
+    fn by_listener(&self) -> Vec<(SessionId, Vec<Destination>)> {
+        let mut read: Vec<(SessionId, Vec<Destination>)> = Vec::new();
+        for hearing in &self.hearing {
+            match read
+                .iter_mut()
+                .find(|(listener, _)| listener == &hearing.listener)
+            {
+                Some((_, on)) => on.push(hearing.destination.clone()),
+                None => read.push((hearing.listener.clone(), vec![hearing.destination.clone()])),
+            }
+        }
+
+        read
+    }
 }
 
 /// One listener, and the destination they hear this talker on.
@@ -229,14 +277,14 @@ impl Destination {
 
     /// The label, back out unchanged.
     ///
-    /// **Reserved for the recording tap**, which is addressed per (talker, destination loop)
-    /// ([ADR-0009]) and is the only thing in the design that reads one of these. v1 ships no
-    /// sink for it, so nothing in a running deployment calls this and the tests below are
-    /// what keep the promise honest — a label that could not be read back would be a label
-    /// that had quietly become an identifier.
+    /// Two things read one. The **recording tap**, which is addressed per (talker,
+    /// destination loop) ([ADR-0009]) and has no sink in v1; and **Transport**, which made the
+    /// label out of a loop in the first place and reads it back to tell a client which of its
+    /// own loops a carriage is heard on, so that the client can play it at the loudest of
+    /// their volumes (v1 §5). Nothing in this module reads one — a label that could be
+    /// reasoned about here would be a label that had quietly become an identifier.
     ///
     /// [ADR-0009]: ../../docs/adr/0009-recording-taps-plain-rtp-on-loopback.md
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -441,6 +489,44 @@ mod tests {
                 talker,
                 audience: audience.clone()
             }]
+        );
+    }
+
+    /// **One carriage per listener, and it knows every destination it is heard on.** A
+    /// listener monitoring two of a talker's loops is named twice in the answer and gets one
+    /// stream ([ADR-0007]), and the client is told both labels so that it can play the stream
+    /// at the louder of the two volumes — which is loudest-wins, settled where the volumes
+    /// are (v1 §5). Nothing here compares a volume or knows there is one.
+    ///
+    /// [ADR-0007]: ../../docs/adr/0007-the-client-emits-one-stream.md
+    #[test]
+    fn an_audience_is_read_as_each_listener_once_with_every_destination_they_hear_on() {
+        let bob = SessionId::presented("bob".to_owned());
+        let carol = SessionId::presented("carol".to_owned());
+        let hearing = |listener: &SessionId, on: &str| Hearing {
+            listener: listener.clone(),
+            destination: Destination::labelled(on.to_owned()),
+        };
+        let audience = Audience {
+            hearing: vec![
+                hearing(&bob, "flight"),
+                hearing(&carol, "flight"),
+                hearing(&bob, "sim"),
+            ],
+        };
+
+        assert_eq!(
+            audience.by_listener(),
+            vec![
+                (
+                    bob,
+                    vec![
+                        Destination::labelled("flight".to_owned()),
+                        Destination::labelled("sim".to_owned())
+                    ]
+                ),
+                (carol, vec![Destination::labelled("flight".to_owned())]),
+            ]
         );
     }
 

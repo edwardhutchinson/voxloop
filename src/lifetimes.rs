@@ -201,6 +201,7 @@ mod tests {
                 role: role.clone(),
                 limit: Some(1),
                 subscribed_to: Vec::new(),
+                volumes: Vec::new(),
             })
             .expect("the seat to be free");
 

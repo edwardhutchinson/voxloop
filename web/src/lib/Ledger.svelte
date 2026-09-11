@@ -14,15 +14,22 @@
 	//
 	// **The act is a control in the row rather than the row itself.** The board's card is the
 	// click target because v1 §8 makes it one; a table row is not a control, and a row that
-	// swallowed clicks would take the cog and the mute that arrive with #44 down with it. It
-	// is the same act either way, and `Console.svelte` decides which of the two messages a
-	// click is — so the two views cannot come to disagree about what a click means.
+	// swallowed clicks would take the cog and the mute down with it. It is the same act either
+	// way, and `Console.svelte` decides which of the two messages a click is — so the two views
+	// cannot come to disagree about what a click means.
+	//
+	// **Mute and volume are sentences here** (#44). The mute says what the card's one word
+	// cannot: the loop is still monitored and nobody else is affected. The volume is said on
+	// every row, at unity too, because this is the reading view and a column that went blank
+	// for most rows would read as a column with nothing in it. Setting it is behind the cog, as
+	// on the card (ADR-0034), and the modal it opens is `Console.svelte`'s.
 	//
 	// **Every state the board carries is carried here too**, which from this ticket on means
 	// the arm, the blind arm and the talking indicator. The indicator is the one thing that is
 	// literally the same object in both views, because it is one component (ADR-0033) — what
 	// differs is that the board says `Not hearing it` beside a blind arm and this says what
 	// that means in a sentence.
+	import Icon from './Icon.svelte';
 	import Talking from './Talking.svelte';
 	import TransmitBar from './TransmitBar.svelte';
 	import { carries } from './rungs.js';
@@ -31,7 +38,7 @@
 	// **Placing it is this view's business and wording it is the bar's** (ADR-0034), so this
 	// view has no name for any of what is in it: a state that arrives as one value cannot be
 	// half-forwarded, and adding one to the bar is not an edit to either view.
-	let { loops, bar, onToggle, onArm } = $props();
+	let { loops, bar, onToggle, onArm, onMute, onCog } = $props();
 
 	// Which loops carry an arm control at all. **Reach is the grid and only the grid**: a role
 	// that may hear a loop and not speak on it gets no control, rather than one that is
@@ -62,6 +69,7 @@
 			<th>Loop</th>
 			<th>This role may</th>
 			<th>Monitoring</th>
+			<th>Volume</th>
 			<th>Emitting to</th>
 		</tr>
 	</thead>
@@ -79,11 +87,35 @@
 					     as the other — and the state is never carried by the button's wording
 					     alone. -->
 					<span class="meaning">
-						{reachable.subscribed ? 'You are hearing this loop.' : 'You are not hearing this loop.'}
+						{#if reachable.subscribed && reachable.muted}
+							You have muted this loop. It is still monitored, and nobody else is affected.
+						{:else if reachable.subscribed}
+							You are hearing this loop.
+						{:else}
+							You are not hearing this loop.
+						{/if}
 					</span>
+					{#if reachable.subscribed}
+						<!-- Only on a loop being monitored: a mute presupposes a subscription
+						     (ADR-0049). -->
+						<button aria-pressed={reachable.muted} onclick={() => onMute(reachable)}>
+							<Icon name={reachable.muted ? 'volume-2' : 'volume-x'} />
+							{reachable.muted ? 'Unmute' : 'Mute'}
+						</button>
+					{/if}
 					{#if reachable.talking}
 						<Talking />
 					{/if}
+				</td>
+				<td>
+					<span class="meaning">
+						{reachable.volume < 100
+							? `Plays at ${reachable.volume}% of full volume.`
+							: 'Plays at full volume.'}
+					</span>
+					<button aria-label="Volume for {reachable.name}" onclick={() => onCog(reachable)}>
+						<Icon name="settings" />
+					</button>
 				</td>
 				<td>
 					{#if mayEmit(reachable)}

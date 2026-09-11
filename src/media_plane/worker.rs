@@ -57,8 +57,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
 use super::{
-    Audience, Carriage, Carried, MediaPlaneError, Negotiated, Negotiation, Reported, Reporting,
-    Reports, Telling, Way,
+    Audience, Carriage, Carried, Destination, MediaPlaneError, Negotiated, Negotiation, Reported,
+    Reporting, Reports, Telling, Way,
 };
 use crate::state::{MediaPath, SessionId};
 use crate::telemetry::module;
@@ -406,7 +406,17 @@ struct Path {
     producer: Option<Producer>,
     /// One carriage per audible talker, which is what makes the downlink per talker rather
     /// than per (talker, loop).
-    hearing: HashMap<SessionId, Consumer>,
+    hearing: HashMap<SessionId, Hearing>,
+}
+
+/// One carriage, and the destinations its client was last told it is heard on.
+///
+/// The destinations are kept so that they are said again only when they move: the client
+/// plays the carriage at the loudest volume among them (v1 §5), and a talker arming one more
+/// of this listener's loops changes that without changing the stream.
+struct Hearing {
+    carriage: Consumer,
+    on: Vec<Destination>,
 }
 
 impl Path {
@@ -418,11 +428,28 @@ impl Path {
     /// audience withdrew somebody or the talker went, which is why it is not written out in
     /// each of them.
     fn stop_hearing(&mut self, talker: &SessionId) {
-        if let Some(carriage) = self.hearing.remove(talker) {
+        if let Some(heard) = self.hearing.remove(talker) {
             let _ = self.telling.send(Negotiated::OneFewerTalker(Carried(
-                carriage.id().to_string(),
+                heard.carriage.id().to_string(),
             )));
         }
+    }
+
+    /// Tell the client a carriage it already has is now heard on these destinations, where
+    /// that is not what it was last told.
+    fn heard_on(&mut self, talker: &SessionId, on: &[Destination]) {
+        let Some(heard) = self.hearing.get_mut(talker) else {
+            return;
+        };
+        if heard.on == on {
+            return;
+        }
+
+        heard.on = on.to_vec();
+        let _ = self.telling.send(Negotiated::HeardOn {
+            carriage: Carried(heard.carriage.id().to_string()),
+            on: on.to_vec(),
+        });
     }
 }
 
@@ -815,22 +842,19 @@ async fn speak(
 /// **A listener named twice gets one carriage.** The pairs arrive per (listener, destination)
 /// because the recording tap is addressed that way ([ADR-0009]); the downlink is per audible
 /// talker ([ADR-0007]), so collapsing them is this module's job and delivering two would hand
-/// somebody the same voice twice.
+/// somebody the same voice twice. The destinations go with the carriage, and move with it
+/// when the answer does, because the client plays it at the loudest of their volumes.
 ///
 /// [ADR-0007]: ../../docs/adr/0007-the-client-emits-one-stream.md
 /// [ADR-0009]: ../../docs/adr/0009-recording-taps-plain-rtp-on-loopback.md
 /// [ADR-0063]: ../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
 async fn these_hear(router: &Router, held: &mut Paths, talker: &SessionId, audience: &Audience) {
-    let mut named: Vec<SessionId> = Vec::new();
-    for hearing in &audience.hearing {
-        if !named.contains(&hearing.listener) {
-            named.push(hearing.listener.clone());
-        }
-    }
+    let named = audience.by_listener();
 
     for (listener, path) in held.paths.iter_mut() {
-        if !named.contains(listener) {
-            path.stop_hearing(talker);
+        match named.iter().find(|(named, _)| named == listener) {
+            Some((_, on)) => path.heard_on(talker, on),
+            None => path.stop_hearing(talker),
         }
     }
 
@@ -845,8 +869,8 @@ async fn these_hear(router: &Router, held: &mut Paths, talker: &SessionId, audie
         return;
     };
 
-    for listener in named {
-        one_more_talker(router, held, &listener, talker, uplink).await;
+    for (listener, on) in named {
+        one_more_talker(router, held, &listener, talker, uplink, on).await;
     }
 }
 
@@ -880,6 +904,7 @@ async fn one_more_talker(
     listener: &SessionId,
     talker: &SessionId,
     uplink: ProducerId,
+    on: Vec<Destination>,
 ) {
     let Some(path) = held.paths.get(listener) else {
         return;
@@ -930,12 +955,12 @@ async fn one_more_talker(
     });
 
     if let Some(path) = held.paths.get_mut(listener) {
-        let _ = path
-            .telling
-            .send(Negotiated::OneMoreTalker(Negotiation::presented(
-                what_to_build,
-            )));
-        path.hearing.insert(talker.clone(), carriage);
+        let _ = path.telling.send(Negotiated::OneMoreTalker {
+            talker: Negotiation::presented(what_to_build),
+            heard_on: on.clone(),
+        });
+        path.hearing
+            .insert(talker.clone(), Hearing { carriage, on });
     }
 }
 
@@ -955,6 +980,7 @@ async fn resume(held: &Paths, session: &SessionId, carriage: &Carried) {
     let Some(carriage) = path
         .hearing
         .values()
+        .map(|heard| &heard.carriage)
         .find(|held| held.id().to_string() == carriage.0)
     else {
         // A name for a carriage this session is not being sent audio on. It is stale rather

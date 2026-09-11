@@ -24,7 +24,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::configuration::{Ladder, LoopId, Permission, RoleId, SignInToken, UserId};
+use crate::configuration::{Ladder, LoopId, Permission, RoleId, SignInToken, UserId, Volume};
 use crate::secrets;
 
 /// How long a session's tombstone is kept after the session ends ([ADR-0041]).
@@ -311,6 +311,40 @@ struct Session {
     /// [ADR-0013]: ../../docs/adr/0013-arming-is-independent-of-subscription.md
     /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
     arms: Vec<LoopId>,
+    /// The loops this session has silenced in its own ears.
+    ///
+    /// **A mute is not an unsubscribe** (v1 §5), so it is a list beside the subscription set
+    /// rather than a removal from it: the subscription stands, and with it everything that
+    /// rides on one — the talking indicator, loop health, the priority mark. What a mute
+    /// takes away is the audio, which is why [`Session::hears`] reads it.
+    ///
+    /// **It presupposes a subscription** ([ADR-0049]), so nothing is here that is not in the
+    /// set above, and dropping a loop drops its mute with it.
+    ///
+    /// **It is never remembered** ([ADR-0050]). A forgotten mute silences a loop the moment
+    /// its owner assumes the role again, and drops every loop they staff to `away` before
+    /// they have looked at anything — so a seat just taken starts with none, whatever the
+    /// last session had. Nor does one expire: nothing here has a clock, because an
+    /// unexpected un-mute mid-incident is its own hazard.
+    ///
+    /// [ADR-0049]: ../../docs/adr/0049-the-role-is-the-profile.md
+    /// [ADR-0050]: ../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
+    mutes: Vec<LoopId>,
+    /// How loud each loop plays in this operator's ears, for the loops they have set.
+    ///
+    /// **A loop missing from here is at unity**, which is where every loop starts (v1 §10).
+    /// It is seeded from what Configuration remembers at assume, the way the subscription
+    /// set is, and like it, it is not narrowed to reach: a loop that leaves reach and comes
+    /// back comes back at the level it left at ([ADR-0051]).
+    ///
+    /// **It is not a route**, and nothing in the fan-out reads it. Loudest-wins is settled by
+    /// the client over every loop a talker reaches it on ([ADR-0007]), and a loop turned all
+    /// the way down is still a loop the operator is monitoring. Silencing one outright is
+    /// what a mute is for.
+    ///
+    /// [ADR-0007]: ../../docs/adr/0007-the-client-emits-one-stream.md
+    /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
+    volumes: Vec<(LoopId, Volume)>,
     /// Whether the client says it is transmitting right now.
     ///
     /// **The client keys and the server is told** ([ADR-0008]). It is a signal rather than a
@@ -378,16 +412,33 @@ impl Session {
             .pessimistically_with(self.seen_by_the_server)
     }
 
-    /// Whether this session may hear that loop: it is in reach, and it is monitored.
+    /// Whether this session may hear that loop: it is in reach, it is monitored, and it is
+    /// not muted.
     ///
-    /// Both halves are needed and neither implies the other. The rung says what this role
+    /// The first two are needed and neither implies the other. The rung says what this role
     /// may ever hear and the subscription says what it is hearing now (v1 §5), and a
     /// subscription outside reach is kept precisely so that it can be inert ([ADR-0051]).
     ///
+    /// **The third is the operator's own**, and it is read here rather than at the client
+    /// because a mute silences the loop in their ears and nowhere else: the fan-out stops
+    /// carrying a talker to them on it, and everybody else on the loop is untouched. It is
+    /// also what makes a mute sovereign over priority ([ADR-0045]) — a priority transmission
+    /// raises the gain on a carriage, and there is no carriage.
+    ///
+    /// [ADR-0045]: ../../docs/adr/0045-priority-defeats-attenuation-and-nothing-else.md
     /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
     fn hears(&self, held_on: &LoopId) -> bool {
         self.subscriptions.contains(held_on)
+            && !self.mutes.contains(held_on)
             && self.reach.iter().any(|within| &within.id == held_on)
+    }
+
+    /// How loud that loop plays in this operator's ears. Unity for a loop they have not set.
+    fn volume_of(&self, held_on: &LoopId) -> Volume {
+        self.volumes
+            .iter()
+            .find(|(set_on, _)| set_on == held_on)
+            .map_or(Volume::UNITY, |(_, volume)| *volume)
     }
 
     /// Drop the arms this session's role may no longer emit on.
@@ -489,6 +540,15 @@ pub(crate) struct Assuming {
     ///
     /// [ADR-0050]: ../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
     pub(crate) subscribed_to: Vec<LoopId>,
+    /// The volumes this pair last had, as Configuration remembers them — one per loop
+    /// somebody set, and every other loop at unity.
+    ///
+    /// **There is no mute beside it**, and that is [ADR-0050] rather than a gap: a stale mute
+    /// silences a loop before its owner has looked at anything, so nothing remembers one and
+    /// there is nothing to hand in.
+    ///
+    /// [ADR-0050]: ../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
+    pub(crate) volumes: Vec<(LoopId, Volume)>,
 }
 
 /// A role taken up: the session it created, and whatever it ended to create it.
@@ -594,6 +654,22 @@ pub(crate) struct Standing {
     ///
     /// [ADR-0033]: ../../docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md
     pub(crate) talking: bool,
+    /// Whether this session has silenced this loop in its own ears.
+    ///
+    /// **Only ever true beside `subscribed`**, because a mute presupposes a subscription
+    /// ([ADR-0049]). It is its own field rather than a third value of that one because the two
+    /// are read for different things: the subscription is what keeps the talking indicator
+    /// and loop health arriving, and the mute is what stops the audio.
+    ///
+    /// [ADR-0049]: ../../docs/adr/0049-the-role-is-the-profile.md
+    pub(crate) muted: bool,
+    /// How loud this loop plays in this operator's ears.
+    ///
+    /// It is in the document because the document is the API and the console shows it —
+    /// and because **per-loop volume is the one attenuation in VoxLoop that nothing warns
+    /// anybody about** (v1 §4). The card saying so is the only place the operator who turned
+    /// it down is reminded.
+    pub(crate) volume: Volume,
 }
 
 /// One listener, and the loop they hear a talker on.
@@ -799,6 +875,11 @@ impl StateAuthority {
                 // hand; an arm set restored the same way would put somebody on the air the
                 // instant they assumed, which is why nothing remembers one.
                 arms: Vec::new(),
+                // Nor is anything muted, whatever the last session in this seat had: a mute
+                // is never remembered (ADR-0050), and one restored here would silence a loop
+                // before the operator had looked at anything.
+                mutes: Vec::new(),
+                volumes: assuming.volumes,
                 keyed: false,
                 heard_from: Instant::now(),
                 the_channel_is_gone: false,
@@ -937,6 +1018,90 @@ impl StateAuthority {
             };
 
             held.subscriptions.retain(|held_on| held_on != from);
+            // **A mute is dropped with its subscription** (ADR-0049). It presupposes one, and
+            // a mute left behind here would silence the loop the next time it was taken up.
+            held.mutes.retain(|held_on| held_on != from);
+
+            true
+        })
+    }
+
+    /// Silence a loop in this operator's own ears.
+    ///
+    /// **Not a permission and not an unsubscribe** (v1 §5). The subscription stands, so the
+    /// talking indicator, loop health and the priority mark keep arriving; what stops is the
+    /// audio, because [`Session::hears`] reads the mute and the fan-out is built from that.
+    /// Nobody else on the loop is touched.
+    ///
+    /// It is `Session` rather than a grid check (`docs/spec/api-surface.md`): it reaches
+    /// nothing and nobody, so there is no rung for it to need.
+    ///
+    /// **A loop nobody is monitoring has nothing to mute** ([ADR-0049]), so muting one leaves
+    /// nothing behind for a later subscribe to find. It is a set, for the reason every other
+    /// act here is: the control lags the click, and a second press that has not caught up
+    /// must land on the same state.
+    ///
+    /// It answers whether a live session took the act. Nothing where the id names no session.
+    ///
+    /// [ADR-0049]: ../../docs/adr/0049-the-role-is-the-profile.md
+    pub(crate) fn mute(&self, session: &SessionId, held_on: &LoopId) -> bool {
+        self.write(|live| {
+            let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) else {
+                return false;
+            };
+
+            if held.subscriptions.contains(held_on) && !held.mutes.contains(held_on) {
+                held.mutes.push(held_on.clone());
+            }
+
+            true
+        })
+    }
+
+    /// Hear a muted loop again. The other half of the act, idempotent for the same reason.
+    ///
+    /// **Nothing else ever does this.** A mute does not expire and a resume does not clear it
+    /// (v1 §5, §7): an unexpected un-mute mid-incident is its own hazard, so the only way out
+    /// of one is the operator's own hand — or dropping the loop, which takes the mute with it.
+    pub(crate) fn unmute(&self, session: &SessionId, held_on: &LoopId) -> bool {
+        self.write(|live| {
+            let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) else {
+                return false;
+            };
+
+            held.mutes.retain(|muted| muted != held_on);
+
+            true
+        })
+    }
+
+    /// Set how loud a loop plays in this operator's ears.
+    ///
+    /// **Personalisation, and not a live operational control** (v1 §5): it is applied here so
+    /// that it is heard at once and shown in the document, and remembered by whoever called,
+    /// best effort ([ADR-0050]). It reaches nothing and nobody, so it is `Session` rather than
+    /// a grid check, and a volume on a loop outside reach is kept and inert like everything
+    /// else a grid edit narrows ([ADR-0051]).
+    ///
+    /// **It changes no route.** The fan-out does not read it; the client plays each talker at
+    /// the loudest volume among the loops it hears them on ([ADR-0007]).
+    ///
+    /// It answers whether a live session took the act, which is what the caller needs to know
+    /// before remembering it.
+    ///
+    /// [ADR-0007]: ../../docs/adr/0007-the-client-emits-one-stream.md
+    /// [ADR-0050]: ../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
+    /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
+    pub(crate) fn set_the_volume(&self, session: &SessionId, on: &LoopId, volume: Volume) -> bool {
+        self.write(|live| {
+            let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) else {
+                return false;
+            };
+
+            match held.volumes.iter_mut().find(|(set_on, _)| set_on == on) {
+                Some((_, was)) => *was = volume,
+                None => held.volumes.push((on.clone(), volume)),
+            }
 
             true
         })
@@ -1163,6 +1328,8 @@ impl StateAuthority {
                         subscribed: held.subscriptions.contains(&held_on.id),
                         armed: held.arms.contains(&held_on.id),
                         talking: spoken_on.contains(&held_on.id),
+                        muted: held.mutes.contains(&held_on.id),
+                        volume: held.volume_of(&held_on.id),
                         held_on: held_on.clone(),
                     })
                     .collect(),
@@ -1531,6 +1698,7 @@ mod tests {
             // A pair with nothing remembered, which is what a first assume finds and what
             // every test here is about unless it says otherwise.
             subscribed_to: Vec::new(),
+            volumes: Vec::new(),
         }
     }
 
@@ -1874,10 +2042,13 @@ mod tests {
             vec![Standing {
                 held_on: a_loop("air-to-ground"),
                 // Nothing was remembered and nothing has been taken up, so the loop is on
-                // the console, not being heard, not a destination and quiet.
+                // the console, not being heard, not a destination and quiet — and at unity,
+                // which is where every loop starts (v1 §10).
                 subscribed: false,
                 armed: false,
                 talking: false,
+                muted: false,
+                volume: Volume::UNITY,
             }]
         );
     }
@@ -2158,6 +2329,7 @@ mod tests {
                 role,
                 limit: None,
                 subscribed_to: Vec::new(),
+                volumes: Vec::new(),
             })
             .expect("the seat to be free");
 
@@ -2184,6 +2356,7 @@ mod tests {
                 role,
                 limit: None,
                 subscribed_to: Vec::new(),
+                volumes: Vec::new(),
             })
             .expect("the seat to be free");
 
@@ -2233,6 +2406,7 @@ mod tests {
                 role,
                 limit: None,
                 subscribed_to: Vec::new(),
+                volumes: Vec::new(),
             })
             .expect("the seat to be free");
         let (first, _) = live
@@ -2270,6 +2444,7 @@ mod tests {
                 role: one_role,
                 limit: None,
                 subscribed_to: Vec::new(),
+                volumes: Vec::new(),
             })
             .expect("the seat to be free");
         let two = live
@@ -2279,6 +2454,7 @@ mod tests {
                 role: two_role,
                 limit: None,
                 subscribed_to: Vec::new(),
+                volumes: Vec::new(),
             })
             .expect("the seat to be free");
         for session in [&one.session, &two.session] {
@@ -2311,6 +2487,7 @@ mod tests {
                 role,
                 limit: None,
                 subscribed_to: Vec::new(),
+                volumes: Vec::new(),
             })
             .expect("the seat to be free");
         live.ended_by_its_own_holder(&assumed.session);
@@ -2960,6 +3137,318 @@ mod tests {
         live.unheard_from_for(&session, Duration::from_secs(6));
         let (moved, _) = live.presence(&session, reach).expect("a document");
         assert_eq!(moved, first + 1);
+    }
+
+    // ---- Mute and per-loop volume (#44) -------------------------------------------------
+
+    /// The one loop's standing on one session's console, as its own document has it.
+    fn standing_of(live: &StateAuthority, session: &SessionId, within: Vec<InReach>) -> Standing {
+        live.presence(session, within)
+            .expect("a document")
+            .1
+            .loops
+            .into_iter()
+            .next()
+            .expect("one loop in reach")
+    }
+
+    /// **Mute is not an unsubscribe** (v1 §5). The subscription stands, which is what keeps
+    /// the talking indicator, loop health and the priority mark arriving on a muted loop.
+    #[tokio::test]
+    async fn muting_a_loop_leaves_it_monitored_and_says_it_is_muted() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        live.subscribe(&session, &air_to_ground);
+
+        assert!(live.mute(&session, &air_to_ground));
+
+        let standing = standing_of(&live, &session, vec![a_loop("air-to-ground")]);
+        assert!(standing.subscribed, "muting a loop took it off the console");
+        assert!(
+            standing.muted,
+            "the document does not say the loop is muted"
+        );
+
+        assert!(live.unmute(&session, &air_to_ground));
+        assert!(!standing_of(&live, &session, vec![a_loop("air-to-ground")]).muted);
+    }
+
+    /// **Mute silences a loop in the muter's own ears**, so the fan-out stops carrying the
+    /// talker to them on it. That is also why priority cannot defeat a mute (ADR-0045): there
+    /// is no carriage for a gain to be raised on.
+    #[tokio::test]
+    async fn a_muted_loop_carries_no_talker_to_the_operator_who_muted_it() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_and_a_listener(&live, &store).await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+
+        live.mute(&listener, &air_to_ground);
+        assert!(
+            heard_by(&live, &talker).is_empty(),
+            "a muted loop still carried"
+        );
+
+        live.unmute(&listener, &air_to_ground);
+        assert_eq!(
+            heard_by(&live, &talker),
+            [(listener.as_str().to_owned(), "air-to-ground".to_owned())],
+            "unmuting did not put the talker back"
+        );
+    }
+
+    /// **It affects nobody else.** A mute is a personalisation and not a permission: every
+    /// other listener on the loop goes on hearing, and the talker is still carried to them.
+    #[tokio::test]
+    async fn a_mute_changes_nothing_for_anybody_else_on_the_loop() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_and_a_listener(&live, &store).await;
+        let other = a_session(&live, &store, "gnc").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        live.presence(&other, vec![a_loop("air-to-ground")]);
+        live.subscribe(&other, &air_to_ground);
+
+        live.mute(&listener, &air_to_ground);
+
+        assert_eq!(
+            heard_by(&live, &talker),
+            [(other.as_str().to_owned(), "air-to-ground".to_owned())]
+        );
+        assert!(!standing_of(&live, &other, vec![a_loop("air-to-ground")]).muted);
+    }
+
+    /// A talker reaching the operator on two loops is still heard when one of them is muted:
+    /// **the mute silences the loop, not the voice**, and the other loop is one the operator
+    /// kept up.
+    #[tokio::test]
+    async fn a_talker_on_a_muted_loop_and_an_unmuted_one_is_heard_on_the_unmuted_one() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let talker = a_session(&live, &store, "flight").await;
+        let listener = a_session(&live, &store, "capcom").await;
+        let reach = vec![a_loop_to_emit_on("air-to-ground"), a_loop_to_emit_on("sim")];
+        live.presence(&talker, reach.clone());
+        live.presence(&listener, reach);
+        for held_on in ["air-to-ground", "sim"] {
+            live.arm(&talker, &LoopId::presented(held_on.to_owned()));
+            live.subscribe(&listener, &LoopId::presented(held_on.to_owned()));
+        }
+
+        live.mute(&listener, &LoopId::presented("sim".to_owned()));
+
+        assert_eq!(
+            heard_by(&live, &talker),
+            [(listener.as_str().to_owned(), "air-to-ground".to_owned())]
+        );
+    }
+
+    /// The subscription stands, so **the talking indicator keeps arriving** on a muted loop:
+    /// an operator asked for silence, not blindness (ADR-0059).
+    #[tokio::test]
+    async fn a_muted_loop_still_says_somebody_is_talking_on_it() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_and_a_listener(&live, &store).await;
+        live.the_client_keys(&talker);
+
+        live.mute(&listener, &LoopId::presented("air-to-ground".to_owned()));
+
+        assert_eq!(
+            talking(&live, &listener, vec![a_loop("air-to-ground")]),
+            ["air-to-ground"]
+        );
+    }
+
+    /// **A mute presupposes a subscription** (ADR-0049). There is nothing to silence on a
+    /// loop nobody is hearing, so muting one leaves nothing behind for a later subscribe to
+    /// find.
+    #[tokio::test]
+    async fn muting_a_loop_nobody_is_monitoring_leaves_nothing_behind() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+
+        live.mute(&session, &air_to_ground);
+        live.subscribe(&session, &air_to_ground);
+
+        assert!(
+            !standing_of(&live, &session, vec![a_loop("air-to-ground")]).muted,
+            "a loop taken up arrived muted"
+        );
+    }
+
+    /// **A mute is dropped with its subscription** (ADR-0049), so taking a loop back up later
+    /// is taking it up audible.
+    #[tokio::test]
+    async fn dropping_a_loop_drops_its_mute() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        live.subscribe(&session, &air_to_ground);
+        live.mute(&session, &air_to_ground);
+
+        live.unsubscribe(&session, &air_to_ground);
+        live.subscribe(&session, &air_to_ground);
+
+        assert!(!standing_of(&live, &session, vec![a_loop("air-to-ground")]).muted);
+    }
+
+    /// **A mute is never remembered** (ADR-0050): a forgotten one would silence a loop the
+    /// moment its owner assumed the role again, and drop every loop they staff to `away` for
+    /// the whole room before they had looked at anything. The subscription comes back; the
+    /// mute does not.
+    #[tokio::test]
+    async fn a_mute_ends_with_the_session_and_the_next_assume_hears_the_loop() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        let remembered = || Assuming {
+            subscribed_to: vec![air_to_ground.clone()],
+            ..taking(&sign_in, &user, &role, Some(1))
+        };
+        let assumed = live.assume(remembered()).expect("the seat to be free");
+        live.mute(&assumed.session, &air_to_ground);
+        live.ended_by_its_own_holder(&assumed.session)
+            .expect("the session to end");
+
+        let again = live.assume(remembered()).expect("the seat to be free");
+
+        let standing = standing_of(&live, &again.session, vec![a_loop("air-to-ground")]);
+        assert!(
+            standing.subscribed,
+            "the remembered subscription did not come back"
+        );
+        assert!(!standing.muted, "a mute outlived the session that set it");
+    }
+
+    /// **A mute does not auto-expire** (v1 §5): an unexpected un-mute mid-incident is its own
+    /// hazard. Nothing the clock or the channel does takes one away — a session that goes
+    /// `disconnected` and comes back comes back muted.
+    #[tokio::test]
+    async fn a_mute_survives_the_channel_going_and_coming_back() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        live.subscribe(&session, &air_to_ground);
+        live.mute(&session, &air_to_ground);
+
+        live.unheard_from_for(&session, Duration::from_secs(3600));
+        live.the_channel_is_gone(&session);
+        live.the_client_is_there(&session);
+
+        assert!(standing_of(&live, &session, vec![a_loop("air-to-ground")]).muted);
+    }
+
+    #[tokio::test]
+    async fn muting_on_a_session_nobody_holds_changes_nothing() {
+        let live = StateAuthority::empty();
+        let nobody = SessionId::presented("nothing".to_owned());
+
+        assert!(!live.mute(&nobody, &a_loop("flight").id));
+        assert!(!live.unmute(&nobody, &a_loop("flight").id));
+        assert!(!live.set_the_volume(&nobody, &a_loop("flight").id, Volume::UNITY));
+    }
+
+    /// **Every loop starts at unity** (v1 §10).
+    #[tokio::test]
+    async fn every_loop_starts_at_unity() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+
+        assert_eq!(
+            standing_of(&live, &session, vec![a_loop("air-to-ground")]).volume,
+            Volume::UNITY
+        );
+    }
+
+    #[tokio::test]
+    async fn a_volume_set_is_the_volume_the_document_carries_and_moves_its_version() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let reach = vec![a_loop("air-to-ground")];
+        let (first, _) = live.presence(&session, reach.clone()).expect("a document");
+        let turned_down = Volume::presented(40).expect("a volume");
+
+        assert!(live.set_the_volume(&session, &a_loop("air-to-ground").id, turned_down));
+
+        let (moved, presence) = live.presence(&session, reach).expect("a document");
+        assert_eq!(presence.loops[0].volume, turned_down);
+        assert_eq!(moved, first + 1);
+    }
+
+    /// Volume persists and is handed in at assume like the subscription set is, which is what
+    /// makes a restart cost an assume rather than a console rebuilt by hand (ADR-0050).
+    #[tokio::test]
+    async fn assuming_restores_the_volumes_the_pair_last_had() {
+        let (_directory, store) = a_temporary_store().await;
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let live = StateAuthority::empty();
+        let turned_down = Volume::presented(25).expect("a volume");
+        let assumed = live
+            .assume(Assuming {
+                volumes: vec![(a_loop("sim").id, turned_down)],
+                ..taking(&sign_in, &user, &role, Some(1))
+            })
+            .expect("the seat to be free");
+
+        let (_, presence) = live
+            .presence(
+                &assumed.session,
+                vec![a_loop("air-to-ground"), a_loop("sim")],
+            )
+            .expect("a document");
+        assert_eq!(presence.loops[0].volume, Volume::UNITY);
+        assert_eq!(presence.loops[1].volume, turned_down);
+    }
+
+    /// **The grid overrules personalisation silently and keeps it inert** (ADR-0051). A loop
+    /// that leaves reach and comes back comes back at the level it left at.
+    #[tokio::test]
+    async fn a_volume_outside_reach_is_kept_and_comes_back_with_it() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let turned_down = Volume::presented(10).expect("a volume");
+        live.set_the_volume(&session, &a_loop("sim").id, turned_down);
+
+        live.presence(&session, vec![a_loop("air-to-ground")]);
+
+        assert_eq!(
+            standing_of(&live, &session, vec![a_loop("sim")]).volume,
+            turned_down
+        );
+    }
+
+    /// **Volume is not a route.** A loop turned all the way down is still a loop the operator
+    /// is hearing as far as the fan-out goes, because loudest-wins is settled at the client
+    /// over every loop a talker reaches them on — and a talker also on a loop they kept up is
+    /// one they have said they want to hear (v1 §5). Silencing a loop outright is what mute is
+    /// for.
+    #[tokio::test]
+    async fn a_loop_turned_down_to_nothing_still_carries_the_talker() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_and_a_listener(&live, &store).await;
+
+        live.set_the_volume(
+            &listener,
+            &LoopId::presented("air-to-ground".to_owned()),
+            Volume::presented(0).expect("a volume"),
+        );
+
+        assert_eq!(
+            heard_by(&live, &talker),
+            [(listener.as_str().to_owned(), "air-to-ground".to_owned())]
+        );
     }
 
     /// A talker armed and a listener monitoring the same loop, which is the smallest thing

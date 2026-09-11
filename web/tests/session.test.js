@@ -64,7 +64,8 @@ function listening() {
 		// to the console, and nothing on screen comes out of them.
 		onPathToBuild: (path) => told.push(['a-path-to-build', path]),
 		onUplinkCarried: (carriage) => told.push(['the-uplink-is-carried', carriage]),
-		onOneMoreTalker: (talker) => told.push(['one-more-talker', talker]),
+		onOneMoreTalker: (talker, heardOn) => told.push(['one-more-talker', talker, heardOn]),
+		onHeardOn: (carriage, heardOn) => told.push(['heard-on', carriage, heardOn]),
 		onOneFewerTalker: (carriage) => told.push(['one-fewer-talker', carriage])
 	};
 }
@@ -371,15 +372,46 @@ test('what the media plane says is handed on whole, and none of it is a document
 
 	page.socket.says({ message: 'a-path-to-build', path: { router: {}, up: {}, down: {} } });
 	page.socket.says({ message: 'the-uplink-is-carried', carriage: 'an-uplink' });
-	page.socket.says({ message: 'one-more-talker', talker: { id: 'a-carriage' } });
+	page.socket.says({
+		message: 'one-more-talker',
+		talker: { id: 'a-carriage' },
+		heard_on: ['l-flight']
+	});
+	page.socket.says({
+		message: 'heard-on',
+		carriage: 'a-carriage',
+		heard_on: ['l-flight', 'l-sim']
+	});
 	page.socket.says({ message: 'one-fewer-talker', carriage: 'a-carriage' });
 
 	assert.deepEqual(page.told, [
 		['a-path-to-build', { router: {}, up: {}, down: {} }],
 		['the-uplink-is-carried', 'an-uplink'],
-		['one-more-talker', { id: 'a-carriage' }],
+		['one-more-talker', { id: 'a-carriage' }, ['l-flight']],
+		['heard-on', 'a-carriage', ['l-flight', 'l-sim']],
 		['one-fewer-talker', 'a-carriage']
 	]);
+});
+
+// **Mute is two acts and volume is one**, and none of them is rendered off here (ADR-0016):
+// the card shows a loop muted, or turned down, when the document says so. A mute is two
+// because it is a toggle whose control lags the click; a volume is one because it is a level,
+// and saying the same level twice lands on the same state.
+test('muting, unmuting and setting a volume are what a tab says, and it renders none of them', () => {
+	const page = listening();
+	const channel = openSignalling(page);
+	lastSocket().happens('open');
+
+	channel.mute('a-loop');
+	channel.unmute('a-loop');
+	channel.setVolume('a-loop', 40);
+
+	assert.deepEqual(lastSocket().sent.slice(1), [
+		'{"message":"mute","loop":"a-loop"}',
+		'{"message":"unmute","loop":"a-loop"}',
+		'{"message":"set-volume","loop":"a-loop","volume":40}'
+	]);
+	assert.deepEqual(page.told, []);
 });
 
 test('nothing is said on a socket that is not open', () => {
