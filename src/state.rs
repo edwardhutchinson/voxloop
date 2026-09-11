@@ -1092,15 +1092,24 @@ impl StateAuthority {
     /// [ADR-0007]: ../../docs/adr/0007-the-client-emits-one-stream.md
     /// [ADR-0050]: ../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
     /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
-    pub(crate) fn set_the_volume(&self, session: &SessionId, on: &LoopId, volume: Volume) -> bool {
+    pub(crate) fn set_the_volume(
+        &self,
+        session: &SessionId,
+        held_on: &LoopId,
+        volume: Volume,
+    ) -> bool {
         self.write(|live| {
             let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) else {
                 return false;
             };
 
-            match held.volumes.iter_mut().find(|(set_on, _)| set_on == on) {
+            match held
+                .volumes
+                .iter_mut()
+                .find(|(set_on, _)| set_on == held_on)
+            {
                 Some((_, was)) => *was = volume,
-                None => held.volumes.push((on.clone(), volume)),
+                None => held.volumes.push((held_on.clone(), volume)),
             }
 
             true

@@ -103,8 +103,11 @@
 				     arm, it names the act, and the word in the body names what is true now. -->
 				{#if reachable.subscribed}
 					<button aria-pressed={reachable.muted} onclick={() => onMute(reachable)}>
-						<Icon name={reachable.muted ? 'volume-2' : 'volume-x'} />
-						{reachable.muted ? 'Unmute' : 'Mute'}
+						{#if reachable.muted}
+							<Icon name="volume-2" /> Unmute
+						{:else}
+							<Icon name="volume-x" /> Mute
+						{/if}
 					</button>
 				{/if}
 				<button

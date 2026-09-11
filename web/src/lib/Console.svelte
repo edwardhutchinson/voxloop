@@ -104,8 +104,8 @@
 	// which view is showing, and nothing the server has to say. The loop itself is read out of
 	// the document every time rather than kept, so the modal shows the level VoxLoop last
 	// confirmed, and a loop that leaves reach while its modal is open takes the modal with it.
-	let tuning = $state(null);
-	const tuned = $derived(presence.loops.find((reachable) => reachable.id === tuning));
+	let volumeOpenFor = $state(null);
+	const volumeOf = $derived(presence.loops.find((reachable) => reachable.id === volumeOpenFor));
 
 	// **One order, and both views are handed it.** Reordering it reorders both, because there
 	// is only one of it: two independent orders would put the same loop third in one view and
@@ -250,8 +250,8 @@
 	// The cog opens the volume for one loop. **It is the only way to a volume** (v1 §8): per-
 	// loop volume is personalisation rather than a live operational control, and nothing on
 	// the main surface may nudge it.
-	function tune(reachable) {
-		tuning = reachable.id;
+	function openTheVolume(reachable) {
+		volumeOpenFor = reachable.id;
 	}
 </script>
 
@@ -329,18 +329,32 @@
 	</div>
 
 	{#if showing === 'board'}
-		<Board loops={inOrder} {bar} onToggle={toggle} onArm={arming} onMute={muting} onCog={tune} />
+		<Board
+			loops={inOrder}
+			{bar}
+			onToggle={toggle}
+			onArm={arming}
+			onMute={muting}
+			onCog={openTheVolume}
+		/>
 	{:else}
-		<Ledger loops={inOrder} {bar} onToggle={toggle} onArm={arming} onMute={muting} onCog={tune} />
+		<Ledger
+			loops={inOrder}
+			{bar}
+			onToggle={toggle}
+			onArm={arming}
+			onMute={muting}
+			onCog={openTheVolume}
+		/>
 	{/if}
 
 	<!-- One modal, above both views rather than inside either, so a cog pressed on the board and
 	     the same cog pressed in the ledger open the same thing. -->
-	{#if tuned}
+	{#if volumeOf}
 		<LoopVolume
-			loop={tuned}
-			onSet={(volume) => onSetVolume(tuned.id, volume)}
-			onClose={() => (tuning = null)}
+			loop={volumeOf}
+			onSet={(volume) => onSetVolume(volumeOf.id, volume)}
+			onClose={() => (volumeOpenFor = null)}
 		/>
 	{/if}
 

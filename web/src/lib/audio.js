@@ -291,9 +291,9 @@ export function loudest(heardOn, loops) {
 
 	let gain = 0;
 	for (const id of heardOn) {
-		const held = loops.find((reachable) => reachable.id === id);
-		if (!held) return 1;
-		if (!held.muted) gain = Math.max(gain, held.volume / 100);
+		const described = loops.find((reachable) => reachable.id === id);
+		if (!described) return 1;
+		if (!described.muted) gain = Math.max(gain, described.volume / 100);
 	}
 
 	return gain;

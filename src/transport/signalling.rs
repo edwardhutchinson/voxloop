@@ -1836,9 +1836,9 @@ fn carrying(negotiated: Negotiated) -> Outgoing {
             talker,
             heard_on: loops(&heard_on),
         },
-        Negotiated::HeardOn { carriage, on } => Outgoing::HeardOn {
+        Negotiated::HeardOn { carriage, heard_on } => Outgoing::HeardOn {
             carriage,
-            heard_on: loops(&on),
+            heard_on: loops(&heard_on),
         },
         Negotiated::OneFewerTalker(carriage) => Outgoing::OneFewerTalker { carriage },
     }
@@ -4417,7 +4417,7 @@ mod tests {
             &session,
             Negotiated::HeardOn {
                 carriage: Carried::presented("a-carriage".to_owned()),
-                on: on(&["l-flight", "l-sim"]),
+                heard_on: on(&["l-flight", "l-sim"]),
             },
         );
 

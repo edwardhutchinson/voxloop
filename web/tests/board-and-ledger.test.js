@@ -291,7 +291,7 @@ test('the operating console keeps only what is not the server’s to say', async
 
 	assert.deepEqual(
 		kept.toSorted(),
-		['bound', 'dropped', 'latchDropped', 'latched', 'showing', 'tuning'],
+		['bound', 'dropped', 'latchDropped', 'latched', 'showing', 'volumeOpenFor'],
 		'the console keeps a state of its own — every fact about the world is the server’s'
 	);
 });
@@ -1016,7 +1016,11 @@ test('neither view decides whether a press mutes or unmutes', async () => {
 		2,
 		'the two views are not handed one mute'
 	);
-	assert.equal(source.match(/onCog=\{tune\}/g)?.length, 2, 'the two views are not handed one cog');
+	assert.equal(
+		source.match(/onCog=\{openTheVolume\}/g)?.length,
+		2,
+		'the two views are not handed one cog'
+	);
 	assert.match(source, /\.muted\b/, 'the mute does not read the document');
 });
 

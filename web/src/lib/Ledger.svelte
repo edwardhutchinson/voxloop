@@ -99,8 +99,11 @@
 						<!-- Only on a loop being monitored: a mute presupposes a subscription
 						     (ADR-0049). -->
 						<button aria-pressed={reachable.muted} onclick={() => onMute(reachable)}>
-							<Icon name={reachable.muted ? 'volume-2' : 'volume-x'} />
-							{reachable.muted ? 'Unmute' : 'Mute'}
+							{#if reachable.muted}
+								<Icon name="volume-2" /> Unmute
+							{:else}
+								<Icon name="volume-x" /> Mute
+							{/if}
 						</button>
 					{/if}
 					{#if reachable.talking}

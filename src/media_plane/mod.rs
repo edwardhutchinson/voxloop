@@ -204,7 +204,7 @@ pub(crate) enum Negotiated {
     /// and only the labels move. It is said only when they do.
     HeardOn {
         carriage: Carried,
-        on: Vec<Destination>,
+        heard_on: Vec<Destination>,
     },
     /// One fewer. This carriage is closed at the server's end and the client should let it go.
     OneFewerTalker(Carried),

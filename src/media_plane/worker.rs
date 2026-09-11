@@ -406,7 +406,7 @@ struct Path {
     producer: Option<Producer>,
     /// One carriage per audible talker, which is what makes the downlink per talker rather
     /// than per (talker, loop).
-    hearing: HashMap<SessionId, Hearing>,
+    hearing: HashMap<SessionId, Heard>,
 }
 
 /// One carriage, and the destinations its client was last told it is heard on.
@@ -414,7 +414,7 @@ struct Path {
 /// The destinations are kept so that they are said again only when they move: the client
 /// plays the carriage at the loudest volume among them (v1 §5), and a talker arming one more
 /// of this listener's loops changes that without changing the stream.
-struct Hearing {
+struct Heard {
     carriage: Consumer,
     on: Vec<Destination>,
 }
@@ -448,7 +448,7 @@ impl Path {
         heard.on = on.to_vec();
         let _ = self.telling.send(Negotiated::HeardOn {
             carriage: Carried(heard.carriage.id().to_string()),
-            on: on.to_vec(),
+            heard_on: on.to_vec(),
         });
     }
 }
@@ -959,8 +959,7 @@ async fn one_more_talker(
             talker: Negotiation::presented(what_to_build),
             heard_on: on.clone(),
         });
-        path.hearing
-            .insert(talker.clone(), Hearing { carriage, on });
+        path.hearing.insert(talker.clone(), Heard { carriage, on });
     }
 }
 
