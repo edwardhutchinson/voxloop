@@ -1,4 +1,5 @@
-// The emission modes: **momentary** and **latched**, and no third (v1 §4).
+// The emission modes: **momentary** and **latched**, and no third (v1 §4) — plus **priority**,
+// which is not a mode of emission but a second level beside it (ADR-0046).
 //
 // This is the whole of what sits above the Input seam, and it is above it on purpose. A
 // source publishes a level and a liveness flag and nothing else (ADR-0021); what a level
@@ -17,6 +18,14 @@
 // a limitation to work around: a footswitch and a headset button reach the key they are bound
 // to and nothing reaches latch except the key bound to latch and the button on the bar.
 //
+// **Priority is a third binding, momentary only, and it never latches** (ADR-0046). It is a
+// second level channel alongside the ordinary one, and the level model absorbs it with no
+// special case: `emitting = ordinary OR priority` and `is-priority = priority`. Pressing it
+// under a latch elevates the latched transmission and releasing it lowers it again, with
+// nothing to restore; pressing it from cold keys and elevates, and releasing it ends both. A
+// modifier held beside the ordinary key would have been cheaper and is refused for ADR-0022's
+// reason with more force: a stuck priority control defeats *everybody's* volume setting.
+//
 // It is a module rather than something the console does inline because it is the piece with
 // the failure modes in it, and a piece with failure modes wants to be run without a browser.
 //
@@ -28,11 +37,14 @@ import { keying } from './input/index.js';
 /** The two modes, by the names they are known by here and nowhere below the seam. */
 export const MOMENTARY = 'momentary';
 export const LATCHED = 'latched';
+/** Priority, by the name it is known by here and nowhere below the seam (ADR-0046). */
+export const PRIORITY = 'priority';
 
 /**
- * The keys they start on (ADR-0022), and what the console calls each of them.
+ * The keys they start on (ADR-0022, ADR-0046), and what the console calls each of them. Priority
+ * is here beside the two modes because it is a binding like them, not because it is a third mode.
  *
- * Called by the words the domain uses — *momentary* and *latched* — rather than by a friendlier
+ * Called by the words the domain uses — *momentary*, *latched* and *priority* — rather than by a friendlier
  * paraphrase, because they are the words the spec, the audit log and the operator's own
  * manual are written in, and a console that renamed them would be the one place they differ.
  *
@@ -53,6 +65,15 @@ export const modes = [
 		binding: { code: 'Backquote', shift: true },
 		called: 'Latched',
 		means: 'Press this key to start talking, and press it again to stop.'
+	},
+	// The family of the other two (ADR-0046). It is the binding an operator is least likely to
+	// have exercised before the moment they need it, which is why what it does is said in full.
+	{
+		named: PRIORITY,
+		binding: { code: 'Backquote', ctrl: true },
+		called: 'Priority',
+		means:
+			'Hold this key to talk at priority: everybody hearing you hears you at full volume, whatever they have turned your loops down to. It never latches, and every press is recorded.'
 	}
 ];
 
@@ -61,8 +82,12 @@ const defaults = Object.fromEntries(modes.map(({ named, binding }) => [named, bi
 /**
  * Read the modes over Input, and answer with what a console does with them.
  *
- * - `onKeying(wants)` — whether this session is keying. It is the OR of the two modes and it
- *   is said when it changes, which is what the console sends down to Audio and to the server.
+ * - `onKeying(wants)` — whether this session is keying. It is the OR of the two modes and of
+ *   priority, and it is said when it changes, which is what the console sends down to Audio and
+ *   to the server.
+ * - `onPriority(is)` — whether this session's transmission is at priority: the priority level
+ *   and nothing else (ADR-0046). Said after `onKeying` on the way up and before it on the way
+ *   down, so a server told both never hears of a priority transmission that is not keyed.
  * - `onLatched(is)` — whether the key is latched open. A fact about this console's own input
  *   rather than about the world, and the console has to render it as one (ADR-0016).
  * - `onDropped(source)` — that source went while the key was held, and the key went with it.
@@ -73,6 +98,7 @@ const defaults = Object.fromEntries(modes.map(({ named, binding }) => [named, bi
  */
 export function keyingModes({
 	onKeying,
+	onPriority = () => {},
 	onLatched,
 	onDropped = () => {},
 	onLatchDropped = () => {},
@@ -80,14 +106,31 @@ export function keyingModes({
 }) {
 	let held = false;
 	let latched = false;
+	// The priority key's level, and what was last said about it.
+	let prioritised = false;
+	let elevated = false;
+
 	let emitting = false;
 
+	// **The two lines of ADR-0046 and nothing else**: emitting is the OR of every level, and
+	// priority is the priority level. There is no case in here for *priority while latched* or
+	// *priority from cold*, because both fall out of these.
 	function settle() {
-		const wants = held || latched;
-		if (wants === emitting) return;
+		if (elevated && !prioritised) {
+			elevated = false;
+			onPriority(false);
+		}
 
-		emitting = wants;
-		onKeying(wants);
+		const wants = held || latched || prioritised;
+		if (wants !== emitting) {
+			emitting = wants;
+			onKeying(wants);
+		}
+
+		if (prioritised && !elevated) {
+			elevated = true;
+			onPriority(true);
+		}
 	}
 
 	// `takenAway` is whether this was something other than the operator's own press. A latch
@@ -111,6 +154,14 @@ export function keyingModes({
 				return;
 			}
 
+			// **Momentary only.** The level is taken as it is, the way the key you hold is, and
+			// nothing is read off an edge — so there is nothing here a press could latch.
+			if (named === PRIORITY) {
+				prioritised = wants;
+				settle();
+				return;
+			}
+
 			// **The rising edge and nothing else.** The latch key is a level like every other
 			// source, and what is read off it is the moment it goes up: a key held down does
 			// not latch and unlatch while it is held, and a release that never arrives —
@@ -122,11 +173,12 @@ export function keyingModes({
 			settle();
 		},
 		onDropped(named, source) {
-			// Said only of the mode whose level *is* the emission, and only when nothing is
-			// emitting any more. A latch button dying under a finger has taken nothing off
-			// the air — the latch is this console's state and not that button's — and telling
-			// an operator their key dropped when it did not is the same lie as the reverse.
-			if (named !== MOMENTARY || emitting) return;
+			// Said only of a level that *is* the emission — the key you hold, or priority —
+			// and only when nothing is emitting any more. A latch button dying under a finger
+			// has taken nothing off the air — the latch is this console's state and not that
+			// button's — and telling an operator their key dropped when it did not is the same
+			// lie as the reverse.
+			if (named === LATCHED || emitting) return;
 
 			onDropped(source);
 		}

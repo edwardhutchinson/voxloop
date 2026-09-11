@@ -330,6 +330,22 @@ test('keying says so and names no loop', () => {
 	assert.deepEqual(lastSocket().sent.slice(1), ['{"message":"key"}', '{"message":"unkey"}']);
 });
 
+// **Priority is a second level, said on its own** (ADR-0046), and it names no loop either:
+// priority applies to the whole arm set because there is one stream (ADR-0045), so there is no
+// loop it could be said of.
+test('keying priority says so and names no loop', () => {
+	const channel = openSignalling(listening());
+	lastSocket().happens('open');
+
+	channel.keyPriority();
+	channel.unkeyPriority();
+
+	assert.deepEqual(lastSocket().sent.slice(1), [
+		'{"message":"key-priority"}',
+		'{"message":"unkey-priority"}'
+	]);
+});
+
 // **Nothing renders off what a tab just said** (ADR-0016), and the transmitting lamp is the
 // sharpest case of it: it is lit by the server's acknowledgement coming back in the presence
 // document, never by the button going down (ADR-0008).

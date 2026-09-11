@@ -234,6 +234,18 @@ export function openSignalling({
 		key: () => say(socket, { message: 'key' }),
 		unkey: () => say(socket, { message: 'unkey' }),
 		/**
+		 * Say that this client's transmission is at priority, or that it no longer is.
+		 *
+		 * **The priority level, and nothing else** (ADR-0046). Whether the client is keying at
+		 * all is said above, as the OR of every level, so this never keys anything on its own.
+		 * It carries no loop, because **priority applies to the whole arm set** (ADR-0045): one
+		 * stream fanned out at the server cannot be priority on one armed loop and ordinary on
+		 * another. The server marks every loop it lands on and audits the press; the document
+		 * that comes back is what says it happened.
+		 */
+		keyPriority: () => say(socket, { message: 'key-priority' }),
+		unkeyPriority: () => say(socket, { message: 'unkey-priority' }),
+		/**
 		 * Silence a loop in this operator's own ears, or hear it again.
 		 *
 		 * **Not an unsubscribe** (v1 §5): the loop stays monitored, so its talking indicator

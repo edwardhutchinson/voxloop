@@ -34,7 +34,7 @@
 	import Ledger from './Ledger.svelte';
 	import LoopVolume from './LoopVolume.svelte';
 	import { CONFIRMED, DISCONNECTED, UNCONFIRMED, worse } from './session.js';
-	import { keyingModes, LATCHED, modes, MOMENTARY } from './modes.js';
+	import { keyingModes, LATCHED, modes, MOMENTARY, PRIORITY } from './modes.js';
 
 	// `connection` is where this tab stands with the signalling channel, measured here rather
 	// than pushed (ADR-0018) — the one state on this page the server did not say, because the
@@ -51,7 +51,8 @@
 		onMute,
 		onUnmute,
 		onSetVolume,
-		onKeying
+		onKeying,
+		onPriority
 	} = $props();
 
 	// **Whether the key is latched open, and the source that went while it was held.** Both are
@@ -81,6 +82,10 @@
 			}
 			onKeying(wants);
 		},
+		// **Priority goes down as its own level** (ADR-0046), after the key on the way up and
+		// before it on the way down. The server marks the loops and audits the press; nothing
+		// here draws it, because whether a transmission is at priority is the document's.
+		onPriority,
 		onLatched: (is) => (latched = is),
 		onDropped: (source) => (dropped = source),
 		onLatchDropped: () => (latchDropped = true)
@@ -131,6 +136,7 @@
 		connection: standing,
 		armedOn,
 		keyed: presence.keyed,
+		priority: presence.priority,
 		mayKey,
 		latched,
 		dropped,
@@ -138,7 +144,9 @@
 		onDown: keys.onScreen[MOMENTARY].down,
 		onUp: keys.onScreen[MOMENTARY].up,
 		onLatchDown: keys.onScreen[LATCHED].down,
-		onLatchUp: keys.onScreen[LATCHED].up
+		onLatchUp: keys.onScreen[LATCHED].up,
+		onPriorityDown: keys.onScreen[PRIORITY].down,
+		onPriorityUp: keys.onScreen[PRIORITY].up
 	});
 
 	// **Where the channel stands, from both ends, merged pessimistically** — green needs both,

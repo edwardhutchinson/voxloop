@@ -107,7 +107,7 @@
 						</button>
 					{/if}
 					{#if reachable.talking}
-						<Talking />
+						<Talking priority={reachable.priority} />
 					{/if}
 				</td>
 				<td>

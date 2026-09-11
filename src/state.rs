@@ -22,7 +22,7 @@
 //! [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
 
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::configuration::{Ladder, LoopId, Permission, RoleId, SignInToken, UserId, Volume};
 use crate::secrets;
@@ -356,6 +356,21 @@ struct Session {
     ///
     /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
     keyed: bool,
+    /// The priority press this session's client says is being held, where one is.
+    ///
+    /// **Priority is a second level beside the key and not a kind of key** ([ADR-0046]). The
+    /// client ORs its levels and says the answer as `keyed`; this is the priority level on its
+    /// own, and `is-priority` is read off it only while there is a transmission for it to be an
+    /// attribute of. It is held as the press rather than as a flag because **every press is
+    /// audited** with the arm set it was keyed over and how long it lasted (v1 §12), and both
+    /// are facts about the moment the key went down.
+    ///
+    /// It carries no loop. **Priority applies to the whole arm set** ([ADR-0045]): one stream
+    /// fanned out at the server cannot be priority on one armed loop and ordinary on another.
+    ///
+    /// [ADR-0045]: ../../docs/adr/0045-priority-defeats-attenuation-and-nothing-else.md
+    /// [ADR-0046]: ../../docs/adr/0046-priority-is-keyed-not-held.md
+    pressing: Option<Pressing>,
     /// The reach this session was last projected within, kept so that the fan-out can be
     /// computed without reading anything durable ([ADR-0039]).
     ///
@@ -404,6 +419,33 @@ impl Session {
     /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
     fn is_transmitting(&self, by: Ladder, now: Instant) -> bool {
         self.keyed && self.connection(by, now).carries_emission()
+    }
+
+    /// Whether this session is on the air **at priority**: `is-priority = priority-level`, of a
+    /// transmission that is landing ([ADR-0046]).
+    ///
+    /// It is read off [`Session::is_transmitting`] rather than beside it, so that whatever takes
+    /// a transmission off the air takes its priority with it. A talker whose fan-out is closed
+    /// is marked nowhere — which is what makes **Cut beat priority** ([ADR-0045]) by
+    /// construction rather than by an ordering somebody has to remember.
+    ///
+    /// [ADR-0045]: ../../docs/adr/0045-priority-defeats-attenuation-and-nothing-else.md
+    /// [ADR-0046]: ../../docs/adr/0046-priority-is-keyed-not-held.md
+    fn is_at_priority(&self, by: Ladder, now: Instant) -> bool {
+        self.pressing.is_some() && self.is_transmitting(by, now)
+    }
+
+    /// Let go of the priority press this session holds, and hand it back to be audited.
+    fn let_go(&mut self) -> Option<Pressed> {
+        let pressing = self.pressing.take()?;
+
+        Some(Pressed {
+            occupant: self.occupant.clone(),
+            role: self.role.clone(),
+            armed_on: pressing.armed_on,
+            at: pressing.at,
+            lasted: pressing.began.elapsed(),
+        })
     }
 
     /// What the two ends amount to. Green needs both, red needs one.
@@ -477,6 +519,41 @@ struct Tombstone {
     occupant: UserId,
     why: Ended,
     at: Instant,
+}
+
+/// A priority press, held while the key is down.
+///
+/// The two facts the audit entry needs from the moment of the press are taken **then**,
+/// because by the release they may have moved: the arm set can change under a held key, and
+/// the entry is about the set the priority was keyed over (v1 §12).
+struct Pressing {
+    began: Instant,
+    /// The wall-clock time of the press, which is what the log is read by.
+    at: SystemTime,
+    /// The armed loops at the moment of the press, by name as the grid had them.
+    armed_on: Vec<String>,
+}
+
+/// A priority press that has ended, named well enough to audit (v1 §12).
+///
+/// **Every press is one of these, with no minimum duration** ([ADR-0046]). A 200 ms fumble is
+/// still a decision that defeated everyone's volume setting, and abuse may look like a hundred short
+/// jabs, so filtering belongs to whoever reads the log and nothing here decides what was too
+/// short to count.
+///
+/// It is handed back by whatever ended the press — the client letting go, the channel going,
+/// the session ending — and the audit entry is written by the caller, because the live side
+/// writes nothing durable ([ADR-0039]).
+///
+/// [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+/// [ADR-0046]: ../../docs/adr/0046-priority-is-keyed-not-held.md
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Pressed {
+    pub(crate) occupant: UserId,
+    pub(crate) role: RoleId,
+    pub(crate) armed_on: Vec<String>,
+    pub(crate) at: SystemTime,
+    pub(crate) lasted: Duration,
 }
 
 /// Everything live, behind one lock so there is one writer.
@@ -576,6 +653,11 @@ pub(crate) struct Relinquished {
     pub(crate) occupant: UserId,
     pub(crate) role: RoleId,
     pub(crate) why: Ended,
+    /// The priority press that was held when the session ended, where one was.
+    ///
+    /// The session ending ends the press, and the press still happened: relinquishing under a
+    /// held priority key is not a way to keep it out of the log (v1 §12).
+    pub(crate) pressed: Option<Pressed>,
 }
 
 /// Why an assume did not happen.
@@ -654,6 +736,22 @@ pub(crate) struct Standing {
     ///
     /// [ADR-0033]: ../../docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md
     pub(crate) talking: bool,
+    /// Whether a transmission on this loop right now is at priority.
+    ///
+    /// **The talking indicator's one variant, and it is not attribution** ([ADR-0046]): it says
+    /// what *kind* of transmission is on the loop and never whose, and like `talking` it is one
+    /// flag however many talkers there are. It is in every document whose reach holds the loop
+    /// — monitored or not, muted or not, at full volume or not — because it is **a declaration
+    /// that somebody called this urgent** rather than an explanation of a gain change
+    /// ([ADR-0059]). It lives exactly as long as the press, with no floor.
+    ///
+    /// It is also what the receiving client plays at full gain from ([ADR-0045]), so the mark
+    /// and the gain are one fact arriving and resolve together.
+    ///
+    /// [ADR-0045]: ../../docs/adr/0045-priority-defeats-attenuation-and-nothing-else.md
+    /// [ADR-0046]: ../../docs/adr/0046-priority-is-keyed-not-held.md
+    /// [ADR-0059]: ../../docs/adr/0059-a-priority-transmission-is-marked-wherever-it-lands.md
+    pub(crate) priority: bool,
     /// Whether this session has silenced this loop in its own ears.
     ///
     /// **Only ever true beside `subscribed`**, because a mute presupposes a subscription
@@ -770,6 +868,14 @@ pub(crate) struct Presence {
     ///
     /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
     pub(crate) keyed: bool,
+    /// Whether the server has this session's transmission down as at priority.
+    ///
+    /// The lamp's other half. **An elevated transmission shows as elevated with no new
+    /// surface** ([ADR-0046]): the operator's own lamp says so, lit by this answer and never by
+    /// the priority control going down.
+    ///
+    /// [ADR-0046]: ../../docs/adr/0046-priority-is-keyed-not-held.md
+    pub(crate) priority: bool,
     pub(crate) loops: Vec<Standing>,
 }
 
@@ -881,6 +987,7 @@ impl StateAuthority {
                 mutes: Vec::new(),
                 volumes: assuming.volumes,
                 keyed: false,
+                pressing: None,
                 heard_from: Instant::now(),
                 the_channel_is_gone: false,
                 reach: Vec::new(),
@@ -1231,6 +1338,71 @@ impl StateAuthority {
         })
     }
 
+    /// The client says its transmission is at priority: somebody is holding the priority key.
+    ///
+    /// **Available to anyone holding `emit`, and ungated** ([ADR-0046]). There is no rung to
+    /// consult and no flag on the role, the loop or the cell: what the transmission may reach
+    /// was settled when the arms were made, and priority governs gain and never who receives
+    /// ([ADR-0045]). What it changes is what everybody is told — the mark on every armed loop —
+    /// and what every listener's client plays at full gain.
+    ///
+    /// **It is the start of a press**, and the press is what gets audited. The arm set is taken
+    /// now, as it stands, by name. A second key-down while one is held is the same press: a
+    /// client that says it twice has not pressed twice.
+    ///
+    /// It answers whether a live session took the act.
+    ///
+    /// [ADR-0045]: ../../docs/adr/0045-priority-defeats-attenuation-and-nothing-else.md
+    /// [ADR-0046]: ../../docs/adr/0046-priority-is-keyed-not-held.md
+    pub(crate) fn the_client_keys_priority(&self, session: &SessionId) -> bool {
+        self.write(|live| {
+            let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) else {
+                return false;
+            };
+
+            if held.pressing.is_none() {
+                let armed_on = held
+                    .arms
+                    .iter()
+                    .map(|armed| {
+                        held.reach
+                            .iter()
+                            .find(|within| &within.id == armed)
+                            .map_or_else(|| armed.as_str().to_owned(), |within| within.name.clone())
+                    })
+                    .collect();
+
+                held.pressing = Some(Pressing {
+                    began: Instant::now(),
+                    at: SystemTime::now(),
+                    armed_on,
+                });
+            }
+
+            true
+        })
+    }
+
+    /// The client says its transmission is no longer at priority: the key was let go.
+    ///
+    /// **Priority never latches** ([ADR-0046]), so this is the whole of how a press ends in the
+    /// ordinary case. The transmission itself is untouched — letting go of priority over a
+    /// latch or a held key lowers it and does not end it — because that is `keyed`, which the
+    /// client says separately.
+    ///
+    /// It answers with the press that ended, to be audited, and nothing where no press was
+    /// being held.
+    ///
+    /// [ADR-0046]: ../../docs/adr/0046-priority-is-keyed-not-held.md
+    pub(crate) fn the_client_unkeys_priority(&self, session: &SessionId) -> Option<Pressed> {
+        self.write(|live| {
+            live.sessions
+                .iter_mut()
+                .find(|held| &held.id == session)?
+                .let_go()
+        })
+    }
+
     /// The whole fan-out, where it has moved since it was last taken.
     ///
     /// **The audience is computed here and executed there** ([ADR-0063]). Every talker's
@@ -1318,6 +1490,7 @@ impl StateAuthority {
             // it, and who that is never reaches the document ([ADR-0033]).
             let now = Instant::now();
             let spoken_on = live.the_loops_being_spoken_on(now);
+            let at_priority = live.the_loops_spoken_on_at_priority(now);
             let ladder = live.ladder;
 
             let held = live.sessions.iter_mut().find(|held| &held.id == session)?;
@@ -1327,6 +1500,7 @@ impl StateAuthority {
                 media_path: held.media_path(),
                 connection: held.connection(ladder, now),
                 keyed: held.is_transmitting(ladder, now),
+                priority: held.is_at_priority(ladder, now),
                 // **The narrowing happens here and nowhere else.** The session's set holds
                 // whatever it holds; the reach handed in decides what is rendered, so a
                 // subscription outside it is inert rather than lost ([ADR-0051]).
@@ -1337,6 +1511,7 @@ impl StateAuthority {
                         subscribed: held.subscriptions.contains(&held_on.id),
                         armed: held.arms.contains(&held_on.id),
                         talking: spoken_on.contains(&held_on.id),
+                        priority: at_priority.contains(&held_on.id),
                         muted: held.mutes.contains(&held_on.id),
                         volume: held.volume_of(&held_on.id),
                         held_on: held_on.clone(),
@@ -1379,13 +1554,20 @@ impl StateAuthority {
     /// else. What it does move is immediate — a closed socket is a fact, not a silence, so
     /// there is nothing to wait out and the fan-out closes on the next turn.
     ///
+    /// **It ends a priority press** and hands it back to be audited. A priority key held across
+    /// an outage is suppressed until released ([ADR-0043]), so nothing is left standing to
+    /// raise anybody's volume when a new socket comes back — and the socket that carried the
+    /// release is the one that has gone, so the release will never arrive to end it otherwise.
+    ///
     /// [ADR-0041]: ../../docs/adr/0041-a-session-is-resumed-by-name.md
-    pub(crate) fn the_channel_is_gone(&self, session: &SessionId) {
+    /// [ADR-0043]: ../../docs/adr/0043-a-resume-restores-everything-except-the-key.md
+    pub(crate) fn the_channel_is_gone(&self, session: &SessionId) -> Option<Pressed> {
         self.write(|live| {
-            if let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) {
-                held.the_channel_is_gone = true;
-            }
-        });
+            let held = live.sessions.iter_mut().find(|held| &held.id == session)?;
+            held.the_channel_is_gone = true;
+
+            held.let_go()
+        })
     }
 
     /// Push a session's last heartbeat back by `ago`, so that a test can stand at a rung
@@ -1550,13 +1732,16 @@ impl StateAuthority {
 }
 
 /// A session, as the thing it becomes the moment it is out of the list.
-fn ended(session: Session, why: Ended) -> Relinquished {
+fn ended(mut session: Session, why: Ended) -> Relinquished {
+    let pressed = session.let_go();
+
     Relinquished {
         session: session.id,
         sign_in: session.sign_in,
         occupant: session.occupant,
         role: session.role,
         why,
+        pressed,
     }
 }
 
@@ -1636,6 +1821,21 @@ impl Live {
         self.sessions
             .iter()
             .filter(|held| held.is_transmitting(self.ladder, now))
+            .flat_map(|held| held.arms.iter().cloned())
+            .collect()
+    }
+
+    /// Every loop somebody is armed and keyed on **at priority**, deployment-wide.
+    ///
+    /// The whole arm set of every talker at priority, because priority is an attribute of the
+    /// transmission rather than of a destination ([ADR-0045]). Like the loops being spoken on,
+    /// it answers with loops rather than talkers, so nothing in it could say whose.
+    ///
+    /// [ADR-0045]: ../../docs/adr/0045-priority-defeats-attenuation-and-nothing-else.md
+    fn the_loops_spoken_on_at_priority(&self, now: Instant) -> Vec<LoopId> {
+        self.sessions
+            .iter()
+            .filter(|held| held.is_at_priority(self.ladder, now))
             .flat_map(|held| held.arms.iter().cloned())
             .collect()
     }
@@ -2056,6 +2256,7 @@ mod tests {
                 subscribed: false,
                 armed: false,
                 talking: false,
+                priority: false,
                 muted: false,
                 volume: Volume::UNITY,
             }]
@@ -3476,6 +3677,280 @@ mod tests {
         live.subscribe(&listener, &air_to_ground);
 
         (talker, listener)
+    }
+
+    // ---- Priority (#45) -----------------------------------------------------------------
+
+    /// The loops one session's document marks as carrying a priority transmission.
+    fn marked(live: &StateAuthority, session: &SessionId, within: Vec<InReach>) -> Vec<String> {
+        live.presence(session, within)
+            .expect("a document")
+            .1
+            .loops
+            .into_iter()
+            .filter(|standing| standing.priority)
+            .map(|standing| standing.held_on.name)
+            .collect()
+    }
+
+    /// A talker armed on two loops, and a listener monitoring both.
+    async fn a_talker_on_two_loops(
+        live: &StateAuthority,
+        store: &Store,
+    ) -> (SessionId, SessionId, Vec<InReach>) {
+        let talker = a_session(live, store, "flight").await;
+        let listener = a_session(live, store, "capcom").await;
+        let reach = vec![a_loop_to_emit_on("air-to-ground"), a_loop_to_emit_on("sim")];
+        live.presence(&talker, reach.clone());
+        live.presence(&listener, reach.clone());
+        for held_on in ["air-to-ground", "sim"] {
+            live.arm(&talker, &LoopId::presented(held_on.to_owned()));
+            live.subscribe(&listener, &LoopId::presented(held_on.to_owned()));
+        }
+
+        (talker, listener, reach)
+    }
+
+    /// **Priority applies to the whole arm set** (ADR-0045). One stream is fanned out at the
+    /// server, so a priority transmission is marked on every loop it lands on, and there is no
+    /// way to be priority on one armed loop and ordinary on another.
+    #[tokio::test]
+    async fn a_priority_transmission_is_marked_on_every_loop_it_lands_on() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener, reach) = a_talker_on_two_loops(&live, &store).await;
+
+        live.the_client_keys(&talker);
+        assert!(
+            marked(&live, &listener, reach.clone()).is_empty(),
+            "an ordinary transmission was marked"
+        );
+
+        assert!(live.the_client_keys_priority(&talker));
+        assert_eq!(
+            marked(&live, &listener, reach.clone()),
+            ["air-to-ground", "sim"]
+        );
+        assert_eq!(
+            talking(&live, &listener, reach.clone()),
+            ["air-to-ground", "sim"]
+        );
+
+        live.the_client_unkeys_priority(&talker);
+        assert!(marked(&live, &listener, reach.clone()).is_empty());
+        assert_eq!(
+            talking(&live, &listener, reach),
+            ["air-to-ground", "sim"],
+            "letting go of priority under a key ended the transmission"
+        );
+    }
+
+    /// **Marked wherever it lands** (ADR-0059): on a loop the receiver has muted, where there is
+    /// no audio at all, and on one they are not monitoring. The mark is a declaration that
+    /// somebody called this urgent, not an explanation of a gain change.
+    #[tokio::test]
+    async fn the_mark_reaches_a_muted_loop_and_an_unmonitored_one() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_and_a_listener(&live, &store).await;
+        let unmonitored = a_session(&live, &store, "gnc").await;
+        live.presence(&unmonitored, vec![a_loop("air-to-ground")]);
+        live.mute(&listener, &LoopId::presented("air-to-ground".to_owned()));
+
+        live.the_client_keys(&talker);
+        live.the_client_keys_priority(&talker);
+
+        assert_eq!(
+            marked(&live, &listener, vec![a_loop("air-to-ground")]),
+            ["air-to-ground"],
+            "a mute hid the mark"
+        );
+        assert_eq!(
+            marked(&live, &unmonitored, vec![a_loop("air-to-ground")]),
+            ["air-to-ground"],
+            "the mark reached only the loops somebody was hearing"
+        );
+    }
+
+    /// **Priority governs gain and never who receives** (ADR-0045). It defeats no mute,
+    /// compels no subscription and lowers no other talker, so the fan-out is exactly what it
+    /// was: nothing is added, nothing is taken away, and nothing moves.
+    #[tokio::test]
+    async fn priority_changes_nobody_s_route() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_and_a_listener(&live, &store).await;
+        let other = a_session(&live, &store, "gnc").await;
+        let unsubscribed = a_session(&live, &store, "eecom").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        live.presence(&other, vec![a_loop_to_emit_on("air-to-ground")]);
+        live.presence(&unsubscribed, vec![a_loop("air-to-ground")]);
+        live.arm(&other, &air_to_ground);
+        live.mute(&listener, &air_to_ground);
+        live.the_client_keys(&other);
+        live.the_routing_if_it_moved();
+
+        live.the_client_keys(&talker);
+        live.the_client_keys_priority(&talker);
+
+        assert_eq!(
+            live.the_routing_if_it_moved(),
+            None,
+            "keying priority moved somebody's route"
+        );
+        assert!(
+            heard_by(&live, &talker).is_empty(),
+            "priority defeated a mute or compelled a subscription"
+        );
+    }
+
+    /// **The level model, on the server's side** (ADR-0046): `is-priority` is the priority
+    /// level of a transmission, so a priority level with nothing keyed marks nothing — there is
+    /// no transmission for it to be an attribute of.
+    #[tokio::test]
+    async fn a_priority_level_under_no_key_marks_nothing() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_and_a_listener(&live, &store).await;
+
+        live.the_client_keys_priority(&talker);
+
+        assert!(marked(&live, &listener, vec![a_loop("air-to-ground")]).is_empty());
+        assert!(
+            !live
+                .presence(&talker, vec![a_loop_to_emit_on("air-to-ground")])
+                .expect("a document")
+                .1
+                .priority
+        );
+    }
+
+    /// **Cut beats priority** (ADR-0045). A transmission whose fan-out is closed is not marked
+    /// anywhere, because the mark is an attribute of a transmission that is landing. The talker
+    /// with no signalling channel is the one whose fan-out VoxLoop closes today, by the machinery
+    /// Cut will use.
+    #[tokio::test]
+    async fn a_priority_talker_whose_fan_out_is_closed_is_marked_nowhere() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_and_a_listener(&live, &store).await;
+        live.the_client_keys(&talker);
+        live.the_client_keys_priority(&talker);
+
+        live.unheard_from_for(&talker, Duration::from_secs(13));
+
+        assert!(marked(&live, &listener, vec![a_loop("air-to-ground")]).is_empty());
+        assert!(heard_by(&live, &talker).is_empty());
+    }
+
+    /// The talker's own lamp says their transmission is at priority, and it says so from the
+    /// server's answer — an elevated latch shows as elevated with no new surface (ADR-0046).
+    #[tokio::test]
+    async fn the_lamp_says_when_a_transmission_is_at_priority() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        live.the_client_keys(&session);
+        let (before, ordinary) = live.presence(&session, Vec::new()).expect("a document");
+        assert!(!ordinary.priority);
+
+        live.the_client_keys_priority(&session);
+        let (after, elevated) = live.presence(&session, Vec::new()).expect("a document");
+
+        assert!(elevated.priority);
+        assert_eq!(
+            after,
+            before + 1,
+            "keying priority did not move the document"
+        );
+    }
+
+    /// **Every press is handed back to be audited, with the armed set as it stood at the
+    /// press** (v1 §12). A set that moved during the press is still recorded as it was when
+    /// the key went down, because that is the set the priority was keyed over.
+    #[tokio::test]
+    async fn a_press_is_handed_back_when_it_ends_with_the_arm_set_it_was_keyed_over() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, _listener, _reach) = a_talker_on_two_loops(&live, &store).await;
+        let occupant = live_occupant(&live, &talker);
+
+        live.the_client_keys(&talker);
+        live.the_client_keys_priority(&talker);
+        live.disarm(&talker, &LoopId::presented("sim".to_owned()));
+        let pressed = live
+            .the_client_unkeys_priority(&talker)
+            .expect("the press to be handed back");
+
+        assert_eq!(pressed.occupant, occupant);
+        assert_eq!(
+            Some(pressed.role),
+            live.the_role_of(&talker),
+            "the press was not attributed to the role it was keyed under"
+        );
+        assert_eq!(pressed.armed_on, ["air-to-ground", "sim"]);
+        assert!(pressed.lasted < Duration::from_secs(5));
+    }
+
+    /// **No minimum duration** (ADR-0046). A press that lasted no time at all is still a press,
+    /// and a second key-down while one is held is the same press rather than a new one.
+    #[tokio::test]
+    async fn every_press_is_one_press_however_short_and_however_often_it_is_said() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+
+        live.the_client_keys_priority(&session);
+        live.the_client_keys_priority(&session);
+        assert!(live.the_client_unkeys_priority(&session).is_some());
+        assert!(
+            live.the_client_unkeys_priority(&session).is_none(),
+            "one press was handed back twice"
+        );
+    }
+
+    /// A press held when the session ends ends with it, and the ending hands it back: the
+    /// press happened, and relinquishing under it is not a way to keep it out of the log.
+    #[tokio::test]
+    async fn a_press_held_when_the_session_ends_is_handed_back_with_the_ending() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        live.the_client_keys_priority(&session);
+
+        let ended = live
+            .ended_by_its_own_holder(&session)
+            .expect("the session to end");
+
+        assert!(
+            ended.pressed.is_some(),
+            "a press went unrecorded with its session"
+        );
+    }
+
+    /// **A priority key held across an outage is suppressed until released** (ADR-0043), so a
+    /// socket that goes takes the press with it. Nothing is left standing to raise anybody's
+    /// volume when a new socket comes back.
+    #[tokio::test]
+    async fn a_press_ends_when_the_channel_goes() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        live.the_client_keys(&session);
+        live.the_client_keys_priority(&session);
+
+        assert!(live.the_channel_is_gone(&session).is_some());
+
+        live.the_client_is_there(&session);
+        assert!(
+            !live
+                .presence(&session, Vec::new())
+                .expect("a document")
+                .1
+                .priority,
+            "a press outlived the channel it was keyed on"
+        );
+        assert!(live.the_client_unkeys_priority(&session).is_none());
     }
 
     /// Whoever holds this session, for a test that has to name them to ask whether they still

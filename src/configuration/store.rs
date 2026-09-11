@@ -37,11 +37,19 @@ pub(super) fn unavailable(error: impl std::error::Error + Send + Sync + 'static)
 /// An integer sorts and compares without a date library on either side of the wire, and
 /// rendering one for a human to read is the console's job.
 pub(super) fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
-        })
+    as_stored(std::time::SystemTime::now())
+}
+
+/// A moment, in the one shape of time this store holds.
+pub(super) fn as_stored(at: std::time::SystemTime) -> i64 {
+    at.duration_since(std::time::UNIX_EPOCH).map_or(0, |since| {
+        i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+    })
+}
+
+/// A moment this store holds, back as the moment it was.
+pub(super) fn as_read(stored: i64) -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_millis(u64::try_from(stored).unwrap_or(0))
 }
 
 /// The migrations this binary carries, run against the store at startup. Embedded, so a
