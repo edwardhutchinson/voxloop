@@ -37,11 +37,11 @@ use tokio::task::JoinHandle;
 use crate::authorisation::Requirement;
 use axum::response::Response;
 
-use crate::configuration::{Deployment, Store, StoreError, Transaction, UserId, Users};
+use crate::configuration::{Deployment, Loops, Store, StoreError, Transaction, UserId, Users};
 use crate::identity::{Bootstrap, Identity, PasswordRefused};
-use crate::media_plane::MediaPlane;
+use crate::media_plane::{Destination, MediaPlane};
 #[cfg(test)]
-use crate::media_plane::{Recording, a_recording_media_plane};
+use crate::media_plane::{Instructed, Recording, a_recording_media_plane};
 use crate::state::StateAuthority;
 use crate::telemetry::module;
 use rate_limit::{Admission, RateLimits};
@@ -177,6 +177,38 @@ pub(crate) enum TransportError {
 
     #[error("nothing could listen on {address}")]
     CouldNotListen { address: SocketAddr },
+
+    #[error("the loops could not be read, so none of them could be given a beacon: {0}")]
+    Loops(#[from] StoreError),
+}
+
+/// Tell the media plane every loop there is, each of which runs a beacon ([ADR-0017]).
+///
+/// **The whole list, read from the store, every time** — at startup and after every write that
+/// adds or removes a loop. The media plane takes the whole set rather than a difference, so
+/// there is no running tally here to fall out of step with the store, and a loop is labelled
+/// the way the fan-out labels it so the beacon and the speech it stands in for cross the seam
+/// as the same destination ([ADR-0063]).
+///
+/// **A loop with no subscribers runs its beacon all the same**, which is why this reads
+/// Configuration rather than asking the state authority: the state authority knows the loops
+/// somebody is monitoring, and a beacon started at the first subscription would be unavailable
+/// at exactly the moment somebody subscribes.
+///
+/// [ADR-0017]: ../../../docs/adr/0017-loop-health-is-measured-not-asserted.md
+/// [ADR-0063]: ../../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
+async fn every_loop_runs_a_beacon(api: &Api) -> Result<(), StoreError> {
+    let mut transaction = api.store.begin().await?;
+    let loops = transaction.loops().await;
+    transaction.roll_back().await?;
+
+    let every_loop: Vec<Destination> = loops?
+        .iter()
+        .map(|held_on| Destination::labelled(held_on.id.as_str().to_owned()))
+        .collect();
+    api.media.these_loops_run_beacons(&every_loop);
+
+    Ok(())
 }
 
 /// Choose the cryptography rustls uses, rather than letting it be inferred.
@@ -210,6 +242,11 @@ pub(crate) async fn start(
         limits: Arc::new(RateLimits::default()),
         bootstrap: bootstrap.map(Arc::new),
     };
+
+    // **Every loop runs its beacon before anybody can assume a role** (ADR-0017). A restart
+    // ends every session, and every operator comes back into loops that have to be measurable
+    // the moment they are taken up.
+    every_loop_runs_a_beacon(&api).await?;
 
     let tls = RustlsConfig::from_pem_file(&deployment.tls.certificate, &deployment.tls.private_key)
         .await
@@ -439,6 +476,9 @@ mod tests {
     struct ABox {
         _directory: tempfile::TempDir,
         api: Api,
+        /// What the media plane was told. Nothing reached over HTTP carries audio, but the
+        /// loops an administrator creates and deletes are the loops that run beacons.
+        recording: Arc<Recording>,
     }
 
     impl ABox {
@@ -450,13 +490,15 @@ mod tests {
                 .await
                 .expect("the store to answer");
 
-            // No worker runs in a test ([ADR-0064]). Nothing reached over HTTP touches the
-            // media plane — assuming and relinquishing are signalling acts, and that is
-            // where what it was told is asserted on.
-            let (media, _reports, _recording) = a_recording_media_plane();
+            // No worker runs in a test ([ADR-0064]). Almost nothing reached over HTTP touches
+            // the media plane — assuming and relinquishing are signalling acts, and that is
+            // where what it was told is asserted on. The one exception is the list of loops,
+            // each of which runs a beacon.
+            let (media, _reports, recording) = a_recording_media_plane();
 
             Self {
                 _directory: directory,
+                recording,
                 api: Api {
                     store,
                     state: Arc::new(StateAuthority::empty()),
@@ -2868,6 +2910,83 @@ mod tests {
                 .await
                 .status,
             StatusCode::NOT_FOUND
+        );
+    }
+
+    /// The loops the media plane was last told run beacons, by label.
+    fn the_loops_running_beacons(box_of: &ABox) -> Vec<String> {
+        box_of
+            .recording
+            .instructions()
+            .into_iter()
+            .rev()
+            .find_map(|instruction| match instruction {
+                Instructed::TheseLoopsRunBeacons(loops) => Some(
+                    loops
+                        .iter()
+                        .map(|destination| destination.as_str().to_owned())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// **Every loop runs a beacon, from the moment it is created to the moment it is deleted,
+    /// whether or not anybody monitors it** (ADR-0017). Nobody has assumed anything here, so
+    /// nobody could be counting — which is the case the rule is about: a beacon started at the
+    /// first subscription would be unavailable at exactly the moment somebody subscribes.
+    #[tokio::test]
+    async fn every_loop_runs_a_beacon_from_its_creation_to_its_deletion() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+
+        let flight = id_in(
+            &box_of
+                .post_holding(&held, "/api/loops", r#"{"name":"FLIGHT"}"#)
+                .await
+                .body,
+        );
+        assert_eq!(the_loops_running_beacons(&box_of), vec![flight.clone()]);
+
+        let sim = id_in(
+            &box_of
+                .post_holding(&held, "/api/loops", r#"{"name":"SIM"}"#)
+                .await
+                .body,
+        );
+        let mut running = the_loops_running_beacons(&box_of);
+        running.sort();
+        let mut both = vec![flight.clone(), sim.clone()];
+        both.sort();
+        assert_eq!(running, both);
+
+        box_of
+            .holding(&held, "DELETE", &format!("/api/loops/{flight}"), "")
+            .await;
+        assert_eq!(the_loops_running_beacons(&box_of), vec![sim]);
+    }
+
+    /// **The loops a deployment already has run beacons from the moment it starts**, because a
+    /// restart ends every session and every operator assumes again into loops that must
+    /// already be measurable.
+    #[tokio::test]
+    async fn the_loops_already_there_run_beacons_from_the_start() {
+        let box_of = ABox::already_administered().await;
+        let mut transaction = box_of.api.store.begin().await.expect("a transaction");
+        let flight = transaction
+            .create_loop("FLIGHT")
+            .await
+            .expect("the loop to be created");
+        transaction.commit().await.expect("the loop to land");
+
+        every_loop_runs_a_beacon(&box_of.api)
+            .await
+            .expect("the loops to be readable");
+
+        assert_eq!(
+            the_loops_running_beacons(&box_of),
+            vec![flight.as_str().to_owned()]
         );
     }
 

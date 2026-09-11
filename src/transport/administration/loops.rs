@@ -29,7 +29,7 @@ use crate::configuration::{
     Snapshot, StoreError, Transaction, UserId,
 };
 use crate::telemetry::module;
-use crate::transport::{Api, answers};
+use crate::transport::{Api, answers, every_loop_runs_a_beacon};
 
 /// A loop, as the console reads one. The list is in the base order, which is the order.
 ///
@@ -127,23 +127,27 @@ pub(in crate::transport) async fn create_loop(
         return unreachable_caller();
     };
 
-    answers::or_unavailable(
-        create(
-            &api,
-            acting,
-            AuditEvent::LoopCreated,
-            new.name.clone(),
-            async |transaction: &mut Transaction| {
-                let id = transaction.create_loop(&new.name).await?;
+    let created = create(
+        &api,
+        acting,
+        AuditEvent::LoopCreated,
+        new.name.clone(),
+        async |transaction: &mut Transaction| {
+            let id = transaction.create_loop(&new.name).await?;
 
-                Ok(transaction.a_loop(&id).await?)
-            },
-            async |_transaction: &mut Transaction, made: &Loop| {
-                Ok((StatusCode::CREATED, Json(LoopAsRead::of(made))).into_response())
-            },
-        )
-        .await,
+            Ok(transaction.a_loop(&id).await?)
+        },
+        async |_transaction: &mut Transaction, made: &Loop| {
+            Ok((StatusCode::CREATED, Json(LoopAsRead::of(made))).into_response())
+        },
     )
+    .await;
+
+    // **A new loop runs its beacon from the moment it exists** (ADR-0017), before anybody has
+    // reach on it, let alone a subscription.
+    the_beacons_follow(&api).await;
+
+    answers::or_unavailable(created)
 }
 
 /// Rename a loop. `SystemAdministration`, audited — refused or not.
@@ -185,14 +189,37 @@ pub(in crate::transport) async fn delete(
     };
     let target = LoopId::presented(id);
 
-    administering(
+    let answered = administering(
         &api,
         acting,
         AuditEvent::LoopDeleted,
         &target,
         async |transaction: &mut Transaction| Ok(transaction.delete_loop(&target).await?),
     )
-    .await
+    .await;
+
+    // A loop that is gone has no beacon, and nobody is left counting one for it.
+    the_beacons_follow(&api).await;
+
+    answered
+}
+
+/// Hand the media plane the loops as the store now has them, after a write that may have
+/// added or removed one.
+///
+/// It reads the store rather than the write's answer, so a write that was refused and one that
+/// landed are the same call and there is no case in which the two can disagree. **It cannot
+/// fail the write**, which has already been answered for: a store that could not be read here
+/// leaves the beacons as they were, which is shouted about rather than swallowed, because a loop
+/// with no beacon reads as not received on every console monitoring it.
+async fn the_beacons_follow(api: &Api) {
+    if let Err(error) = every_loop_runs_a_beacon(api).await {
+        tracing::error!(
+            target: module::TRANSPORT,
+            %error,
+            "the loops could not be read, so the beacons may not match them"
+        );
+    }
 }
 
 /// Every write to a loop record, on the one audited path, answering with the loop.

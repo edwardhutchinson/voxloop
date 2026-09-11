@@ -26,8 +26,8 @@
 use std::sync::{Arc, Mutex};
 
 use super::{
-    Audience, Carriage, Carried, MediaPlane, Negotiated, Negotiation, Reported, Reporting, Reports,
-    Telling, Way,
+    Audience, Carriage, Carried, Destination, MediaPlane, Negotiated, Negotiation, Reported,
+    Reporting, Reports, Telling, Way,
 };
 use crate::state::SessionId;
 
@@ -60,6 +60,11 @@ pub(crate) enum Instructed {
     TheseShouldHear {
         talker: SessionId,
         audience: Audience,
+    },
+    TheseLoopsRunBeacons(Vec<Destination>),
+    TheseBeaconsReach {
+        listener: SessionId,
+        on: Vec<Destination>,
     },
 }
 
@@ -192,6 +197,17 @@ impl Carriage for Recording {
         self.write(Instructed::TheseShouldHear {
             talker: talker.clone(),
             audience: audience.clone(),
+        });
+    }
+
+    fn these_loops_run_beacons(&self, loops: &[Destination]) {
+        self.write(Instructed::TheseLoopsRunBeacons(loops.to_vec()));
+    }
+
+    fn these_beacons_reach(&self, listener: &SessionId, on: &[Destination]) {
+        self.write(Instructed::TheseBeaconsReach {
+            listener: listener.clone(),
+            on: on.to_vec(),
         });
     }
 }

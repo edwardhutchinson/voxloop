@@ -208,6 +208,22 @@ pub(crate) enum Negotiated {
     },
     /// One fewer. This carriage is closed at the server's end and the client should let it go.
     OneFewerTalker(Carried),
+    /// One loop's beacon, what to build in order to count it, and the loop it measures.
+    ///
+    /// **It is a message of its own rather than one more talker**, because the client must
+    /// never play it and must always count it ([ADR-0017]): a beacon mistaken for a talker
+    /// would be mixed into somebody's ears, and a talker mistaken for a beacon would be one
+    /// whose voice was counted rather than heard. The destination is the label this listener
+    /// was named on, handed back unchanged, like a talker's.
+    ///
+    /// [ADR-0017]: ../../docs/adr/0017-loop-health-is-measured-not-asserted.md
+    OneMoreBeacon {
+        beacon: Negotiation,
+        on: Destination,
+    },
+    /// This beacon's carriage is closed at the server's end, and the client should stop
+    /// counting it.
+    OneFewerBeacon(Carried),
 }
 
 /// Where the media plane says things to one session. Handed in, so nothing here calls out.
@@ -351,6 +367,33 @@ trait Carriage: Send + Sync {
     ///
     /// [ADR-0063]: ../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
     fn these_should_hear(&self, talker: &SessionId, audience: &Audience);
+
+    /// Every loop there is, each of which runs a beacon ([ADR-0017]).
+    ///
+    /// **The whole set each time**, like an audience, and for the same reason: a difference
+    /// would make this module hold an opinion about what it was told last. A destination named
+    /// here gets a beacon whether or not anybody counts it — **a loop with no subscribers still
+    /// runs its beacon**, or the mechanism would be unavailable at exactly the moment somebody
+    /// subscribes — and a destination left out loses its beacon and every carriage of it.
+    ///
+    /// **A beacon is never a talker.** It is not watched by the `AudioLevelObserver` and it
+    /// cannot be addressed by the recording tap, which is per (talker, destination loop)
+    /// ([ADR-0009]): a beacon has no session to be a talker as. Letting it into either would
+    /// register a permanent talker on every loop and a permanent signal in every recording.
+    ///
+    /// [ADR-0009]: ../../docs/adr/0009-recording-taps-plain-rtp-on-loopback.md
+    /// [ADR-0017]: ../../docs/adr/0017-loop-health-is-measured-not-asserted.md
+    fn these_loops_run_beacons(&self, loops: &[Destination]);
+
+    /// Make exactly these beacons reach this listener, and no others.
+    ///
+    /// It is an answer like an audience ([ADR-0063]): the state authority worked out which
+    /// loops this listener monitors, and this carries one beacon carriage per loop down to
+    /// them. **One beacon per loop and never per (loop, talker)**: that would close the gap
+    /// v1 §16 records, at forty times the mechanism, and it was rejected.
+    ///
+    /// [ADR-0063]: ../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
+    fn these_beacons_reach(&self, listener: &SessionId, on: &[Destination]);
 }
 
 /// The media plane, as everything above it sees it.
@@ -447,6 +490,16 @@ impl MediaPlane {
     /// See [`Carriage::these_should_hear`].
     pub(crate) fn these_should_hear(&self, talker: &SessionId, audience: &Audience) {
         self.carriage.these_should_hear(talker, audience);
+    }
+
+    /// See [`Carriage::these_loops_run_beacons`].
+    pub(crate) fn these_loops_run_beacons(&self, loops: &[Destination]) {
+        self.carriage.these_loops_run_beacons(loops);
+    }
+
+    /// See [`Carriage::these_beacons_reach`].
+    pub(crate) fn these_beacons_reach(&self, listener: &SessionId, on: &[Destination]) {
+        self.carriage.these_beacons_reach(listener, on);
     }
 }
 

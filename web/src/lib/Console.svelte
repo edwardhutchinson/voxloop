@@ -33,6 +33,8 @@
 	import Board from './Board.svelte';
 	import Ledger from './Ledger.svelte';
 	import LoopVolume from './LoopVolume.svelte';
+	import OutputCheck from './OutputCheck.svelte';
+	import { watchTheOutput } from './output.js';
 	import { CONFIRMED, DISCONNECTED, UNCONFIRMED, worse } from './session.js';
 	import { keyingModes, LATCHED, modes, MOMENTARY, PRIORITY } from './modes.js';
 
@@ -111,6 +113,35 @@
 	// confirmed, and a loop that leaves reach while its modal is open takes the modal with it.
 	let volumeOpenFor = $state(null);
 	const volumeOf = $derived(presence.loops.find((reachable) => reachable.id === volumeOpenFor));
+
+	// **Whether this desk's audio output has moved under the operator since they last heard the
+	// check tone** — a default swapped, or an output unplugged (ADR-0017). It is kept here
+	// because nothing else can know it: the server cannot see the last metre to somebody's ears
+	// and neither can the beacon, so this console watches its own outputs for as long as the
+	// session lasts and says so, loudly, when one moves.
+	let moved = $state(null);
+	let watching = null;
+
+	$effect(() => {
+		// A browser with no device list to read has nothing to compare, and says nothing
+		// rather than an alarm about nothing.
+		if (!navigator.mediaDevices) return;
+
+		const watch = watchTheOutput({
+			devices: navigator.mediaDevices,
+			onMoved: (now) => (moved = now)
+		});
+		watching = watch;
+
+		return () => watch.stop();
+	});
+
+	// The operator heard the tone on the output as it stands now, so that is what the next
+	// change is measured from.
+	function heardTheTone() {
+		moved = null;
+		watching?.settle();
+	}
 
 	// **One order, and both views are handed it.** Reordering it reorders both, because there
 	// is only one of it: two independent orders would put the same loop third in one view and
@@ -320,6 +351,10 @@
 	{#if refused}
 		<p class="refusal" role="alert">{refused}</p>
 	{/if}
+
+	<!-- Above both views rather than inside either: it is about the headset on this desk, not
+	     about any loop, and every loop can read as received while the sound goes nowhere. -->
+	<OutputCheck {moved} onConfirmed={heardTheTone} />
 
 	{#if inOrder.length === 0}
 		<!-- A fact about reach rather than about either view, so it is said here and once. The

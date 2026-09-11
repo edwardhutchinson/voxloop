@@ -242,8 +242,8 @@ moment.
 something the server has committed to keeping true. It carries the session, the role it is
 bound to, its **media path state**, whether the server has this session down as
 **transmitting**, and the loops in reach with **which of them the session is monitoring**,
-**which it has armed**, **which are being spoken on**, **which it has muted** and **how loud
-each plays**; staffing state, loop health and the
+**which it has armed**, **which are being spoken on**, **which it has muted**, **how loud
+each plays** and **whether each monitored loop is reaching it**; staffing state and the
 audience land in it one ticket at a time.
 
 It is **scoped to reach** — only loops the session's role holds at least `monitor` on — and
@@ -314,6 +314,58 @@ takes the decision from the person best placed to make it, possibly mid-fix. The
 is the deployment losing its purpose, with nobody left to leave the judgement with — so live
 state moves first, so the last thing every console is told about itself is true, and then the
 unit goes down.
+
+## Loop health and the loop beacon
+
+DTX means silence sends no packets, so **a quiet loop and an unreachable loop sound identical,
+and they must never look identical** (v1 §6). Loop health is the third axis beside connection
+state and media path state: whether a session is actually receiving a loop, **measured rather
+than asserted** ([ADR-0017](docs/adr/0017-loop-health-is-measured-not-asserted.md)).
+
+**Every loop runs a loop beacon**: one silent Opus packet every five seconds, produced on a
+direct transport on the one router, from the moment the loop is created until it is deleted,
+**whether or not anybody monitors it**. The list comes from the store at startup and after
+every loop is created or deleted. Every session monitoring a loop, muted or not, is carried
+**one paused carriage of that loop's beacon**, which the client builds, never plays, and counts
+from its receiver's `packetsReceived`. It sends the running totals up as `beacons-counted`
+whenever they move. **The client counts and the server judges**: a total that moved is an
+arrival. A loop with nothing counted for fifteen seconds (three intervals, so two lost packets
+say nothing) is `not-receiving`. A loop just taken up, or just back from a channel outage, is
+`checking` until the first count or the window runs out. A wedged client reports nothing, so it
+fails safe.
+
+The beacon **is never a talker**. It is never added to the `AudioLevelObserver`, and it has no
+session to be a talker as, so the recording tap, which is per (talker, destination loop), cannot
+address it. At pilot scale it is around 240 packets a second across the deployment.
+
+**Health is per (session, loop)**, so two subscribers may correctly disagree. It is in the
+presence document on each monitored loop as `receiving`, `checking` or `not-receiving`, and
+`null` elsewhere. It is **also `null` while the server has the session's channel as anything but
+confirmed**: the counts ride that channel, so connection state already explains the silence, and
+showing beacon loss as well would turn one failure into two competing reasons. The board says
+`Not receiving` or `Checking` as a word and says nothing when the loop is being received, the way
+it says nothing about a loop at unity. The ledger says it in a sentence on every monitored row.
+
+**Beacon loss is one of the reasons an occupant is not hearing a loop**, which is what turns
+`staffed` from *says they're listening* into *demonstrably receiving*. The state authority
+answers that per occupant, taking the reason furthest upstream: `unreachable`, then `not
+subscribed`, then `not receiving it`, then `muted`, with off console
+([#47](https://github.com/edwardhutchinson/voxloop/issues/47)) to join them. Staffing state
+itself, counted across every occupant of every staffing role, is
+[#48](https://github.com/edwardhutchinson/voxloop/issues/48).
+
+**What the beacon does not prove is recorded and left open**: the downlink is per talker, so
+the beacon's carriage is not the one carrying anybody's voice. Loss proves deafness. Arrival
+does not prove you would hear a given talker. One beacon per (loop, talker) would close the gap,
+and it was rejected as forty times the mechanism.
+
+**The console also checks its own output path**, which neither the server nor the beacon can
+see. At assume it asks the operator to play a check tone and say whether they heard it. After
+that it watches `devicechange` and compares the label and group of the `default` output across
+events, so a headset unplugged or a default swapped under the operator is **said aloud, with
+the tone offered again**. The swap detection is asserted at moderate confidence and is to be
+confirmed on real hardware alongside
+[#17](https://github.com/edwardhutchinson/voxloop/issues/17).
 
 ## The operating console
 
@@ -424,7 +476,7 @@ The three things an operator does to shape what they hear, and the rule that set
 
 **Mute silences a loop in the operator's own ears and touches nobody else.** It is not an
 unsubscribe: the subscription stands, so the loop's talking indicator and its priority mark
-keep arriving (and its loop health will when it exists). It is enforced **in the fan-out rather
+keep arriving, and so does its loop health. It is enforced **in the fan-out rather
 than in the client** — a muted loop is one the state authority does not count the operator as
 hearing, so no talker is carried to them on it. That is also what makes a mute sovereign over
 priority ([ADR-0045](docs/adr/0045-priority-defeats-attenuation-and-nothing-else.md)): a priority

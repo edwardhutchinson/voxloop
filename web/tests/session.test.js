@@ -66,7 +66,10 @@ function listening() {
 		onUplinkCarried: (carriage) => told.push(['the-uplink-is-carried', carriage]),
 		onOneMoreTalker: (talker, heardOn) => told.push(['one-more-talker', talker, heardOn]),
 		onHeardOn: (carriage, heardOn) => told.push(['heard-on', carriage, heardOn]),
-		onOneFewerTalker: (carriage) => told.push(['one-fewer-talker', carriage])
+		onOneFewerTalker: (carriage) => told.push(['one-fewer-talker', carriage]),
+		// A loop's beacon, which Audio counts and never plays (ADR-0017).
+		onOneMoreBeacon: (beacon, on) => told.push(['one-more-beacon', beacon, on]),
+		onOneFewerBeacon: (carriage) => told.push(['one-fewer-beacon', carriage])
 	};
 }
 
@@ -407,6 +410,37 @@ test('what the media plane says is handed on whole, and none of it is a document
 		['heard-on', 'a-carriage', ['l-flight', 'l-sim']],
 		['one-fewer-talker', 'a-carriage']
 	]);
+});
+
+// **A beacon is not a talker**, and it arrives in a message of its own so that nothing has to
+// tell the two apart by looking: one is played and never counted, the other counted and never
+// played (ADR-0017). It says which loop it measures, as an id the document already carries.
+test('a loop’s beacon is handed on whole, apart from the talkers', () => {
+	const page = openTold();
+
+	page.socket.says({ message: 'one-more-beacon', beacon: { id: 'a-beacon' }, on: 'l-flight' });
+	page.socket.says({ message: 'one-fewer-beacon', carriage: 'a-beacon' });
+
+	assert.deepEqual(page.told, [
+		['one-more-beacon', { id: 'a-beacon' }, 'l-flight'],
+		['one-fewer-beacon', 'a-beacon']
+	]);
+});
+
+// **The client counts and the server judges** (ADR-0017). What goes up is the running total
+// per loop and nothing concluded from it, so a wedged client that says nothing is read as
+// receiving nothing — and the report renders nothing here either.
+test('a tab reports what it has counted of each beacon, and renders nothing off it', () => {
+	const page = listening();
+	const channel = openSignalling(page);
+	lastSocket().happens('open');
+
+	channel.beaconsCounted({ 'l-flight': 3, 'l-sim': 0 });
+
+	assert.deepEqual(lastSocket().sent.slice(1).map(JSON.parse), [
+		{ message: 'beacons-counted', counted: { 'l-flight': 3, 'l-sim': 0 } }
+	]);
+	assert.deepEqual(page.told, []);
 });
 
 // **Mute is two acts and volume is one**, and none of them is rendered off here (ADR-0016):

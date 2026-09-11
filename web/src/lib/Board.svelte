@@ -35,6 +35,12 @@
 	// about (v1 §4), and the card is where the operator who turned it down is reminded, but a
 	// word true of nearly every card on the board is one nobody reads.
 	//
+	// **Loop health is a word on the card only when it is not the ordinary case** (#46). A loop
+	// whose beacon is not arriving says `Not receiving`, because a quiet loop and an
+	// unreachable one sound identical and must never look identical (v1 §6); one just taken up
+	// says `Checking`. A loop that is being received says nothing, for the reason a loop at
+	// unity does — the ledger says it on every row.
+	//
 	// **Volume is behind the cog and nowhere else on the card** (v1 §8, ADR-0034). It is not a
 	// live operational control, so nothing here can nudge it: the cog opens a modal scoped to
 	// the loop, which `Console.svelte` holds above both views.
@@ -73,6 +79,11 @@
 				{/if}
 				{#if reachable.volume < 100}
 					<span class="volume">{reachable.volume}%</span>
+				{/if}
+				{#if reachable.subscribed && reachable.health === 'not-receiving'}
+					<span class="health unreceived">Not receiving</span>
+				{:else if reachable.subscribed && reachable.health === 'checking'}
+					<span class="health">Checking</span>
 				{/if}
 				<!-- The priority mark is this indicator's one variant, and it is drawn on every
 				     loop the document marks — muted, unheard or at full volume (ADR-0059). -->
@@ -211,7 +222,8 @@
 	}
 
 	.muted,
-	.volume {
+	.volume,
+	.health {
 		display: block;
 		margin-top: var(--space-1);
 		font-size: var(--type-2);
