@@ -43,6 +43,13 @@
 	// are on the air* is the server's answer and arrives in the presence document. So the
 	// latch never touches the lamp, and pressing latch lights nothing.
 	//
+	// **Priority is a third control, held like the key control and never latched** (ADR-0046).
+	// It is a second level beside the ordinary one rather than a mode, so it sits between the
+	// latch and the lamp and publishes a press and a release like the key control does: from
+	// cold it keys and elevates, and over a latch it elevates and leaves the latch standing.
+	// Whether the transmission *is* at priority is the server's answer like the lamp is, so the
+	// lamp says it — an elevated latch shows as elevated with no new surface.
+	//
 	// The two audience counts are #49's, and the presets that sit beside the key control are
 	// #56's.
 
@@ -73,6 +80,10 @@
 	// `latched` is whether the key is latched open, `dropped` is the source that went while it
 	// was being held, if one has, and `latchDropped` is whether a latch was taken down by
 	// something other than the operator.
+	//
+	// `priority` is the server's answer about whether this session's transmission is at
+	// priority, read out of the document beside `keyed`; `onPriorityDown`/`onPriorityUp` are
+	// what the priority control publishes to Input, as a button and nothing more.
 	let {
 		mediaPath,
 		connection = CONFIRMED,
@@ -85,7 +96,10 @@
 		onDown,
 		onUp,
 		onLatchDown,
-		onLatchUp
+		onLatchUp,
+		priority = false,
+		onPriorityDown,
+		onPriorityUp
 	} = $props();
 
 	// **The armed set in words** (ADR-0034), and the same words in both views. It is a list
@@ -111,6 +125,15 @@
 		event.preventDefault();
 		onLatchDown();
 	};
+
+	const urging = (event) => {
+		event.preventDefault();
+		onPriorityDown();
+	};
+
+	// The lamp, in the server's words. `priority` without `keyed` is not a state the server
+	// sends, and it is read as what the lamp is for: whether this session is on the air.
+	const lamp = $derived(keyed ? (priority ? 'Keyed at priority' : 'Keyed') : 'Not keyed');
 </script>
 
 <section aria-label="Transmit bar">
@@ -218,11 +241,24 @@
 				{latched ? 'Unlatch' : 'Latch'}
 			</button>
 
+			<!-- **Held, and never latched** (v1 §4), so it is drawn and wired like the key
+			     control: a press and a release, and nothing on the way down that could hold it.
+			     It names the act; what is true now is the lamp, lit by the document. -->
+			<button
+				aria-pressed={priority}
+				onpointerdown={urging}
+				onpointerup={onPriorityUp}
+				onpointercancel={onPriorityUp}
+				onpointerleave={onPriorityUp}
+			>
+				Priority
+			</button>
+
 			<!-- The lamp, in words, and lit by the document alone. It is a separate thing from
 			     the control that asks for it, because *I pressed this* and *VoxLoop says you are
 			     on the air* are two facts and only the second one is worth showing. -->
-			<span class="lamp" role="status">
-				{keyed ? 'Keyed' : 'Not keyed'}
+			<span class="lamp" class:urgent={keyed && priority} role="status">
+				{lamp}
 			</span>
 		</p>
 
@@ -282,12 +318,17 @@
 		font-weight: 600;
 	}
 
-	/* A general sibling rather than an adjacent one: the latch control sits between the key and
-	   the lamp, and an adjacent combinator would quietly stop matching the day a third binding
-	   lands beside them (ADR-0046). */
+	/* A general sibling rather than an adjacent one: the latch and priority controls sit between
+	   the key and the lamp, and an adjacent combinator would not reach past them. */
 	.key[aria-pressed='false'] ~ .lamp {
 		color: var(--quiet);
 		font-weight: inherit;
+	}
+
+	/* The same colour the priority mark takes on a card, for the same reason and never alone:
+	   the lamp's words say it. */
+	.lamp.urgent {
+		color: var(--warning);
 	}
 
 	/* The latch control stays at the furniture's size, beside a key control that does not: the

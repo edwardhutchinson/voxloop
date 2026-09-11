@@ -4,8 +4,8 @@
 	// **Bindings are the user's** (ADR-0021): a keybinding is not reach, so it is
 	// personalisation rather than administration, and it is changed here rather than by a
 	// system administrator. What it is *not* is a second way to reach a mode — the two modes
-	// are ADR-0022's and there are two of them here because there are two of them, and the
-	// only thing this page can do is say which key each one is on.
+	// are ADR-0022's and priority is ADR-0046's, there are three rows here because there are
+	// three bindings, and the only thing this page can do is say which key each one is on.
 	//
 	// **What may be bound is the seam's answer, never this component's.** Space activates
 	// focused controls and `CapsLock` does not reliably report being released, and both are

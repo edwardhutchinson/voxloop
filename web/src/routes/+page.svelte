@@ -32,6 +32,7 @@
 		onUnmute={frame.unmute}
 		onSetVolume={frame.setVolume}
 		onKeying={frame.keying}
+		onPriority={frame.priority}
 	/>
 {:else}
 	<!-- The lobby marks a channel that has gone and does not otherwise read the ladder: there

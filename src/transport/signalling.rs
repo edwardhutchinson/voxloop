@@ -44,11 +44,13 @@ use super::{Api, answers, unmet};
 use crate::authorisation::{self, Caller, Outcome, Presented, Requirement};
 use crate::configuration::{
     AuditEntry, AuditEvent, AuditLog, Eligibilities, Grid, Ladder, LoopId, Occupancy, Permission,
-    Personalisation, Role, RoleId, Roles, SignInToken, SignIns, StoreError, Transaction, UserId,
-    Users, Volume,
+    Personalisation, PriorityPress, Role, RoleId, Roles, SignInToken, SignIns, StoreError,
+    Transaction, UserId, Users, Volume,
 };
 use crate::media_plane::{Audience, Carried, Destination, Hearing, Negotiated, Negotiation, Way};
-use crate::state::{Assuming, Ended, InReach, MediaPath, Relinquished, SessionId, WhoHears};
+use crate::state::{
+    Assuming, Ended, InReach, MediaPath, Pressed, Relinquished, SessionId, WhoHears,
+};
 use crate::telemetry::module;
 
 /// How often the lobby is worked out again and pushed if it has moved.
@@ -264,6 +266,25 @@ enum Incoming {
     Key,
     /// The client has stopped transmitting. `Session`, the other half of the signal.
     Unkey,
+    /// The client's transmission is at priority: somebody is holding the priority key.
+    ///
+    /// `Session` and **nothing more** (`docs/spec/api-surface.md`, [ADR-0046]): available to
+    /// anyone holding `emit`, with no `control` gate and no flag on the role, the loop or the
+    /// cell. It is ungated by choice and audited instead — every press, with no minimum
+    /// duration — and the worst it can do is make somebody louder than they wanted, which the
+    /// existing escalation in Cut already answers.
+    ///
+    /// **A second level beside the key rather than a kind of key.** The client ORs its levels
+    /// and says the answer as `key`; this is the priority level on its own, so it keys nothing
+    /// by itself. It carries no loop, because priority applies to the whole arm set
+    /// ([ADR-0045]).
+    ///
+    /// [ADR-0045]: ../../../docs/adr/0045-priority-defeats-attenuation-and-nothing-else.md
+    /// [ADR-0046]: ../../../docs/adr/0046-priority-is-keyed-not-held.md
+    KeyPriority,
+    /// The priority key was let go. `Session`, the other half, and the end of a press — which
+    /// is what gets audited.
+    UnkeyPriority,
     /// What this client's own end can decode.
     ///
     /// The first of four messages that are **mediasoup signalling** (`docs/spec/api-surface.md`)
@@ -343,6 +364,12 @@ impl Incoming {
             // not address (ADR-0007).
             | Self::Key
             | Self::Unkey
+            // **Nor does priority, and nor is it gated on `control`** (ADR-0046). The
+            // specialist who spots the anomaly is rarely the lead, and a `control` gate would
+            // hand the synthesis service the authority to cut people before it could make an
+            // urgent announcement. Every press is audited instead.
+            | Self::KeyPriority
+            | Self::UnkeyPriority
             | Self::MediaCanDecode { .. }
             | Self::MediaConnect { .. }
             | Self::MediaSpeaks { .. }
@@ -396,7 +423,9 @@ impl Incoming {
             // off-console assertion (`CONTEXT.md`). A console somebody is talking on is
             // emphatically one somebody is sitting at.
             | Self::Key
-            | Self::Unkey => true,
+            | Self::Unkey
+            | Self::KeyPriority
+            | Self::UnkeyPriority => true,
             // The machine noticing something about its own transport, and the four messages
             // its media library sends on its own account. A laptop left open on a desk
             // negotiating ICE with itself must not renew its own sign-in.
@@ -428,6 +457,8 @@ impl Incoming {
             Self::Disarm { .. } => "disarm",
             Self::Key => "key",
             Self::Unkey => "unkey",
+            Self::KeyPriority => "key-priority",
+            Self::UnkeyPriority => "unkey-priority",
             Self::MediaCanDecode { .. } => "media-can-decode",
             Self::MediaConnect { .. } => "media-connect",
             Self::MediaSpeaks { .. } => "media-speaks",
@@ -654,6 +685,13 @@ struct Presence {
     ///
     /// [ADR-0008]: ../../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
     keyed: bool,
+    /// Whether the server has this session's transmission down as at priority.
+    ///
+    /// The lamp's other half, lit from here and nowhere else: **an elevated transmission shows
+    /// as elevated with no new surface** ([ADR-0046]).
+    ///
+    /// [ADR-0046]: ../../../docs/adr/0046-priority-is-keyed-not-held.md
+    priority: bool,
     loops: Vec<Reachable>,
 }
 
@@ -701,6 +739,17 @@ struct Reachable {
     ///
     /// [ADR-0033]: ../../../docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md
     talking: bool,
+    /// Whether a transmission on it right now is at priority.
+    ///
+    /// **The talking indicator's one variant, and it is not attribution** (v1 §8). It is here
+    /// whether or not this session is monitoring the loop and whether or not it has muted it,
+    /// because it declares that somebody called this urgent ([ADR-0059]). It is also what the
+    /// client plays at full gain from, so the mark and the gain are one fact arriving
+    /// ([ADR-0045]).
+    ///
+    /// [ADR-0045]: ../../../docs/adr/0045-priority-defeats-attenuation-and-nothing-else.md
+    /// [ADR-0059]: ../../../docs/adr/0059-a-priority-transmission-is-marked-wherever-it-lands.md
+    priority: bool,
     /// Whether this session has silenced it in its own ears.
     ///
     /// **Beside the subscription and never instead of it** (v1 §5): a muted loop is still
@@ -801,7 +850,7 @@ impl Conversation {
             }
         }
 
-        self.the_channel_went();
+        self.the_channel_went().await;
     }
 
     /// This socket has gone, and the session behind it has lost its channel.
@@ -812,11 +861,29 @@ impl Conversation {
     /// the routing is handed down one last time so that it closes now rather than whenever
     /// somebody else's socket next happens to ask.
     ///
+    /// **A priority press held on it ends with it**, and is recorded here: the socket that
+    /// would have carried the release is the one that has gone ([ADR-0043]). There is nobody
+    /// left to tell if the entry cannot be written, so a failure is logged rather than
+    /// returned.
+    ///
     /// [ADR-0018]: ../../../docs/adr/0018-no-signalling-channel-means-no-emission-path.md
-    fn the_channel_went(&self) {
-        if let Some(session) = &self.session {
-            self.api.state.the_channel_is_gone(session);
-            self.hand_down_the_routing();
+    /// [ADR-0043]: ../../../docs/adr/0043-a-resume-restores-everything-except-the-key.md
+    async fn the_channel_went(&self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+
+        let pressed = self.api.state.the_channel_is_gone(session);
+        self.hand_down_the_routing();
+
+        if let Some(pressed) = pressed
+            && let Err(error) = self.audit_the_press(&pressed).await
+        {
+            tracing::error!(
+                target: module::TRANSPORT,
+                %error,
+                "a priority press ended with its socket and could not be recorded"
+            );
         }
     }
 
@@ -885,6 +952,8 @@ impl Conversation {
             }
             Incoming::Key => self.keying(Keyed::Keyed).await,
             Incoming::Unkey => self.keying(Keyed::Unkeyed).await,
+            Incoming::KeyPriority => self.keying_priority(Keyed::Keyed).await,
+            Incoming::UnkeyPriority => self.keying_priority(Keyed::Unkeyed).await,
             Incoming::MediaCanDecode { what_it_can_decode } => {
                 self.the_media_plane(|media, session| {
                     media.the_client_will_hear(session, Negotiation::presented(what_it_can_decode));
@@ -1345,6 +1414,50 @@ impl Conversation {
         self.presence(Told::WhetherOrNotItMoved).await
     }
 
+    /// Take the client's word that its transmission is at priority, or that it no longer is.
+    ///
+    /// The document is pushed straight away, like the key's, because the lamp saying the
+    /// transmission is elevated is the same round trip ([ADR-0008]). Every other console that
+    /// reaches the armed loops sees the mark on its next tick.
+    ///
+    /// **The end of a press is audited** — every press, with no minimum duration (v1 §12). The
+    /// live change has already landed by the time the entry is written, which is the right way
+    /// round: the press happened whether or not the store is well, and a log that could not be
+    /// written is a fault to shout about rather than a reason to hold somebody's override up.
+    ///
+    /// [ADR-0008]: ../../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    async fn keying_priority(&mut self, now: Keyed) -> Result<Vec<Outgoing>, StoreError> {
+        let Some(session) = self.session.clone() else {
+            // Unreachable: `Session` was met a moment ago, and only this socket clears it.
+            return Ok(Vec::new());
+        };
+
+        match now {
+            Keyed::Keyed => {
+                self.api.state.the_client_keys_priority(&session);
+            }
+            Keyed::Unkeyed => {
+                if let Some(pressed) = self.api.state.the_client_unkeys_priority(&session) {
+                    self.audit_the_press(&pressed).await?;
+                }
+            }
+        }
+
+        self.presence(Told::WhetherOrNotItMoved).await
+    }
+
+    /// Record one priority press in its own transaction.
+    async fn audit_the_press(&self, pressed: &Pressed) -> Result<(), StoreError> {
+        let mut transaction = self.api.store.begin().await?;
+        match record_the_press(&mut transaction, pressed).await {
+            Ok(()) => transaction.commit().await,
+            Err(error) => {
+                transaction.roll_back().await?;
+                Err(error)
+            }
+        }
+    }
+
     /// Carry the fan-out down to the media plane, where it has moved.
     ///
     /// **This is the one place the two state seams meet on the audio path**, and they meet
@@ -1537,6 +1650,7 @@ impl Conversation {
                 media_path: presence.media_path.as_str(),
                 connection: presence.connection.as_str(),
                 keyed: presence.keyed,
+                priority: presence.priority,
                 loops: presence
                     .loops
                     .into_iter()
@@ -1547,6 +1661,7 @@ impl Conversation {
                         subscribed: standing.subscribed,
                         armed: standing.armed,
                         talking: standing.talking,
+                        priority: standing.priority,
                         muted: standing.muted,
                         volume: standing.volume.percent(),
                     })
@@ -1864,6 +1979,12 @@ async fn record_the_end_of(
     transaction: &mut Transaction,
     ended: &Relinquished,
 ) -> Result<(), StoreError> {
+    // A press held when the session ended ended with it, and came first: the key was still
+    // down when the seat was given up.
+    if let Some(pressed) = &ended.pressed {
+        record_the_press(transaction, pressed).await?;
+    }
+
     let role = transaction.role(&ended.role).await?;
     let actor_name = super::name_as_it_stands(transaction, &ended.occupant).await?;
 
@@ -1882,6 +2003,39 @@ async fn record_the_end_of(
             }),
         })
         .await
+}
+
+/// Write the audit entry for one priority press (v1 §12).
+///
+/// A free function for the reason [`record_the_end_of`] is one: a press ends by being let go,
+/// by its socket going and by its session ending, and an entry that differed between those
+/// would say the press differed. The names are read as they stand now, which is at most the
+/// length of one press after the fact.
+async fn record_the_press(
+    transaction: &mut Transaction,
+    pressed: &Pressed,
+) -> Result<(), StoreError> {
+    let role = transaction.role(&pressed.role).await?;
+    let actor_name = super::name_as_it_stands(transaction, &pressed.occupant).await?;
+
+    transaction
+        .record_a_priority_press(PriorityPress {
+            actor: pressed.occupant.clone(),
+            actor_name,
+            role: pressed.role.clone(),
+            role_name: role.map_or_else(String::new, |role| role.name),
+            armed_on: pressed.armed_on.clone(),
+            pressed_at: milliseconds_since_the_epoch(pressed.at),
+            lasted_ms: i64::try_from(pressed.lasted.as_millis()).unwrap_or(i64::MAX),
+        })
+        .await
+}
+
+/// A moment, in the unit the audit log keeps time in.
+fn milliseconds_since_the_epoch(at: std::time::SystemTime) -> i64 {
+    at.duration_since(std::time::UNIX_EPOCH).map_or(0, |since| {
+        i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+    })
 }
 
 #[cfg(test)]
@@ -2910,6 +3064,8 @@ mod tests {
         assert_eq!(said["media_path"], "lost");
         assert_eq!(said["connection"], "confirmed");
         assert_eq!(said["keyed"], false);
+        assert_eq!(said["priority"], false);
+        assert_eq!(said["loops"][0]["priority"], false);
         let mut named: Vec<&String> = said.as_object().expect("a document").keys().collect();
         named.sort();
         assert_eq!(
@@ -2920,6 +3076,7 @@ mod tests {
                 "loops",
                 "media_path",
                 "message",
+                "priority",
                 "role",
                 "session",
                 "version"
@@ -4484,6 +4641,276 @@ mod tests {
         transaction.commit().await.expect("the clock to land");
     }
 
+    // ---- #45: priority ------------------------------------------------------------------
+
+    const KEY_PRIORITY: &str = r#"{"message":"key-priority"}"#;
+    const UNKEY_PRIORITY: &str = r#"{"message":"unkey-priority"}"#;
+
+    /// Which loops a document marks as carrying a priority transmission, by name.
+    fn marked(said: &Outgoing) -> Vec<&str> {
+        the_presence(said)
+            .1
+            .loops
+            .iter()
+            .filter(|held_on| held_on.priority)
+            .map(|held_on| held_on.name.as_str())
+            .collect()
+    }
+
+    /// A talker armed on two loops, and a listener monitoring both.
+    async fn a_talker_on_two_loops(lobby: &ALobby) -> (Conversation, Conversation) {
+        let flight = lobby.role_named("Flight Director").await;
+        for name in ["Air-to-ground", "Sim"] {
+            lobby
+                .a_loop_reachable_by(name, &flight, Permission::Emit)
+                .await;
+        }
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let sim = lobby.loop_named("Sim").await;
+
+        let mut talker = lobby.a_socket();
+        all(&mut talker, &assuming(&flight)).await;
+        let mut listener = lobby.somebody_else("capcom", &flight).await;
+        all(&mut listener, &assuming(&flight)).await;
+        for held_on in [&air_to_ground, &sim] {
+            all(&mut talker, &arming(held_on)).await;
+            all(&mut listener, &subscribing(held_on)).await;
+        }
+
+        (talker, listener)
+    }
+
+    /// **Anyone holding `emit` may key priority, and nothing else is asked** (ADR-0046). It is
+    /// `Session` like the key, with no `control` gate and no flag on the role, the loop or the
+    /// cell — so it is ruled on exactly as keying is, and refused from the lobby for the same
+    /// reason.
+    #[tokio::test]
+    async fn keying_priority_asks_for_a_session_and_nothing_more() {
+        assert_eq!(
+            serde_json::from_str::<Incoming>(KEY_PRIORITY)
+                .expect("a message VoxLoop reads")
+                .requirement(),
+            Requirement::Session
+        );
+        assert_eq!(
+            serde_json::from_str::<Incoming>(UNKEY_PRIORITY)
+                .expect("a message VoxLoop reads")
+                .requirement(),
+            Requirement::Session
+        );
+
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let mut socket = lobby.a_socket();
+        for message in [KEY_PRIORITY, UNKEY_PRIORITY] {
+            let refused = said(&mut socket, message).await;
+            assert!(matches!(&refused, Outgoing::Refused { .. }), "{refused:?}");
+        }
+    }
+
+    /// **Priority applies to the whole arm set and is marked wherever it lands** (ADR-0045,
+    /// ADR-0059), and the talker's own lamp says the transmission is elevated.
+    #[tokio::test]
+    async fn a_priority_transmission_is_marked_on_every_armed_loop_on_every_console() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let (mut talker, mut listener) = a_talker_on_two_loops(&lobby).await;
+
+        all(&mut talker, KEY).await;
+        let elevated = said(&mut talker, KEY_PRIORITY).await;
+
+        assert!(
+            the_presence(&elevated).1.priority,
+            "the lamp does not say priority"
+        );
+        assert_eq!(marked(&elevated), ["Air-to-ground", "Sim"]);
+
+        let mut pushed = listener
+            .pushed_presence()
+            .await
+            .expect("the socket to answer");
+        assert_eq!(pushed.len(), 1, "{pushed:?}");
+        let seen = pushed.remove(0);
+        assert_eq!(marked(&seen), ["Air-to-ground", "Sim"]);
+        assert_eq!(talking(&seen), ["Air-to-ground", "Sim"]);
+        assert!(
+            !the_presence(&seen).1.priority,
+            "a listener's own lamp was lit by somebody else's priority"
+        );
+
+        // Letting go lowers the transmission and does not end it: the key is still down.
+        let lowered = said(&mut talker, UNKEY_PRIORITY).await;
+        assert!(!the_presence(&lowered).1.priority);
+        assert!(the_presence(&lowered).1.keyed);
+        assert!(marked(&lowered).is_empty());
+    }
+
+    /// **Priority governs gain and never who receives** (ADR-0045). Nothing is re-routed: no
+    /// mute is defeated, no subscription compelled and no other talker lowered, because none
+    /// of those exist to be done.
+    #[tokio::test]
+    async fn keying_priority_moves_nothing_in_the_fan_out() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let (mut talker, _listener) = a_talker_on_two_loops(&lobby).await;
+        a_turn_of_the_loop(&talker);
+        let routed = the_fan_out(&lobby);
+
+        all(&mut talker, KEY).await;
+        all(&mut talker, KEY_PRIORITY).await;
+        a_turn_of_the_loop(&talker);
+
+        assert_eq!(
+            the_fan_out(&lobby),
+            routed,
+            "keying priority re-routed the audio"
+        );
+    }
+
+    /// **Every press is audited, with no minimum duration** (v1 §12): the actor, the role, the
+    /// armed loop set at the moment of the press, the timestamp and the duration.
+    #[tokio::test]
+    async fn every_priority_press_is_audited_with_the_arm_set_it_was_keyed_over() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let (mut talker, _listener) = a_talker_on_two_loops(&lobby).await;
+        let sim = lobby.loop_named("Sim").await;
+        assert!(
+            lobby.entries_of(AuditEvent::PriorityKeyed).await.is_empty(),
+            "a press was recorded before anybody pressed"
+        );
+
+        all(&mut talker, KEY_PRIORITY).await;
+        // The set moves under the held key; the entry is about the set it was keyed over.
+        all(&mut talker, &disarming(&sim)).await;
+        all(&mut talker, UNKEY_PRIORITY).await;
+        // A second press, as short as the socket can make it: it is recorded all the same.
+        all(&mut talker, KEY_PRIORITY).await;
+        all(&mut talker, UNKEY_PRIORITY).await;
+
+        let pressed = lobby.entries_of(AuditEvent::PriorityKeyed).await;
+        assert_eq!(pressed.len(), 2, "a press went unrecorded");
+        assert_eq!(pressed[0].actor.as_ref(), Some(&lobby.user));
+        assert_eq!(pressed[0].actor_name, "flight");
+        let press = pressed[0].press.as_ref().expect("the press");
+        assert_eq!(press.role, flight);
+        assert_eq!(press.role_name, "Flight Director");
+        assert_eq!(press.armed_on, ["Air-to-ground", "Sim"]);
+        assert!(press.pressed_at > 0);
+        assert!(press.lasted_ms >= 0);
+        assert_eq!(
+            pressed[1].press.as_ref().expect("the press").armed_on,
+            ["Air-to-ground"]
+        );
+    }
+
+    /// A press is audited once, however many times the client says it is holding it.
+    #[tokio::test]
+    async fn a_press_said_twice_is_one_press() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+
+        all(&mut socket, KEY_PRIORITY).await;
+        all(&mut socket, KEY_PRIORITY).await;
+        all(&mut socket, UNKEY_PRIORITY).await;
+        all(&mut socket, UNKEY_PRIORITY).await;
+
+        assert_eq!(lobby.entries_of(AuditEvent::PriorityKeyed).await.len(), 1);
+    }
+
+    /// Relinquishing under a held priority key ends the press and records it: the press
+    /// happened, and giving the role up is not a way to keep it out of the log.
+    #[tokio::test]
+    async fn a_press_held_through_a_relinquish_is_audited() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, KEY_PRIORITY).await;
+
+        all(&mut socket, RELINQUISH).await;
+
+        assert_eq!(lobby.entries_of(AuditEvent::PriorityKeyed).await.len(), 1);
+    }
+
+    /// Assuming elsewhere under a held priority key ends the press with the displaced session,
+    /// and the socket doing the displacing records it.
+    #[tokio::test]
+    async fn a_press_held_by_a_displaced_session_is_audited() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1)), ("CAPCOM", None)]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let capcom = lobby.role_named("CAPCOM").await;
+        let mut first = lobby.a_socket();
+        let mut second = lobby.another_tab();
+        all(&mut first, &assuming(&flight)).await;
+        all(&mut first, KEY_PRIORITY).await;
+
+        all(&mut second, &assuming(&capcom)).await;
+
+        let pressed = lobby.entries_of(AuditEvent::PriorityKeyed).await;
+        assert_eq!(pressed.len(), 1);
+        assert_eq!(
+            pressed[0].press.as_ref().expect("the press").role_name,
+            "Flight Director"
+        );
+    }
+
+    /// **A priority key held across an outage is suppressed until released** (ADR-0043). The
+    /// socket that would have carried the release has gone, so the press ends here and is
+    /// recorded here.
+    #[tokio::test]
+    async fn a_press_held_when_the_socket_goes_is_ended_and_audited() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, KEY).await;
+        all(&mut socket, KEY_PRIORITY).await;
+
+        socket.the_channel_went().await;
+
+        assert_eq!(lobby.entries_of(AuditEvent::PriorityKeyed).await.len(), 1);
+    }
+
+    /// The document carries the mark as a field of each loop and the lamp as a field of the
+    /// document, in the words the console reads, and there is nothing beside either that could
+    /// say whose transmission it is (ADR-0033).
+    #[tokio::test]
+    async fn the_mark_is_written_as_one_flag_per_loop_and_names_nobody() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let (mut talker, _listener) = a_talker_on_two_loops(&lobby).await;
+        all(&mut talker, KEY).await;
+
+        let elevated = said(&mut talker, KEY_PRIORITY).await;
+        let written = as_json(&elevated);
+
+        assert_eq!(written["priority"], serde_json::Value::Bool(true));
+        assert_eq!(
+            written["loops"][0]["priority"],
+            serde_json::Value::Bool(true)
+        );
+        let fields: Vec<&str> = written["loops"][0]
+            .as_object()
+            .expect("a loop")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                "armed",
+                "id",
+                "muted",
+                "name",
+                "permission",
+                "priority",
+                "subscribed",
+                "talking",
+                "volume"
+            ],
+            "a loop grew a field that could say who is talking"
+        );
+    }
+
     // ---- #43: connection state and the emission predicate --------------------------------
 
     const HEARTBEAT: &str = r#"{"message":"heartbeat"}"#;
@@ -4626,7 +5053,7 @@ mod tests {
             "there was no route to close"
         );
 
-        talker.the_channel_went();
+        talker.the_channel_went().await;
 
         assert_eq!(
             lobby.api.state.connection_of(&talking),

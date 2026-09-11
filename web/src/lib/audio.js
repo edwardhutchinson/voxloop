@@ -18,8 +18,11 @@
 // **Each talker plays at the loudest volume among the loops it is heard on** (v1 §5,
 // ADR-0007). The server says which of this operator's loops each carriage is heard on and the
 // presence document says what each loop is set to, and `loudest` below is the whole of the
-// rule — the browser's per-element volume is the gain. Priority at full gain (#45) bypasses
-// the rule rather than competing with it (ADR-0045).
+// rule — the browser's per-element volume is the gain. **Priority plays at full gain**, and it
+// bypasses the rule rather than competing with it (ADR-0045): `theGain` is the two together.
+//
+// **Nothing here ever lowers anything for anybody else** (v1 §4). There is no ducking in
+// VoxLoop, so no talker's gain is ever read off another talker's.
 
 import { Device } from 'mediasoup-client';
 
@@ -71,7 +74,7 @@ export function openAudio({ say, onMediaPath }) {
 	let loops = [];
 
 	function play(held) {
-		held.heard.volume = loudest(held.heardOn, loops);
+		held.heard.volume = theGain(held.heardOn, loops);
 	}
 
 	let microphone = null;
@@ -222,6 +225,8 @@ export function openAudio({ say, onMediaPath }) {
 		 * **The level played and the level shown are read off the same document** (ADR-0007),
 		 * so an operator who has just turned a loop down hears it go down when the card says
 		 * it has — never before, because nothing here moves on the slider, and never after.
+		 * The same is true of priority: the gain comes up when the mark does, because they
+		 * are one fact arriving (ADR-0059).
 		 */
 		theLoopsAre(now) {
 			loops = now;
@@ -268,8 +273,38 @@ export function openAudio({ say, onMediaPath }) {
 }
 
 /**
- * How loud to play a talker heard on these loops, as a gain from 0 to 1: **the loudest volume
- * among them** (v1 §5, ADR-0007).
+ * How loud to play a talker heard on these loops, as a gain from 0 to 1.
+ *
+ * **Full gain where any of them carries a priority transmission**, whatever it is set to, and
+ * the loudest volume among them otherwise (v1 §4, ADR-0045). Priority bypasses loudest-wins
+ * rather than competing with it, so one marked loop is enough and nothing is compared.
+ *
+ * **Mute stays sovereign.** A muted loop is not an applicable one here any more than it is in
+ * `loudest`, so a priority mark on it raises nothing: the mark still shows on the card, and the
+ * audio does not arrive (ADR-0059).
+ *
+ * **The mark is the loop's, and so is the gain.** The console cannot tell one talker on a loop
+ * from another (ADR-0033) and the priority attribute rides the presence document rather than
+ * the media path (ADR-0045), so what arrives is *this loop carries a priority transmission*.
+ * Anybody heard on that loop while the mark is up plays at full gain with it; nobody anywhere
+ * plays quieter for it.
+ *
+ * @param {string[]} heardOn the ids of the loops this talker is heard on
+ * @param {{ id: string, volume: number, muted: boolean, priority?: boolean }[]} loops as the
+ *   document has them
+ */
+export function theGain(heardOn, loops) {
+	const urgent = heardOn.some((id) =>
+		loops.some((reachable) => reachable.id === id && reachable.priority && !reachable.muted)
+	);
+	if (urgent) return 1;
+
+	return loudest(heardOn, loops);
+}
+
+/**
+ * How loud to play a talker heard on these loops when none of them carries priority: **the
+ * loudest volume among them** (v1 §5, ADR-0007).
  *
  * Volume is an attenuation control, so a transmission also going to a loop the operator kept
  * up is one they have already said they want to hear, and the loudest applicable volume wins.

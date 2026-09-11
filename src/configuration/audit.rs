@@ -65,6 +65,16 @@ pub(crate) enum AuditEvent {
     /// somebody's shift* has to be able to tell those apart, which is why the reason is a
     /// word on the entry rather than a sentence in it.
     SessionEnded,
+    /// Somebody keyed priority, for as long as they held it (v1 §12).
+    ///
+    /// An **operational authority act**, and the first of them to land: every press, with no
+    /// minimum duration, because a 200 ms fumble still overrode everybody's volume and abuse may
+    /// look like a hundred short jabs ([ADR-0046]). It is written by
+    /// [`AuditLog::record_a_priority_press`] and by nothing else, because an entry without the
+    /// arm set and the duration would be a press nobody could read.
+    ///
+    /// [ADR-0046]: ../../../docs/adr/0046-priority-is-keyed-not-held.md
+    PriorityKeyed,
     /// The first system administrator, made by whoever could read the server's own log.
     BootstrapRedeemed,
     /// A bootstrap code presented and not accepted. Refused administration writes are
@@ -152,6 +162,7 @@ impl AuditEvent {
             Self::SignInExpired => "sign_in_expired",
             Self::SessionStarted => "session_started",
             Self::SessionEnded => "session_ended",
+            Self::PriorityKeyed => "priority_keyed",
             Self::BootstrapRedeemed => "bootstrap_redeemed",
             Self::BootstrapRefused => "bootstrap_refused",
             Self::UserCreated => "user_created",
@@ -188,6 +199,7 @@ impl AuditEvent {
             "sign_in_expired" => Some(Self::SignInExpired),
             "session_started" => Some(Self::SessionStarted),
             "session_ended" => Some(Self::SessionEnded),
+            "priority_keyed" => Some(Self::PriorityKeyed),
             "bootstrap_redeemed" => Some(Self::BootstrapRedeemed),
             "bootstrap_refused" => Some(Self::BootstrapRefused),
             "user_created" => Some(Self::UserCreated),
@@ -283,6 +295,33 @@ pub(crate) struct Occupancy {
     /// Why the session ended, as one of a closed set of words. Absent on a session start,
     /// which needs no reason: somebody took the seat.
     pub(crate) reason: Option<String>,
+}
+
+/// One priority press, as the log holds it (v1 §12).
+///
+/// Everything v1 §12 asks of a press and nothing else: the actor, the role, the armed loop set
+/// at the moment of the press, the timestamp and the duration. It is its own record rather than
+/// fields on [`AuditEntry`] because it is written by its own operation, and a struct that could
+/// be built without the arm set is one somebody builds without it.
+///
+/// The actor and the role are written the way every entry writes what it names — the internal
+/// id and the name as it stood — because the log outlives the records it references
+/// ([ADR-0028]). The loops are names alone, taken at the press: an entry is read by somebody
+/// asking *what did that press reach*, and the role is the target it is filtered by.
+///
+/// [ADR-0028]: ../../../docs/adr/0028-the-audit-log-records-decisions-not-traffic.md
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PriorityPress {
+    pub(crate) actor: UserId,
+    pub(crate) actor_name: String,
+    pub(crate) role: RoleId,
+    pub(crate) role_name: String,
+    /// The armed loops at the moment the key went down, by name.
+    pub(crate) armed_on: Vec<String>,
+    /// When the key went down, in milliseconds since the Unix epoch.
+    pub(crate) pressed_at: i64,
+    /// How long it was held, in milliseconds. Zero is a press like any other.
+    pub(crate) lasted_ms: i64,
 }
 
 /// What a configuration change did: to which record, from what, to what, and to anything
@@ -608,6 +647,8 @@ pub(crate) struct RecordedEntry {
     pub(crate) write: Option<ConfigurationWrite>,
     pub(crate) operation: Option<String>,
     pub(crate) occupancy: Option<Occupancy>,
+    /// The priority press, where the entry is one.
+    pub(crate) press: Option<PriorityPress>,
     /// Milliseconds since the Unix epoch.
     pub(crate) recorded_at: i64,
 }
@@ -617,6 +658,15 @@ pub(crate) struct RecordedEntry {
 pub(crate) trait AuditLog {
     /// Record one decision, in the same transaction as the write it records.
     async fn record(&mut self, entry: AuditEntry) -> Result<(), StoreError>;
+
+    /// Record one priority press (v1 §12).
+    ///
+    /// It is the one entry with no write beside it to share a transaction with: the press is
+    /// live state and has already happened by the time it is recorded, and the state authority
+    /// writes nothing durable ([ADR-0039]). What makes it an entry is that it was a decision.
+    ///
+    /// [ADR-0039]: ../../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+    async fn record_a_priority_press(&mut self, press: PriorityPress) -> Result<(), StoreError>;
 
     /// The most recent entries, newest first.
     ///
@@ -670,11 +720,35 @@ impl AuditLog for Transaction {
         Ok(())
     }
 
+    async fn record_a_priority_press(&mut self, press: PriorityPress) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO audit_entries \
+             (recorded_at, event, actor_id, actor_name, target_id, target_name, \
+              armed_on, pressed_at, lasted_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(now())
+        .bind(AuditEvent::PriorityKeyed.stored())
+        .bind(press.actor.as_str())
+        .bind(&press.actor_name)
+        .bind(press.role.as_str())
+        .bind(&press.role_name)
+        .bind(press.armed_on.join("\n"))
+        .bind(press.pressed_at)
+        .bind(press.lasted_ms)
+        .execute(self.connection())
+        .await
+        .map_err(unavailable)?;
+
+        Ok(())
+    }
+
     async fn recent_entries(&mut self, at_most: u32) -> Result<Vec<RecordedEntry>, StoreError> {
         let rows = sqlx::query(
             "SELECT recorded_at, event, actor_id, actor_name, source, \
              target_id, target_name, state_before, state_after, blast_radius, refusal, \
-             operation, reason FROM audit_entries ORDER BY id DESC LIMIT ?",
+             operation, reason, armed_on, pressed_at, lasted_ms \
+             FROM audit_entries ORDER BY id DESC LIMIT ?",
         )
         .bind(at_most)
         .fetch_all(self.connection())
@@ -729,6 +803,27 @@ impl AuditLog for Transaction {
                         })
                         .flatten();
 
+                // A press is told apart by its event, and read only where the entry carries
+                // one: it is the only entry with a time it began at.
+                let press = (event == AuditEvent::PriorityKeyed)
+                    .then(|| {
+                        Some(PriorityPress {
+                            actor: UserId::known(row.get::<Option<String>, _>("actor_id")?),
+                            actor_name: row.get("actor_name"),
+                            role: RoleId::presented(row.get::<Option<String>, _>("target_id")?),
+                            role_name: row.get::<Option<String>, _>("target_name")?,
+                            armed_on: row
+                                .get::<Option<String>, _>("armed_on")?
+                                .split('\n')
+                                .filter(|name| !name.is_empty())
+                                .map(str::to_owned)
+                                .collect(),
+                            pressed_at: row.get::<Option<i64>, _>("pressed_at")?,
+                            lasted_ms: row.get::<Option<i64>, _>("lasted_ms")?,
+                        })
+                    })
+                    .flatten();
+
                 Ok(RecordedEntry {
                     event,
                     actor: row.get::<Option<String>, _>("actor_id").map(UserId::known),
@@ -737,6 +832,7 @@ impl AuditLog for Transaction {
                     write,
                     operation: row.get("operation"),
                     occupancy,
+                    press,
                     recorded_at: row.get("recorded_at"),
                 })
             })
@@ -952,6 +1048,7 @@ mod tests {
             AuditEvent::EnrolmentRefused,
             AuditEvent::PasswordChanged,
             AuditEvent::PasswordChangeRefused,
+            AuditEvent::PriorityKeyed,
         ];
 
         for event in every {
@@ -974,6 +1071,76 @@ mod tests {
             .collect();
 
         assert_eq!(read, every);
+    }
+
+    /// **Every priority press, with no minimum duration** (v1 §12, ADR-0046): the actor, the
+    /// role, the armed loop set at the moment of the press, the timestamp and the duration.
+    /// The role is the entry's target, because the log is filterable by target and the role is
+    /// what the press was keyed under.
+    #[tokio::test]
+    async fn a_priority_press_is_recorded_with_the_arm_set_and_how_long_it_lasted() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let user = a_user(&mut transaction, "flight").await;
+        let press = PriorityPress {
+            actor: user.clone(),
+            actor_name: "flight".to_owned(),
+            role: RoleId::presented("r-flight".to_owned()),
+            role_name: "Flight Director".to_owned(),
+            armed_on: vec!["AIR-TO-GROUND".to_owned(), "SIM".to_owned()],
+            pressed_at: 1_800_000_000_000,
+            // A fumble: shorter than anybody would mean, and recorded all the same.
+            lasted_ms: 0,
+        };
+
+        transaction
+            .record_a_priority_press(press.clone())
+            .await
+            .expect("the press to be recorded");
+
+        let entries = transaction
+            .recent_entries(1)
+            .await
+            .expect("the log to be readable");
+        assert_eq!(entries[0].event, AuditEvent::PriorityKeyed);
+        assert_eq!(entries[0].actor.as_ref(), Some(&user));
+        assert_eq!(entries[0].actor_name, "flight");
+        assert_eq!(entries[0].press.as_ref(), Some(&press));
+        assert_eq!(
+            entries[0].write, None,
+            "a press was recorded as a configuration write"
+        );
+        assert_eq!(entries[0].occupancy, None);
+    }
+
+    /// A press with nothing armed is still a press: the key went down, and the log is what
+    /// says so.
+    #[tokio::test]
+    async fn a_priority_press_over_nothing_armed_is_recorded_with_an_empty_set() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let user = a_user(&mut transaction, "flight").await;
+
+        transaction
+            .record_a_priority_press(PriorityPress {
+                actor: user,
+                actor_name: "flight".to_owned(),
+                role: RoleId::presented("r-flight".to_owned()),
+                role_name: "Flight Director".to_owned(),
+                armed_on: Vec::new(),
+                pressed_at: 1_800_000_000_000,
+                lasted_ms: 250,
+            })
+            .await
+            .expect("the press to be recorded");
+
+        let entries = transaction
+            .recent_entries(1)
+            .await
+            .expect("the log to be readable");
+        let press = entries[0].press.as_ref().expect("the press");
+        assert!(press.armed_on.is_empty());
+        assert_eq!(press.lasted_ms, 250);
     }
 
     /// A credential readable out of the audit log is one anybody who may read the log holds.

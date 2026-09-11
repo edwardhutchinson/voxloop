@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { keyingModes, LATCHED, MOMENTARY, modes } from '../src/lib/modes.js';
+import { keyingModes, LATCHED, MOMENTARY, modes, PRIORITY } from '../src/lib/modes.js';
 
 /** Something for the keyboard sources to listen on, and a way to make them hear something. */
 function aWindow() {
@@ -34,7 +34,7 @@ function aWindow() {
 const key = (code, how = {}) => ({
 	code,
 	shiftKey: how.shift === true,
-	ctrlKey: false,
+	ctrlKey: how.ctrl === true,
 	altKey: false,
 	metaKey: false,
 	repeat: how.repeat === true,
@@ -49,29 +49,33 @@ function operating() {
 	const latched = [];
 	const dropped = [];
 	const announced = [];
+	const elevated = [];
 
 	const keys = keyingModes({
 		on: there.on,
 		onKeying: (wants) => keyed.push(wants),
+		onPriority: (is) => elevated.push(is),
 		onLatched: (is) => latched.push(is),
 		onDropped: (source) => dropped.push(source),
 		onLatchDropped: () => announced.push(true)
 	});
 	keys.available(true);
 
-	return { there, keyed, latched, dropped, announced, keys };
+	return { there, keyed, latched, dropped, announced, elevated, keys };
 }
 
 /** The default keys, pressed and released as a hand does it. */
 const held = () => key('Backquote');
 const latching = () => key('Backquote', { shift: true });
+const urgently = () => key('Backquote', { ctrl: true });
 
-test('the defaults are the backtick, and the backtick with shift', () => {
+test('the defaults are the backtick, and the backtick with shift and with control', () => {
 	assert.deepEqual(
 		modes.map(({ named, binding }) => [named, binding]),
 		[
 			[MOMENTARY, { code: 'Backquote' }],
-			[LATCHED, { code: 'Backquote', shift: true }]
+			[LATCHED, { code: 'Backquote', shift: true }],
+			[PRIORITY, { code: 'Backquote', ctrl: true }]
 		]
 	);
 });
@@ -346,4 +350,140 @@ test('nothing is announced where there was no latch to drop', () => {
 
 	assert.deepEqual(announced, []);
 	assert.deepEqual(keyed, []);
+});
+
+// ---- #45: priority ----------------------------------------------------------------------------
+
+// **The level model absorbs priority with no special case** (ADR-0046):
+// `emitting = ordinary OR priority` and `is-priority = priority`. From cold, the priority key
+// both keys and elevates, and letting go ends the transmission.
+test('the priority key from cold keys and elevates, and letting go ends both', () => {
+	const { there, keyed, elevated } = operating();
+
+	there.press(urgently());
+	assert.deepEqual(keyed, [true]);
+	assert.deepEqual(elevated, [true]);
+
+	there.release(urgently());
+	assert.deepEqual(keyed, [true, false]);
+	assert.deepEqual(elevated, [true, false]);
+});
+
+// Pressing priority while latched raises the priority level without touching the latch, so
+// releasing it returns to a latched, ordinary transmission with nothing to restore.
+test('the priority key over a latch elevates it and leaves the latch standing', () => {
+	const { there, keyed, latched, elevated } = operating();
+	there.press(latching());
+	there.release(latching());
+
+	there.press(urgently());
+	there.release(urgently());
+
+	assert.deepEqual(keyed, [true], 'priority interrupted a latched transmission');
+	assert.deepEqual(latched, [true]);
+	assert.deepEqual(elevated, [true, false]);
+});
+
+// Holding both keys is one transmission at priority, not two (ADR-0007): the ordinary key
+// going up under priority changes nothing, and priority going up under the ordinary key lowers
+// the transmission without ending it.
+test('holding the ordinary key and the priority key is one transmission at priority', () => {
+	const { there, keyed, elevated } = operating();
+
+	there.press(held());
+	there.press(urgently());
+	assert.deepEqual(keyed, [true]);
+	assert.deepEqual(elevated, [true]);
+
+	// The priority key's release: letting go of `` ` `` releases every binding on it, because
+	// a release is matched on the key alone — so the ordinary key goes with it.
+	there.release(urgently());
+	assert.deepEqual(keyed, [true, false]);
+	assert.deepEqual(elevated, [true, false]);
+});
+
+test('priority released under a held on-screen key lowers without ending', () => {
+	const { there, keys, keyed, elevated } = operating();
+	keys.onScreen[MOMENTARY].down();
+
+	there.press(urgently());
+	there.release(urgently());
+
+	assert.deepEqual(keyed, [true], 'letting go of priority ended a held transmission');
+	assert.deepEqual(elevated, [true, false]);
+});
+
+// **Priority never latches** (v1 §4). It is momentary only: no press of any length, and no
+// number of them, leaves it up once the key is released.
+test('the priority key never latches, however it is pressed', () => {
+	const { there, keyed, latched, elevated } = operating();
+
+	there.press(urgently());
+	there.release(urgently());
+	there.press(urgently());
+	there.press(key('Backquote', { ctrl: true, repeat: true }));
+	there.release(urgently());
+
+	assert.deepEqual(elevated, [true, false, true, false]);
+	assert.deepEqual(keyed, [true, false, true, false]);
+	assert.deepEqual(latched, [], 'a priority press latched');
+});
+
+test('the priority button on the bar is momentary too', () => {
+	const { keys, keyed, elevated } = operating();
+
+	keys.onScreen[PRIORITY].down();
+	keys.onScreen[PRIORITY].up();
+
+	assert.deepEqual(keyed, [true, false]);
+	assert.deepEqual(elevated, [true, false]);
+});
+
+// A stuck priority control overrides everybody's volume for as long as it is stuck (ADR-0046),
+// so the source going takes it down like any other held key, and says so.
+test('a priority key held when keying is withdrawn drops, and names the source', () => {
+	const { there, keys, keyed, elevated, dropped } = operating();
+	there.press(urgently());
+
+	keys.available(false);
+
+	assert.deepEqual(keyed, [true, false]);
+	assert.deepEqual(elevated, [true, false]);
+	assert.deepEqual(dropped, ['the keyboard']);
+});
+
+// Priority is not reached through the latch: what the network takes down is the latch, and a
+// finger on the priority key is a human continuously asserting intent, exactly like one on the
+// ordinary key.
+test('a priority key survives what takes the latch down', () => {
+	const { there, keys, keyed, elevated } = operating();
+	there.press(urgently());
+
+	keys.theLatchCannotBeShown();
+
+	assert.deepEqual(keyed, [true]);
+	assert.deepEqual(elevated, [true]);
+});
+
+test('relinquishing under a held priority key stops it', () => {
+	const { there, keys, keyed, elevated } = operating();
+	there.press(urgently());
+
+	keys.stop();
+
+	assert.deepEqual(keyed, [true, false]);
+	assert.deepEqual(elevated, [true, false]);
+});
+
+// Three bindings on one key are three distinct presses, and a rebind onto another mode's key is
+// refused — one key does one thing (ADR-0022).
+test('the priority key is bound like the others and refused like them', () => {
+	const { there, keys, keyed, elevated } = operating();
+
+	assert.match(keys.rebind(PRIORITY, { code: 'Backquote' }) ?? '', /already in use/);
+	assert.equal(keys.rebind(PRIORITY, { code: 'KeyP' }), null);
+
+	there.press(key('KeyP'));
+	assert.deepEqual(keyed, [true]);
+	assert.deepEqual(elevated, [true]);
 });

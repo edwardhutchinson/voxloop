@@ -722,7 +722,7 @@ test('the keying controls do not take focus when they are pressed', async () => 
 	const source = read(join(lib, 'TransmitBar.svelte'));
 
 	const pressed = [...source.matchAll(/onpointerdown=\{(\w+)\}/g)].map(([, named]) => named);
-	assert.equal(pressed.length, 2, 'the bar has grown a keying control this does not know about');
+	assert.equal(pressed.length, 3, 'the bar has grown a keying control this does not know about');
 
 	for (const named of pressed) {
 		assert.match(
@@ -742,6 +742,9 @@ test('the console says which keys talk, and what each of them does', async () =>
 	assert.match(body, /Momentary/);
 	assert.match(body, /Latched/);
 	assert.match(body, /Shift \+ `/, 'the latch key is not on the page');
+	// The third binding (ADR-0046), in the same list and changed the same way.
+	assert.match(body, /Priority/);
+	assert.match(body, /Ctrl \+ `/, 'the priority key is not on the page');
 	assert.match(body, /Change/, 'the keys are shown and cannot be changed');
 });
 
@@ -1053,4 +1056,97 @@ test('the console opens one volume modal, above both views, off the document', a
 		assert.doesNotMatch(read(join(lib, view)), /LoopVolume/, `${view} holds a modal of its own`);
 	}
 	assert.doesNotMatch(read(join(lib, 'LoopVolume.svelte')), /\$state\(/, 'the modal keeps a level');
+});
+
+// ---- #45: priority ----------------------------------------------------------------------------
+
+// `FLIGHT` carries a priority transmission: somebody keyed priority on it. It is armed and not
+// monitored here, so it is also the loop that proves the mark reaches a console not hearing it.
+const withPriorityOn = (id, loops = inReach) =>
+	loops.map((reachable) =>
+		reachable.id === id ? { ...reachable, talking: true, priority: true } : reachable
+	);
+
+// **The talking indicator has exactly one variant, and it is not attribution** (v1 §8). One
+// component in both views, and there is still nothing in it that could name anybody: the prop
+// says what kind of transmission is on the loop and nothing about whose.
+test('the priority mark is the talking indicator’s one variant, the same in both views', async () => {
+	const mark = await rendered('Talking.svelte', { priority: true });
+	const plain = await rendered('Talking.svelte');
+
+	assert.notEqual(mark, plain, 'a priority transmission reads like any other');
+	// In a word, because colour and motion are never what carries a state.
+	assert.match(mark, /Priority/);
+	assert.doesNotMatch(plain, /Priority/);
+
+	for (const [at, body] of (await eachView(inAView({}, withPriorityOn('l-1')))).entries()) {
+		assert.equal(body.split(mark).length - 1, 1, `${views[at]} does not mark the priority loop`);
+		assert.ok(
+			!body.includes(plain),
+			`${views[at]} marks a priority loop with the plain indicator as well`
+		);
+	}
+});
+
+// **Marked wherever it lands** (ADR-0059): on a loop this console is not hearing, on one it has
+// at full volume where the gain changed nothing, and on one it has muted — where there is no
+// audio at all and the mark is the whole of what arrives.
+test('the priority mark shows on a muted loop, an unheard one and one at full volume', async () => {
+	const mark = await rendered('Talking.svelte', { priority: true });
+
+	for (const id of ['l-3', 'l-1', 'l-2']) {
+		for (const [at, body] of (await eachView(inAView({}, withPriorityOn(id)))).entries()) {
+			assert.ok(body.includes(mark), `${views[at]} hid the priority mark on ${id}`);
+		}
+	}
+});
+
+// It names nobody (ADR-0033). The component takes a flag, and the only prop it has is that one.
+test('the priority mark names nobody', async () => {
+	const source = read(join(lib, 'Talking.svelte'));
+	const props = source.match(/let \{([^}]*)\} = \$props\(\)/)?.[1] ?? '';
+
+	assert.deepEqual(
+		props
+			.split(',')
+			.map((prop) => prop.split('=')[0].trim())
+			.filter(Boolean),
+		['priority'],
+		'the talking indicator takes something that could name a talker'
+	);
+});
+
+// **The third binding has an on-screen control too**, because a source is a way to reach a
+// level and the bar is a source (ADR-0021). Both views carry it, because they carry one bar.
+test('both views offer the priority control beside the other two', async () => {
+	for (const [at, body] of (await eachView(carrying)).entries()) {
+		assert.match(body, />\s*Priority\s*</, `${views[at]} offers no priority control`);
+	}
+});
+
+// **The lamp is the server's answer**, priority included (ADR-0008). An elevated transmission
+// shows as elevated on the key control's lamp with no new surface (ADR-0046), and it is lit by
+// the document's `priority` and nothing held here.
+test('the lamp says a transmission is at priority when the document does', async () => {
+	const at = (keyed, priority) => rendered('TransmitBar.svelte', { ...theBar, keyed, priority });
+
+	assert.match(await at(true, true), />\s*Keyed at priority\s*</);
+	assert.match(await at(true, false), />\s*Keyed\s*</);
+	assert.match(await at(false, false), />\s*Not keyed\s*</);
+
+	for (const [where, body] of (
+		await eachView(inAView({ keyed: true, priority: true }))
+	).entries()) {
+		assert.match(body, /Keyed at priority/, `${views[where]} does not say it is elevated`);
+	}
+});
+
+// **Priority never latches** (v1 §4), so the control has nothing on the way down that could
+// hold it — it is a key you hold, drawn like the key control rather than like the latch.
+test('the priority control is held, and has no latched state to show', async () => {
+	const source = read(join(lib, 'TransmitBar.svelte'));
+
+	assert.match(source, /onpointerup=\{onPriorityUp\}/);
+	assert.match(source, /onpointerleave=\{onPriorityUp\}/);
+	assert.doesNotMatch(source, /Unpriority|unprioritise/i);
 });

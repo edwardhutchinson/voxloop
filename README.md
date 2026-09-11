@@ -423,8 +423,8 @@ The three things an operator does to shape what they hear, and the rule that set
 (v1 §5).
 
 **Mute silences a loop in the operator's own ears and touches nobody else.** It is not an
-unsubscribe: the subscription stands, so the loop's talking indicator keeps arriving (and its
-loop health and priority mark will when they exist). It is enforced **in the fan-out rather
+unsubscribe: the subscription stands, so the loop's talking indicator and its priority mark
+keep arriving (and its loop health will when it exists). It is enforced **in the fan-out rather
 than in the client** — a muted loop is one the state authority does not count the operator as
 hearing, so no talker is carried to them on it. That is also what makes a mute sovereign over
 priority ([ADR-0045](docs/adr/0045-priority-defeats-attenuation-and-nothing-else.md)): a priority
@@ -580,7 +580,8 @@ double tap, no held duration, because a button that stopped reporting its releas
 indistinguishable from a deliberate tap, and deriving latch from one would make an open mic
 the failure mode of a hardware fault. **A single-button device is therefore momentary only.**
 
-The defaults are `` ` `` and `` Shift+` ``, changed from the console and refused in three
+The defaults are `` ` ``, `` Shift+` `` and — for priority, below — ``Ctrl+` ``, changed from
+the console and refused in three
 places: Space activates focused controls, `CapsLock` does not reliably report being released,
 and a key another mode already holds would be one press meaning two things. **PTT keys are
 inert while focus is in a text field or on an interactive control**, so the key controls on
@@ -588,8 +589,64 @@ the transmit bar do not take focus when they are pressed. Autorepeat may not rai
 that is low and a window losing focus drops what it was holding, which is
 [v1 §7](docs/spec/v1.md#7-reconnection)'s stale-high rule arriving from the two cases in a
 browser that produce it. A binding lasts as long as the console until
-[#55](https://github.com/edwardhutchinson/voxloop/issues/55) persists it, and the third
-binding — priority — is [#45](https://github.com/edwardhutchinson/voxloop/issues/45).
+[#55](https://github.com/edwardhutchinson/voxloop/issues/55) persists it.
+
+### Priority
+
+**A priority transmission plays at full gain in every subscriber's ears, whatever they set that
+loop's volume to, and that is all it does**
+([ADR-0045](docs/adr/0045-priority-defeats-attenuation-and-nothing-else.md)). It lowers no
+other talker, defeats no mute and compels no subscription. **Nothing in VoxLoop ducks**, in the
+client or the server. Per-loop volume is the one attenuation nothing warns anybody about, and
+priority covers exactly that gap.
+
+**It is an act rather than an attribute**
+([ADR-0046](docs/adr/0046-priority-is-keyed-not-held.md)): the third binding, ``Ctrl+` ``,
+momentary only, and **it never latches**. It is a second level beside the ordinary one rather
+than a mode, so `modes.js` absorbs it in two lines — `emitting = ordinary OR priority`,
+`is-priority = priority`. Pressing it over a latch elevates the latched transmission and letting
+go lowers it again; pressing it from cold keys and elevates, and letting go ends both. The
+transmit bar carries a Priority control beside Key and Latch, drawn like the key control, and
+the lamp says `Keyed at priority` when the server says so.
+
+The client says the two levels separately: `key` and `unkey` carry the OR as before, and
+`key-priority` and `unkey-priority` carry the priority level. Neither names a loop, because
+**priority applies to the whole arm set**. There is one stream, fanned out at the server, so a
+transmission cannot be priority on one armed loop and ordinary on another. That makes a wide arm
+set the abuse vector, and it is **ungated by choice**: both messages are `Session`, open to
+anyone holding `emit`, with no `control` gate and no flag on a role, a loop or a cell.
+
+**It is audited instead: every press, with no minimum duration** (v1 §12). The entry names the
+actor, the role, the armed loop set as it stood when the key went down, the time of the press
+and how long it was held. A press ends when the key comes up, when the session ends and when
+the socket goes, and each of those records it. A key held across an outage is suppressed until
+released ([ADR-0043](docs/adr/0043-a-resume-restores-everything-except-the-key.md)), so the
+socket closing ends the press.
+
+**The mark is the talking indicator's one variant**
+([ADR-0059](docs/adr/0059-a-priority-transmission-is-marked-wherever-it-lands.md)), and it
+names nobody: `Talking — Priority`, on every loop the transmission reaches and on every console
+whose reach holds that loop. That includes loops the receiver has at full volume, loops they have
+muted, and loops they are not monitoring. It declares that somebody called this urgent; it does
+not explain why the audio got louder. It lasts exactly as long as the press, with no minimum,
+so **a sub-second press may leave no trace on any console**, and the audit log is then the only
+record.
+
+**The gain is read off the mark.** Each loop in the presence document carries `priority`, and
+Audio plays a carriage at full gain when any loop it is heard on is marked and not muted,
+bypassing loudest-wins rather than competing with it. The mark and the gain arrive as one fact,
+so the first moments of an urgent call can play attenuated and unmarked together, because the
+attribute rides signalling and the audio does not. The mark belongs to the loop, since the
+console cannot tell one talker on a loop from another
+([ADR-0033](docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md)). So anybody
+else talking on a marked loop at the same moment plays at full gain as well. That raises them;
+it lowers nobody.
+
+**Cut beats priority** without any rule to say so. The mark is read off a transmission that is
+landing, and Cut closes the fan-out, so a talker with no route is marked nowhere and has no
+carriage to raise. The disconnected talker, whose fan-out closes by the same machinery, is how
+that is tested until Cut arrives with [#51](https://github.com/edwardhutchinson/voxloop/issues/51).
+There is **no personal opt-out**, because mute is already the escape.
 
 ## The admin console
 

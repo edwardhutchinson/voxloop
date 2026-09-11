@@ -93,7 +93,11 @@
 		// Keying. **The local track goes first and the server is told second**, which is the
 		// order that buys key-to-first-audio under 100 ms (ADR-0008) — and nothing here
 		// renders off either half, because the transmitting lamp is the document's.
-		keying: () => {}
+		keying: () => {},
+		// Keying priority, and letting it go. **A second level beside the key rather than a
+		// kind of key** (ADR-0046): the track is already live by the time this is said, and the
+		// server is told so it can mark the loops and audit the press.
+		priority: () => {}
 	});
 
 	holdFrame(frame);
@@ -222,6 +226,13 @@
 			if (wants) channel.key();
 			else channel.unkey();
 		};
+		// Nothing for Audio here: this end plays nothing of its own talker, and the gain a
+		// priority transmission is heard at is every *listener's* client's to apply, from the
+		// mark in their own document (ADR-0045).
+		frame.priority = (is) => {
+			if (is) channel.keyPriority();
+			else channel.unkeyPriority();
+		};
 
 		return () => {
 			frame.assume = () => {};
@@ -234,6 +245,7 @@
 			frame.unmute = () => {};
 			frame.setVolume = () => {};
 			frame.keying = () => {};
+			frame.priority = () => {};
 			audio?.close();
 			channel.close();
 		};

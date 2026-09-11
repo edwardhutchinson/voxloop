@@ -74,8 +74,10 @@
 				{#if reachable.volume < 100}
 					<span class="volume">{reachable.volume}%</span>
 				{/if}
+				<!-- The priority mark is this indicator's one variant, and it is drawn on every
+				     loop the document marks — muted, unheard or at full volume (ADR-0059). -->
 				{#if reachable.talking}
-					<span class="spoken"><Talking /></span>
+					<span class="spoken"><Talking priority={reachable.priority} /></span>
 				{/if}
 				<span class="rung">{reachable.permission}</span>
 			</button>
