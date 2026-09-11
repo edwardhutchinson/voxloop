@@ -45,7 +45,7 @@ use crate::authorisation::{self, Caller, Outcome, Presented, Requirement};
 use crate::configuration::{
     AuditEntry, AuditEvent, AuditLog, Eligibilities, Grid, Ladder, LoopId, Occupancy, Permission,
     Personalisation, Role, RoleId, Roles, SignInToken, SignIns, StoreError, Transaction, UserId,
-    Users,
+    Users, Volume,
 };
 use crate::media_plane::{Audience, Carried, Destination, Hearing, Negotiated, Negotiation, Way};
 use crate::state::{Assuming, Ended, InReach, MediaPath, Relinquished, SessionId, WhoHears};
@@ -283,6 +283,45 @@ enum Incoming {
     },
     /// The client has built its end of one carriage and can be sent audio on it.
     MediaHears { carriage: String },
+    /// Silence a loop in this operator's own ears, or hear it again.
+    ///
+    /// `Session` and **not** a grid check (`docs/spec/api-surface.md`): a mute reaches
+    /// nothing and nobody, so there is no rung for it to need. It is not an unsubscribe — the
+    /// subscription stands, and the talking indicator with it — and it is **never
+    /// remembered** ([ADR-0050]), so nothing here writes it anywhere.
+    ///
+    /// **Two acts rather than one toggle**, for the reason every other pair here is: the
+    /// control lags the click, and a second press that has not caught up must land on the
+    /// same state.
+    ///
+    /// [ADR-0050]: ../../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
+    Mute {
+        #[serde(rename = "loop")]
+        held_on: String,
+    },
+    /// Hear a muted loop again. `Session`, the other half of the act.
+    Unmute {
+        #[serde(rename = "loop")]
+        held_on: String,
+    },
+    /// Set how loud a loop plays in this operator's ears, as a percentage of full gain.
+    ///
+    /// `Session`, like mute and for the same reason. **It is personalisation and not a live
+    /// operational control** (v1 §5): it is applied at once and written through as it is,
+    /// best effort, per (user, role, loop) ([ADR-0050]). It is one act with a value rather
+    /// than a pair, because a volume is a level and not a toggle — a second message that has
+    /// not caught up says the same level twice.
+    ///
+    /// The number is taken as it is sent and refused if it is not a volume, rather than read
+    /// as the nearest one: **volume is an attenuation control** (v1 §5), and a level past
+    /// unity clamped down would be a level nobody chose.
+    ///
+    /// [ADR-0050]: ../../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
+    SetVolume {
+        #[serde(rename = "loop")]
+        held_on: String,
+        volume: u64,
+    },
 }
 
 impl Incoming {
@@ -307,7 +346,14 @@ impl Incoming {
             | Self::MediaCanDecode { .. }
             | Self::MediaConnect { .. }
             | Self::MediaSpeaks { .. }
-            | Self::MediaHears { .. } => Requirement::Session,
+            | Self::MediaHears { .. }
+            // **A mute and a volume reach nothing and nobody** (`docs/spec/api-surface.md`),
+            // so there is no rung to check: they shape what this operator hears of loops
+            // their role already reaches, and a loop outside reach is one the document does
+            // not name and the fan-out does not carry.
+            | Self::Mute { .. }
+            | Self::Unmute { .. }
+            | Self::SetVolume { .. } => Requirement::Session,
             // **Emission is enforced here.** The rung is `emit` and the loop is the
             // caller's, so this is a value built per message like the two below it.
             Self::Arm { held_on } | Self::Disarm { held_on } => Requirement::Grid {
@@ -343,6 +389,9 @@ impl Incoming {
             | Self::Unsubscribe { .. }
             | Self::Arm { .. }
             | Self::Disarm { .. }
+            | Self::Mute { .. }
+            | Self::Unmute { .. }
+            | Self::SetVolume { .. }
             // **Keying is the most deliberate act there is**, and it is also what clears an
             // off-console assertion (`CONTEXT.md`). A console somebody is talking on is
             // emphatically one somebody is sitting at.
@@ -383,6 +432,9 @@ impl Incoming {
             Self::MediaConnect { .. } => "media-connect",
             Self::MediaSpeaks { .. } => "media-speaks",
             Self::MediaHears { .. } => "media-hears",
+            Self::Mute { .. } => "mute",
+            Self::Unmute { .. } => "unmute",
+            Self::SetVolume { .. } => "set-volume",
         }
     }
 }
@@ -454,7 +506,22 @@ enum Outgoing {
     /// draw would be one somebody would eventually draw.
     ///
     /// [ADR-0033]: ../../../docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md
-    OneMoreTalker { talker: Negotiation },
+    ///
+    /// **It does say which of this session's own loops the talker is heard on**, as loop ids
+    /// the document already carries, because the client plays the carriage at the loudest of
+    /// their volumes (v1 §5). They are loops this session is monitoring and so already in its
+    /// reach — nothing about where else the talker went ([ADR-0057]).
+    ///
+    /// [ADR-0057]: ../../../docs/adr/0057-the-receiver-is-never-told-where-else-a-transmission-went.md
+    OneMoreTalker {
+        talker: Negotiation,
+        heard_on: Vec<String>,
+    },
+    /// A carriage this session already has is now heard on these of its loops.
+    HeardOn {
+        carriage: Carried,
+        heard_on: Vec<String>,
+    },
     /// One fewer. That carriage is closed at this end and the client should let it go.
     OneFewerTalker { carriage: Carried },
 }
@@ -634,6 +701,18 @@ struct Reachable {
     ///
     /// [ADR-0033]: ../../../docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md
     talking: bool,
+    /// Whether this session has silenced it in its own ears.
+    ///
+    /// **Beside the subscription and never instead of it** (v1 §5): a muted loop is still
+    /// monitored, which is why its talking indicator still arrives. It is only ever true on a
+    /// loop this session is monitoring, because a mute presupposes a subscription.
+    muted: bool,
+    /// How loud it plays in this operator's ears, as a percentage of full gain.
+    ///
+    /// It is here because the console shows it, and because the client plays every talker
+    /// at the loudest of the volumes among the loops it hears them on (v1 §5) — so the level
+    /// the client plays and the level the card shows are read off the same document.
+    volume: u8,
 }
 
 impl Conversation {
@@ -822,6 +901,17 @@ impl Conversation {
             Incoming::MediaHears { carriage } => self.the_media_plane(|media, session| {
                 media.the_client_hears(session, &Carried::presented(carriage));
             }),
+            Incoming::Mute { held_on } => {
+                self.muting(&LoopId::presented(held_on), Muted::Muted).await
+            }
+            Incoming::Unmute { held_on } => {
+                self.muting(&LoopId::presented(held_on), Muted::Unmuted)
+                    .await
+            }
+            Incoming::SetVolume { held_on, volume } => {
+                self.setting_the_volume(&LoopId::presented(held_on), volume)
+                    .await
+            }
         }
     }
 
@@ -904,13 +994,17 @@ impl Conversation {
             let remembered = transaction
                 .the_subscriptions_of(&self.user, &role.id)
                 .await?;
+            // The volumes too, from the same transaction and for the same reason. **A mute
+            // is not read here because nothing remembers one** (ADR-0050): a stale mute
+            // silences a loop before its owner has looked at anything.
+            let volumes = transaction.the_volumes_of(&self.user, &role.id).await?;
 
-            Ok(Some((role, remembered)))
+            Ok(Some((role, remembered, volumes)))
         }
         .await;
         transaction.roll_back().await?;
 
-        let Some((role, subscribed_to)) = read? else {
+        let Some((role, subscribed_to, volumes)) = read? else {
             return Ok(vec![Outgoing::Refused {
                 was: "assume".to_owned(),
                 reason: "That is not a role you may assume.".to_owned(),
@@ -925,6 +1019,7 @@ impl Conversation {
             role: role.id.clone(),
             limit: role.max_occupants,
             subscribed_to,
+            volumes,
         });
 
         let assumed = match assumed {
@@ -1135,6 +1230,97 @@ impl Conversation {
         };
 
         self.presence(Told::WhetherOrNotItMoved).await
+    }
+
+    /// Mute a loop, or unmute it — the same act in two directions.
+    ///
+    /// **Nothing is remembered**, and that is the point of the act rather than an omission:
+    /// a mute that outlived its session would silence a loop the moment its owner assumed the
+    /// role again, and drop every loop they staff to `away` before they had looked at
+    /// anything ([ADR-0050]). So there is no personalisation write here and no row for one.
+    ///
+    /// The document goes out **whether or not it moved**, for the reason every act's answer
+    /// does: somebody pressed a control and is waiting for it to change.
+    ///
+    /// [ADR-0050]: ../../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
+    async fn muting(&mut self, held_on: &LoopId, now: Muted) -> Result<Vec<Outgoing>, StoreError> {
+        let Some(session) = self.session.clone() else {
+            // Unreachable: `Session` was met a moment ago, and only this socket clears it.
+            return Ok(Vec::new());
+        };
+
+        match now {
+            Muted::Muted => self.api.state.mute(&session, held_on),
+            Muted::Unmuted => self.api.state.unmute(&session, held_on),
+        };
+
+        self.presence(Told::WhetherOrNotItMoved).await
+    }
+
+    /// Set how loud a loop plays in this operator's ears.
+    ///
+    /// **The live act first and the memory of it second**, exactly as a subscription is
+    /// ([ADR-0050]): the level is heard and shown at once, and a store that will not take the
+    /// write leaves the console correct and the preference lost. The write is on the answer's
+    /// path for the reason [`Conversation::monitoring`] gives — a slider moved twice must not
+    /// leave behind whichever write happened to land second.
+    ///
+    /// A number that is not a volume is refused and changes nothing.
+    ///
+    /// [ADR-0050]: ../../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
+    async fn setting_the_volume(
+        &mut self,
+        held_on: &LoopId,
+        percent: u64,
+    ) -> Result<Vec<Outgoing>, StoreError> {
+        let Some(session) = self.session.clone() else {
+            // Unreachable: `Session` was met a moment ago, and only this socket clears it.
+            return Ok(Vec::new());
+        };
+
+        let Some(volume) = u8::try_from(percent).ok().and_then(Volume::presented) else {
+            return Ok(vec![Outgoing::Refused {
+                was: "set-volume".to_owned(),
+                reason: "A volume runs from 0 to 100 percent of full volume.".to_owned(),
+            }]);
+        };
+
+        if self.api.state.set_the_volume(&session, held_on, volume) {
+            self.remember_the_volume(&session, held_on, volume).await;
+        }
+
+        self.presence(Told::WhetherOrNotItMoved).await
+    }
+
+    /// Remember the level this act leaves behind. **Best effort, and it answers nothing**, for
+    /// the reason [`Conversation::remember`] gives.
+    async fn remember_the_volume(&self, session: &SessionId, held_on: &LoopId, volume: Volume) {
+        let Some(role) = self.api.state.the_role_of(session) else {
+            return;
+        };
+
+        let written = async {
+            let mut transaction = self.api.store.begin().await?;
+            match transaction
+                .remember_a_volume(&self.user, &role, held_on, volume)
+                .await
+            {
+                Ok(()) => transaction.commit().await,
+                Err(error) => {
+                    transaction.roll_back().await?;
+                    Err(error)
+                }
+            }
+        }
+        .await;
+
+        if let Err(error) = written {
+            tracing::error!(
+                target: module::TRANSPORT,
+                %error,
+                "a volume could not be remembered, and the preference is lost"
+            );
+        }
     }
 
     /// Take the client's word that it is transmitting, or that it has stopped.
@@ -1361,6 +1547,8 @@ impl Conversation {
                         subscribed: standing.subscribed,
                         armed: standing.armed,
                         talking: standing.talking,
+                        muted: standing.muted,
+                        volume: standing.volume.percent(),
                     })
                     .collect(),
             },
@@ -1607,6 +1795,17 @@ enum Armed {
     Disarmed,
 }
 
+/// Which way a mute moved.
+///
+/// Its own pair rather than [`Remembered`], for the reason [`Armed`] is: a mute is not
+/// remembered anywhere, and sharing the enum would be the first step towards sharing the
+/// write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Muted {
+    Muted,
+    Unmuted,
+}
+
 /// Which way the key moved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Keyed {
@@ -1633,9 +1832,28 @@ fn carrying(negotiated: Negotiated) -> Outgoing {
     match negotiated {
         Negotiated::APathToBuild(path) => Outgoing::APathToBuild { path },
         Negotiated::TheUplinkIsCarried(carriage) => Outgoing::TheUplinkIsCarried { carriage },
-        Negotiated::OneMoreTalker(talker) => Outgoing::OneMoreTalker { talker },
+        Negotiated::OneMoreTalker { talker, heard_on } => Outgoing::OneMoreTalker {
+            talker,
+            heard_on: loops(&heard_on),
+        },
+        Negotiated::HeardOn { carriage, heard_on } => Outgoing::HeardOn {
+            carriage,
+            heard_on: loops(&heard_on),
+        },
         Negotiated::OneFewerTalker(carriage) => Outgoing::OneFewerTalker { carriage },
     }
+}
+
+/// Destinations, read back as the loops they were labelled from.
+///
+/// It is this file that labelled them ([`Conversation::hand_down_the_routing`]), so reading
+/// one back is Transport undoing its own translation rather than anybody asking the media
+/// plane what a label means.
+fn loops(destinations: &[Destination]) -> Vec<String> {
+    destinations
+        .iter()
+        .map(|destination| destination.as_str().to_owned())
+        .collect()
 }
 
 /// Write the audit entry for a session that ended, **with the reason** (v1 §12).
@@ -1852,6 +2070,7 @@ mod tests {
                     role: role.clone(),
                     limit,
                     subscribed_to: Vec::new(),
+                    volumes: Vec::new(),
                 })
                 .unwrap_or_else(|_| panic!("the seat to be free"))
                 .session
@@ -1937,7 +2156,7 @@ mod tests {
         /// when the durable half of a live act is the thing that breaks.
         async fn personalisation_writes_start_failing(&self) {
             let mut transaction = self.api.store.begin().await.expect("a transaction");
-            crate::configuration::refuse_every_subscription_write(&mut transaction).await;
+            crate::configuration::refuse_every_personalisation_write(&mut transaction).await;
             transaction.commit().await.expect("the triggers to land");
         }
 
@@ -3132,6 +3351,247 @@ mod tests {
         );
     }
 
+    // ---- mute and per-loop volume (#44) ------------------------------------------------
+
+    fn muting(held_on: &LoopId) -> String {
+        format!(r#"{{"message":"mute","loop":"{}"}}"#, held_on.as_str())
+    }
+
+    fn unmuting(held_on: &LoopId) -> String {
+        format!(r#"{{"message":"unmute","loop":"{}"}}"#, held_on.as_str())
+    }
+
+    fn setting_the_volume(held_on: &LoopId, volume: u64) -> String {
+        format!(
+            r#"{{"message":"set-volume","loop":"{}","volume":{volume}}}"#,
+            held_on.as_str()
+        )
+    }
+
+    /// The one loop a document carries, for a test with one loop in reach.
+    fn the_loop(said: &Outgoing) -> &Reachable {
+        &the_presence(said).1.loops[0]
+    }
+
+    /// A session in `Flight Director` monitoring `Air-to-ground`, which is the smallest
+    /// console with something on it to mute or turn down.
+    async fn a_console_monitoring_one_loop() -> (ALobby, RoleId, LoopId, Conversation) {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, &subscribing(&air_to_ground)).await;
+
+        (lobby, flight, air_to_ground, socket)
+    }
+
+    /// **Mute is not an unsubscribe** (v1 §5): the answer says the loop is muted and still
+    /// monitored, and unmuting says it is not.
+    #[tokio::test]
+    async fn muting_a_loop_leaves_it_monitored_and_the_document_says_so() {
+        let (_lobby, _flight, air_to_ground, mut socket) = a_console_monitoring_one_loop().await;
+
+        let muted = said(&mut socket, &muting(&air_to_ground)).await;
+        assert!(
+            the_loop(&muted).muted,
+            "the document does not say it is muted"
+        );
+        assert_eq!(monitoring(&muted), ["Air-to-ground"]);
+
+        let unmuted = said(&mut socket, &unmuting(&air_to_ground)).await;
+        assert!(!the_loop(&unmuted).muted);
+    }
+
+    /// **A mute is never remembered** (ADR-0050). The subscription comes back at the next
+    /// assume and the mute does not, because a forgotten one would silence a loop before its
+    /// owner had looked at anything.
+    #[tokio::test]
+    async fn a_mute_is_gone_at_the_next_assume_and_the_subscription_is_not() {
+        let (_lobby, flight, air_to_ground, mut socket) = a_console_monitoring_one_loop().await;
+        all(&mut socket, &muting(&air_to_ground)).await;
+        all(&mut socket, RELINQUISH).await;
+
+        let again = said(&mut socket, &assuming(&flight)).await;
+
+        assert_eq!(monitoring(&again), ["Air-to-ground"]);
+        assert!(!the_loop(&again).muted, "a mute outlived its session");
+    }
+
+    /// **Every loop starts at unity** (v1 §10), and a volume set is in the answer to setting
+    /// it — the console shows it when VoxLoop confirms it, not when the slider moves.
+    #[tokio::test]
+    async fn a_loop_starts_at_unity_and_a_volume_set_is_in_the_answer() {
+        let (_lobby, flight, air_to_ground, mut socket) = a_console_monitoring_one_loop().await;
+        all(&mut socket, RELINQUISH).await;
+
+        let assumed = said(&mut socket, &assuming(&flight)).await;
+        assert_eq!(the_loop(&assumed).volume, 100);
+
+        let turned_down = said(&mut socket, &setting_the_volume(&air_to_ground, 40)).await;
+        assert_eq!(the_loop(&turned_down).volume, 40);
+    }
+
+    /// **Volume persists per (user, role, loop)** (ADR-0050), written through as it is set,
+    /// so the next assume — and the one after a restart — comes back at the level it left.
+    #[tokio::test]
+    async fn a_volume_is_remembered_and_restored_on_the_next_assume() {
+        let (_lobby, flight, air_to_ground, mut socket) = a_console_monitoring_one_loop().await;
+        all(&mut socket, &setting_the_volume(&air_to_ground, 25)).await;
+        all(&mut socket, RELINQUISH).await;
+
+        let again = said(&mut socket, &assuming(&flight)).await;
+
+        assert_eq!(the_loop(&again).volume, 25);
+    }
+
+    /// Volume is scoped to the seat as well as the loop (ADR-0051): the same person in
+    /// another role hears that role's loops at whatever they set there, which starts at unity.
+    #[tokio::test]
+    async fn a_volume_belongs_to_the_seat_it_was_set_in() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1)), ("CAPCOM", None)]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let capcom = lobby.role_named("CAPCOM").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        lobby
+            .the_cell_becomes(&capcom, &air_to_ground, Permission::Monitor)
+            .await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, &setting_the_volume(&air_to_ground, 10)).await;
+        all(&mut socket, RELINQUISH).await;
+
+        let said = said(&mut socket, &assuming(&capcom)).await;
+
+        assert_eq!(the_loop(&said).volume, 100);
+    }
+
+    /// **Volume is an attenuation control** (v1 §5), so a volume past unity is not one, and
+    /// the socket says so rather than clamping it into a level nobody asked for.
+    #[tokio::test]
+    async fn a_volume_past_unity_is_refused() {
+        let (_lobby, _flight, air_to_ground, mut socket) = a_console_monitoring_one_loop().await;
+
+        let refused = said(&mut socket, &setting_the_volume(&air_to_ground, 101)).await;
+
+        assert!(
+            matches!(&refused, Outgoing::Refused { was, .. } if was == "set-volume"),
+            "a volume past unity was taken: {refused:?}"
+        );
+    }
+
+    /// **Mute and volume are `Session`, not a grid check** (`docs/spec/api-surface.md`): they
+    /// reach nothing and nobody, so there is no rung for them to need. From the lobby there
+    /// is no session and they are refused.
+    #[tokio::test]
+    async fn muting_and_setting_a_volume_from_the_lobby_are_refused() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+
+        for message in [
+            muting(&air_to_ground),
+            unmuting(&air_to_ground),
+            setting_the_volume(&air_to_ground, 40),
+        ] {
+            assert!(matches!(
+                said(&mut socket, &message).await,
+                Outgoing::Refused { .. }
+            ));
+        }
+    }
+
+    /// Best effort, like the subscription set: a store that will not remember a volume
+    /// cannot stop it being heard at that volume now (ADR-0050).
+    #[tokio::test]
+    async fn a_volume_write_that_fails_cannot_fail_the_live_act() {
+        let (lobby, flight, air_to_ground, mut socket) = a_console_monitoring_one_loop().await;
+        lobby.personalisation_writes_start_failing().await;
+
+        let turned_down = said(&mut socket, &setting_the_volume(&air_to_ground, 40)).await;
+        assert_eq!(
+            the_loop(&turned_down).volume,
+            40,
+            "a store that would not remember the volume refused the live act"
+        );
+
+        all(&mut socket, RELINQUISH).await;
+        let again = said(&mut socket, &assuming(&flight)).await;
+        assert_eq!(
+            the_loop(&again).volume,
+            100,
+            "the write landed after all, so this test proves nothing"
+        );
+    }
+
+    /// A user shaping what they hear is not a configuration change (v1 §10), so none of it is
+    /// audited — and it is a person at a console, so all of it is a deliberate act.
+    #[tokio::test]
+    async fn muting_and_setting_a_volume_are_not_audited_and_are_deliberate_acts() {
+        let (lobby, _flight, air_to_ground, mut socket) = a_console_monitoring_one_loop().await;
+        let before = lobby.everything_the_log_holds().await;
+        aged(
+            &lobby.api.store,
+            &lobby.sign_in,
+            Duration::from_secs(25 * 60 * 60),
+        )
+        .await;
+
+        all(&mut socket, &muting(&air_to_ground)).await;
+        all(&mut socket, &unmuting(&air_to_ground)).await;
+        all(&mut socket, &setting_the_volume(&air_to_ground, 40)).await;
+
+        assert_eq!(lobby.everything_the_log_holds().await, before);
+        assert!(reaped(&lobby.api.store).await.is_empty());
+    }
+
+    /// **A mute silences the loop in the muter's ears**, so the audience handed down to the
+    /// media plane stops naming them on it. Unmuting names them again.
+    #[tokio::test]
+    async fn a_mute_takes_the_muter_out_of_the_audience_handed_down() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut talker = lobby.a_socket();
+        let talking = said(&mut talker, &assuming(&flight)).await;
+        let talking = the_presence(&talking).1.session.clone();
+        let mut listener = lobby.somebody_else("capcom", &flight).await;
+        let hearing = said(&mut listener, &assuming(&flight)).await;
+        let hearing = the_presence(&hearing).1.session.clone();
+        all(&mut talker, &arming(&air_to_ground)).await;
+        all(&mut listener, &subscribing(&air_to_ground)).await;
+        a_turn_of_the_loop(&talker);
+        let heard = (talking, hearing, air_to_ground.as_str().to_owned());
+        assert_eq!(the_fan_out(&lobby).last(), Some(&heard));
+        let before = the_fan_out(&lobby).len();
+
+        all(&mut listener, &muting(&air_to_ground)).await;
+        a_turn_of_the_loop(&listener);
+        assert_eq!(
+            the_fan_out(&lobby).len(),
+            before,
+            "the muted listener was named in the audience handed down again"
+        );
+
+        all(&mut listener, &unmuting(&air_to_ground)).await;
+        a_turn_of_the_loop(&listener);
+        assert_eq!(the_fan_out(&lobby).last(), Some(&heard));
+        assert_eq!(the_fan_out(&lobby).len(), before + 1);
+    }
+
     // ---- audit -------------------------------------------------------------------------
 
     /// **Session start and session end are audited, with the reason** (v1 §12). They are
@@ -3922,6 +4382,59 @@ mod tests {
         assert_eq!(as_json(&carried[0])["path"], path);
         assert_eq!(as_json(&carried[1])["message"], "the-uplink-is-carried");
         assert_eq!(as_json(&carried[1])["carriage"], "an-uplink");
+    }
+
+    /// **A carriage says which of this session's own loops it is heard on**, because the
+    /// client plays it at the loudest of their volumes (v1 §5) and has nothing else to work
+    /// that out from. They are loops the session is monitoring and so already in its reach:
+    /// it is told nothing about where else the talker went ([ADR-0057]) and nothing about
+    /// who they are ([ADR-0033]).
+    ///
+    /// [ADR-0033]: ../../../docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md
+    /// [ADR-0057]: ../../../docs/adr/0057-the-receiver-is-never-told-where-else-a-transmission-went.md
+    #[tokio::test]
+    async fn a_carriage_comes_with_the_loops_it_is_heard_on_and_says_when_they_move() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let mut socket = lobby.a_socket();
+        let assumed = said(&mut socket, &assuming(&flight)).await;
+        let session = SessionId::presented(the_presence(&assumed).1.session.clone());
+        let on = |labels: &[&str]| {
+            labels
+                .iter()
+                .map(|label| Destination::labelled((*label).to_owned()))
+                .collect::<Vec<_>>()
+        };
+
+        lobby.recording.the_worker_tells(
+            &session,
+            Negotiated::OneMoreTalker {
+                talker: Negotiation::presented(serde_json::json!({ "id": "a-carriage" })),
+                heard_on: on(&["l-flight"]),
+            },
+        );
+        lobby.recording.the_worker_tells(
+            &session,
+            Negotiated::HeardOn {
+                carriage: Carried::presented("a-carriage".to_owned()),
+                heard_on: on(&["l-flight", "l-sim"]),
+            },
+        );
+
+        let carried = negotiated(&mut socket);
+
+        assert_eq!(as_json(&carried[0])["message"], "one-more-talker");
+        assert_eq!(as_json(&carried[0])["talker"]["id"], "a-carriage");
+        assert_eq!(
+            as_json(&carried[0])["heard_on"],
+            serde_json::json!(["l-flight"])
+        );
+        assert_eq!(as_json(&carried[1])["message"], "heard-on");
+        assert_eq!(as_json(&carried[1])["carriage"], "a-carriage");
+        assert_eq!(
+            as_json(&carried[1])["heard_on"],
+            serde_json::json!(["l-flight", "l-sim"])
+        );
     }
 
     /// **A fresh channel per session**, so signalling composed for a session that has ended

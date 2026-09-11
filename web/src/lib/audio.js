@@ -15,9 +15,11 @@
 // **Nothing that arrives says who is talking**, and there is nowhere in the message that
 // could (ADR-0033). A carriage is a stream and a name to quote back, and this plays it.
 //
-// Per-loop volume, loudest-wins and priority at full gain (#44, #45) turn the playback below
-// into a mixer with a gain per stream. What is here is the part ADR-0007 actually requires:
-// separate streams per talker, mixed at the client rather than at the server.
+// **Each talker plays at the loudest volume among the loops it is heard on** (v1 §5,
+// ADR-0007). The server says which of this operator's loops each carriage is heard on and the
+// presence document says what each loop is set to, and `loudest` below is the whole of the
+// rule — the browser's per-element volume is the gain. Priority at full gain (#45) bypasses
+// the rule rather than competing with it (ADR-0045).
 
 import { Device } from 'mediasoup-client';
 
@@ -60,10 +62,17 @@ const WHAT_THE_MICROPHONE_IS_ASKED_FOR = {
  */
 export function openAudio({ say, onMediaPath }) {
 	const device = new Device();
-	// One element per audible talker. The browser mixing several at once **is** the
-	// client-side mixing ADR-0007 asks for; what #44 adds is a gain per stream, not a
-	// different place for the mixing to happen.
+	// One element per audible talker, and the loops it is heard on. The browser mixing
+	// several at once **is** the client-side mixing ADR-0007 asks for; the gain on each is
+	// the loudest volume among its loops.
 	const playing = new Map();
+	// The loops as the last presence document had them — what each is set to and whether it
+	// is muted. Nothing here renders it: it is read for the gain and for nothing else.
+	let loops = [];
+
+	function play(held) {
+		held.heard.volume = loudest(held.heardOn, loops);
+	}
 
 	let microphone = null;
 	// The `produce` callback, held between asking the server to carry the uplink and being
@@ -173,7 +182,7 @@ export function openAudio({ say, onMediaPath }) {
 		 * yet is audio nobody hears, and a talker whose first word went that way would be the
 		 * *"Flight, CAPCOM"* that identifies the speaker.
 		 */
-		async oneMoreTalker(talker) {
+		async oneMoreTalker(talker, heardOn = []) {
 			if (closed || !receiving) return;
 
 			try {
@@ -181,13 +190,42 @@ export function openAudio({ say, onMediaPath }) {
 				const heard = new Audio();
 				heard.autoplay = true;
 				heard.srcObject = new MediaStream([carriage.track]);
-				playing.set(carriage.id, { carriage, heard });
+				const held = { carriage, heard, heardOn };
+				// The level is set before the first sample plays rather than after, or a
+				// talker on a loop turned down would open at full volume for a moment.
+				play(held);
+				playing.set(carriage.id, held);
 				await heard.play().catch(() => {});
 
 				say.mediaHears(carriage.id);
 			} catch (why) {
 				console.error('VoxLoop could not hear a talker', why);
 			}
+		},
+
+		/**
+		 * A carriage this end already has is now heard on these loops: the talker armed or
+		 * disarmed one this operator monitors, or the operator took one up or muted it. The
+		 * stream is the same stream, so only the level can move.
+		 */
+		heardOn(carriage, heardOn) {
+			const held = playing.get(carriage);
+			if (!held) return;
+
+			held.heardOn = heardOn;
+			play(held);
+		},
+
+		/**
+		 * The loops as the presence document now has them.
+		 *
+		 * **The level played and the level shown are read off the same document** (ADR-0007),
+		 * so an operator who has just turned a loop down hears it go down when the card says
+		 * it has — never before, because nothing here moves on the slider, and never after.
+		 */
+		theLoopsAre(now) {
+			loops = now;
+			for (const held of playing.values()) play(held);
 		},
 
 		/** One fewer. The carriage is closed at the far end and there is nothing left to play. */
@@ -227,6 +265,38 @@ export function openAudio({ say, onMediaPath }) {
 			microphone = null;
 		}
 	};
+}
+
+/**
+ * How loud to play a talker heard on these loops, as a gain from 0 to 1: **the loudest volume
+ * among them** (v1 §5, ADR-0007).
+ *
+ * Volume is an attenuation control, so a transmission also going to a loop the operator kept
+ * up is one they have already said they want to hear, and the loudest applicable volume wins.
+ * Quietest-wins would let a suppressed loop silence a transmission they care about.
+ *
+ * **A muted loop is not an applicable one.** The server stops carrying a talker on a loop the
+ * operator muted; until that lands, the document already says so, and a mute that is shown is
+ * a mute that is heard. A talker heard only on muted loops therefore plays at nothing.
+ *
+ * **A loop the document does not describe plays at unity.** It is a carriage that arrived
+ * before the document naming its loop, and guessing it down would risk the one failure this
+ * rule exists to prevent: a transmission somebody wanted going unheard.
+ *
+ * @param {string[]} heardOn the ids of the loops this talker is heard on
+ * @param {{ id: string, volume: number, muted: boolean }[]} loops as the document has them
+ */
+export function loudest(heardOn, loops) {
+	if (heardOn.length === 0) return 1;
+
+	let gain = 0;
+	for (const id of heardOn) {
+		const described = loops.find((reachable) => reachable.id === id);
+		if (!described) return 1;
+		if (!described.muted) gain = Math.max(gain, described.volume / 100);
+	}
+
+	return gain;
 }
 
 /**

@@ -77,15 +77,19 @@ function where() {
  *   how long ago it was last confirmed, and whether a latched emission may still stand
  *   (ADR-0018). It is the one thing here the server did not say.
  *
- * Four more arrive for the Audio module rather than for the console, and they are **not
+ * Five more arrive for the Audio module rather than for the console, and they are **not
  * documents**: they carry the client's own media negotiation, which VoxLoop owns the channel
  * for and has no opinion about (ADR-0006). Nothing on screen comes out of them — what the
  * console draws about the audio path is `media_path` in the presence document.
  *
  * - `onPathToBuild(path)` — what this session's media library has to build.
  * - `onUplinkCarried(carriage)` — the uplink is carried, under this name.
- * - `onOneMoreTalker(talker)` — one more talker to hear, and what to build to hear them. **It
- *   names nobody** (ADR-0033), and there is no field in it that could.
+ * - `onOneMoreTalker(talker, heardOn)` — one more talker to hear, what to build to hear them,
+ *   and which of this session's own loops they are heard on. **It names nobody** (ADR-0033),
+ *   and there is no field in it that could; the loops are ones this session monitors, so it
+ *   says nothing about where else the talker went (ADR-0057).
+ * - `onHeardOn(carriage, heardOn)` — a carriage this tab already has is now heard on these
+ *   loops. The stream did not change; the loudest volume among them may have.
  * - `onOneFewerTalker(carriage)` — that carriage is closed at the server's end.
  *
  * Answers with the acts a tab can perform on its own session, and the way to close it.
@@ -101,6 +105,7 @@ export function openSignalling({
 	onPathToBuild,
 	onUplinkCarried,
 	onOneMoreTalker,
+	onHeardOn = () => {},
 	onOneFewerTalker,
 	// What runs the ladder's clock: it is handed an act and an interval and answers with the
 	// way to stop. It is a parameter rather than a reach for `setInterval` so that nothing in
@@ -161,7 +166,9 @@ export function openSignalling({
 		} else if (said?.message === 'the-uplink-is-carried') {
 			onUplinkCarried(said.carriage);
 		} else if (said?.message === 'one-more-talker') {
-			onOneMoreTalker(said.talker);
+			onOneMoreTalker(said.talker, said.heard_on ?? []);
+		} else if (said?.message === 'heard-on') {
+			onHeardOn(said.carriage, said.heard_on ?? []);
 		} else if (said?.message === 'one-fewer-talker') {
 			onOneFewerTalker(said.carriage);
 		}
@@ -226,6 +233,25 @@ export function openSignalling({
 		 */
 		key: () => say(socket, { message: 'key' }),
 		unkey: () => say(socket, { message: 'unkey' }),
+		/**
+		 * Silence a loop in this operator's own ears, or hear it again.
+		 *
+		 * **Not an unsubscribe** (v1 §5): the loop stays monitored, so its talking indicator
+		 * keeps arriving, and nobody else on it is touched. **Two acts rather than one toggle**
+		 * for the reason subscribe and unsubscribe are. The server answers with the document,
+		 * and the card shows the mute when that says so.
+		 */
+		mute: (heldOn) => say(socket, { message: 'mute', loop: heldOn }),
+		unmute: (heldOn) => say(socket, { message: 'unmute', loop: heldOn }),
+		/**
+		 * Set how loud a loop plays in this operator's ears, as a percentage of full volume.
+		 *
+		 * **One act with a level rather than two**, because a volume is not a toggle: saying
+		 * the same level twice lands on the same state. It is personalisation, remembered per
+		 * (user, role, loop) as the server applies it (ADR-0050), and nothing here renders off
+		 * it — the level on the card is the document's.
+		 */
+		setVolume: (heldOn, volume) => say(socket, { message: 'set-volume', loop: heldOn, volume }),
 		/**
 		 * The four halves of the client's own media negotiation, carried and never read here.
 		 *

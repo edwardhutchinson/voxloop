@@ -13,11 +13,10 @@
 	// order to live.
 	//
 	// **The card body is a button and the card is not.** Clicking the body toggles monitoring
-	// (v1 §8), and the arm control — with the mute and the cog that arrive with #44 — must not
-	// propagate that click. So the clickable region is one element inside the card rather than
-	// the card itself, and it is a `<button>`, which cannot contain another one: the arm sits
-	// beside the body by construction, and there is no `stopPropagation` for anybody to
-	// forget. That rule is what this ticket was the first to actually need.
+	// (v1 §8), and the arm, the mute and the cog must not propagate that click. So the
+	// clickable region is one element inside the card rather than the card itself, and it is a
+	// `<button>`, which cannot contain another one: the three controls sit beside the body by
+	// construction, and there is no `stopPropagation` for anybody to forget.
 	//
 	// **The loop name is not a heading**, and that changed when the body became a control: a
 	// heading announces a section of content, and a card is a control. The `<ul>` is what
@@ -29,8 +28,20 @@
 	// legal and is the case the console has to compensate for. The words are the compensation;
 	// the talking indicator beside them is the rest of it.
 	//
+	// **A mute is a word on the card, and so is a loop turned down** (#44). The mute says
+	// *Muted* beside *Monitoring* rather than instead of it, because the loop is still
+	// monitored — which is why its talking indicator is still here. The volume says its
+	// percentage only below unity: per-loop volume is the one attenuation nothing warns anybody
+	// about (v1 §4), and the card is where the operator who turned it down is reminded, but a
+	// word true of nearly every card on the board is one nobody reads.
+	//
+	// **Volume is behind the cog and nowhere else on the card** (v1 §8, ADR-0034). It is not a
+	// live operational control, so nothing here can nudge it: the cog opens a modal scoped to
+	// the loop, which `Console.svelte` holds above both views.
+	//
 	// The staffing marks are #48. Nothing here decides which act a click is: it says which
 	// loop was clicked, and `Console.svelte` reads the document to know the rest.
+	import Icon from './Icon.svelte';
 	import Talking from './Talking.svelte';
 	import TransmitBar from './TransmitBar.svelte';
 	import { carries } from './rungs.js';
@@ -39,7 +50,7 @@
 	// **Placing it is this view's business and wording it is the bar's** (ADR-0034), so this
 	// view has no name for any of what is in it: a state that arrives as one value cannot be
 	// half-forwarded, and adding one to the bar is not an edit to either view.
-	let { loops, bar, onToggle, onArm } = $props();
+	let { loops, bar, onToggle, onArm, onMute, onCog } = $props();
 
 	// Which loops carry an arm control at all. **Reach is the grid and only the grid**: a role
 	// that may hear a loop and not speak on it gets no control, rather than one that is
@@ -57,6 +68,12 @@
 				     thing carrying a state, and a card is read at a glance by somebody who may
 				     not be looking at another card to compare it with. -->
 				<span class="monitoring">{reachable.subscribed ? 'Monitoring' : 'Not monitoring'}</span>
+				{#if reachable.subscribed && reachable.muted}
+					<span class="muted">Muted</span>
+				{/if}
+				{#if reachable.volume < 100}
+					<span class="volume">{reachable.volume}%</span>
+				{/if}
 				{#if reachable.talking}
 					<span class="spoken"><Talking /></span>
 				{/if}
@@ -80,6 +97,27 @@
 					</span>
 				</p>
 			{/if}
+			<p class="hearing">
+				<!-- Only on a loop being monitored: a mute presupposes a subscription (ADR-0049),
+				     and a control that did nothing would misrepresent what a press does. Like the
+				     arm, it names the act, and the word in the body names what is true now. -->
+				{#if reachable.subscribed}
+					<button aria-pressed={reachable.muted} onclick={() => onMute(reachable)}>
+						{#if reachable.muted}
+							<Icon name="volume-2" /> Unmute
+						{:else}
+							<Icon name="volume-x" /> Mute
+						{/if}
+					</button>
+				{/if}
+				<button
+					class="cog"
+					aria-label="Volume for {reachable.name}"
+					onclick={() => onCog(reachable)}
+				>
+					<Icon name="settings" />
+				</button>
+			</p>
 		</li>
 	{/each}
 </ul>
@@ -168,6 +206,28 @@
 
 	.armed {
 		font-size: var(--type-2);
+	}
+
+	.muted,
+	.volume {
+		display: block;
+		margin-top: var(--space-1);
+		font-size: var(--type-2);
+	}
+
+	/* The same room as the arm, under it. The cog goes to the far end of the row: it is a
+	   setting rather than an act, and the mute beside it is the one of the two a hand reaches
+	   for mid-shift. */
+	.hearing {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		margin: 0;
+		padding: 0 var(--space-3) var(--space-3);
+	}
+
+	.cog {
+		margin-left: auto;
 	}
 
 	/* The ground is set on whichever element does the pinning, here and in the ledger, because

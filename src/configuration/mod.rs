@@ -46,9 +46,9 @@ pub(crate) use eligibility::{Eligibilities, Eligibility};
 pub(crate) use enrolment::{Enrolment, EnrolmentCode, Outstanding};
 pub(crate) use grid::{Cell, Grid, Permission};
 pub(crate) use loops::{Loop, LoopId, Loops};
-pub(crate) use personalisation::Personalisation;
 #[cfg(test)]
-pub(crate) use personalisation::refuse_every_subscription_write;
+pub(crate) use personalisation::refuse_every_personalisation_write;
+pub(crate) use personalisation::{Personalisation, Volume};
 pub(crate) use records::{AdministrationRefused, Change};
 pub(crate) use roles::{NewRole, Role, RoleId, Roles};
 pub(crate) use sign_ins::{SignInToken, SignIns};
