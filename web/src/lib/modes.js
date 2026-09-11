@@ -66,8 +66,18 @@ const defaults = Object.fromEntries(modes.map(({ named, binding }) => [named, bi
  * - `onLatched(is)` — whether the key is latched open. A fact about this console's own input
  *   rather than about the world, and the console has to render it as one (ADR-0016).
  * - `onDropped(source)` — that source went while the key was held, and the key went with it.
+ * - `onLatchDropped()` — a latch was taken down by something other than the operator. **The
+ *   one user-facing message in the product that does not originate at the server**
+ *   (ADR-0018): the case it exists for is the console being unable to be told anything, so
+ *   waiting to be told would be waiting forever.
  */
-export function keyingModes({ onKeying, onLatched, onDropped = () => {}, on }) {
+export function keyingModes({
+	onKeying,
+	onLatched,
+	onDropped = () => {},
+	onLatchDropped = () => {},
+	on
+}) {
 	let held = false;
 	let latched = false;
 	let emitting = false;
@@ -80,11 +90,15 @@ export function keyingModes({ onKeying, onLatched, onDropped = () => {}, on }) {
 		onKeying(wants);
 	}
 
-	function latch(is) {
+	// `takenAway` is whether this was something other than the operator's own press. A latch
+	// they closed themselves needs no announcement; one the network closed for them is the
+	// thing an operator must not be left believing is still open.
+	function latch(is, takenAway = false) {
 		if (is === latched) return;
 
 		latched = is;
 		onLatched(is);
+		if (takenAway) onLatchDropped();
 	}
 
 	const input = keying({
@@ -129,7 +143,9 @@ export function keyingModes({ onKeying, onLatched, onDropped = () => {}, on }) {
 		rebind: input.rebind,
 
 		/**
-		 * Whether keying stands at all: an assumed role, and an audio path to key over.
+		 * Whether keying stands at all: an assumed role, an audio path to key over, and a
+		 * signalling channel for the server to announce the transmission on (ADR-0018,
+		 * ADR-0042).
 		 *
 		 * **Withdrawal drops the latch.** A latched transmission is the console holding the
 		 * key open, and the console holding it open across an outage is precisely the hot mic
@@ -137,8 +153,29 @@ export function keyingModes({ onKeying, onLatched, onDropped = () => {}, on }) {
 		 * is the end of the outage where it is decided.
 		 */
 		available: (is) => {
-			if (!is) latch(false);
+			if (!is) latch(false, true);
 			input.available(is);
+			settle();
+		},
+
+		/**
+		 * The console can no longer be trusted to show a latch, so there is not one any more.
+		 *
+		 * **This is the one place VoxLoop cuts audio it cannot announce** (ADR-0018), and it
+		 * is the reason the announcement it *can* make is made here rather than waited for. A
+		 * latch is an assertion made once, possibly minutes ago, and its entire safety story
+		 * is that the console will show it to you; that story is void the moment the console
+		 * cannot be trusted, so a latched transmission surviving a signalling drop is a hot
+		 * mic that by definition nobody can be told about.
+		 *
+		 * **A momentary key is untouched**, and the asymmetry is deliberate: a held button is
+		 * a human continuously asserting intent, and it survives to release or to the
+		 * disconnect threshold, whichever comes first. So this takes the latch down and
+		 * nothing else — `available(false)` is the other end of the outage, where everything
+		 * goes.
+		 */
+		theLatchCannotBeShown: () => {
+			latch(false, true);
 			settle();
 		},
 

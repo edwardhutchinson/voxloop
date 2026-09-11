@@ -26,6 +26,7 @@ Nothing here defaults to open. A route is registered with its requirement as a m
 | Read own principal | HTTP | `SignedIn` | Eligible roles, system-administration flag |
 | Change own password | HTTP | `SignedIn` | Current password re-presented. Rate-limited. **Audited**. Does not end the session |
 | Open the signalling channel | WebSocket | `SignedIn` | One per tab. Starts at this tier |
+| Answer a heartbeat | WebSocket | `SignedIn` | The channel's own clock, at either tier. Never a deliberate act ([ADR-0018](../adr/0018-no-signalling-channel-means-no-emission-path.md)) |
 | Lobby presence document | WebSocket | `SignedIn` | Scoped to eligibility ([ADR-0023](../adr/0023-sign-in-is-to-the-application-and-a-role-is-assumed.md)) |
 | Assume a role | WebSocket | `SignedIn` + eligibility | Mints the session id. Moves the socket to `Session`. **Audited** as session start |
 | Request a takeover | WebSocket | `SignedIn` + eligibility | Issued from the lobby against a single-occupant role |

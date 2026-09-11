@@ -18,6 +18,12 @@
 // arrived, because the server is the only thing entitled to say whether somebody holds a
 // role.
 //
+// **One state on this page is measured here rather than pushed**, and it is the only one:
+// where this tab stands with the channel itself (ADR-0018). The one thing a server cannot do
+// to a console it has lost is tell it that it has been lost, so the console counts the
+// heartbeats it is not getting. The ladder is `connection.js`'s; this is where the heartbeats
+// arrive and are answered.
+//
 // Resuming a session by name, and the gap events that come with it, are still to come (#50).
 //
 // **Not everything a tab says is a person saying it.** A media path report is this client
@@ -25,6 +31,21 @@
 // window that reaps sign-ins nobody is sitting at (v1 §2) — which is why the acts a person
 // performs and the one the machine performs sit side by side below without being written the
 // same way.
+
+import {
+	CONFIRMED,
+	DISCONNECTED,
+	SETTLES_EVERY,
+	UNCONFIRMED,
+	theConnection,
+	worse
+} from './connection.js';
+
+// **The ladder's words are the Session module's, and this is the way in to them** — the same
+// rule that makes `$lib/input` the only way into Input (`modules.md`, ADR-0061). The console
+// renders the rungs and merges the server's reading with this tab's, so it needs the
+// vocabulary; what it must not need is the file that runs the clock.
+export { CONFIRMED, DISCONNECTED, UNCONFIRMED, worse };
 
 const HELLO = JSON.stringify({ message: 'hello' });
 
@@ -52,6 +73,9 @@ function where() {
  * - `onEnded(reason)` — the server said why it is going. The sign-in is over.
  * - `onLost()` — the channel went away without saying anything. Nothing has ended; the
  *   console simply cannot see any more, and says so rather than blanking.
+ * - `onConnection({ state, since, aLatchStands })` — where this tab stands with the channel,
+ *   how long ago it was last confirmed, and whether a latched emission may still stand
+ *   (ADR-0018). It is the one thing here the server did not say.
  *
  * Four more arrive for the Audio module rather than for the console, and they are **not
  * documents**: they carry the client's own media negotiation, which VoxLoop owns the channel
@@ -73,22 +97,52 @@ export function openSignalling({
 	onRefused,
 	onEnded,
 	onLost,
+	onConnection = () => {},
 	onPathToBuild,
 	onUplinkCarried,
 	onOneMoreTalker,
-	onOneFewerTalker
+	onOneFewerTalker,
+	// What runs the ladder's clock: it is handed an act and an interval and answers with the
+	// way to stop. It is a parameter rather than a reach for `setInterval` so that nothing in
+	// here touches a global — the console is rendered on the server at build time, and a
+	// timer started there would be one nobody ever clears.
+	ticking = (act, every) => {
+		const timer = setInterval(act, every);
+
+		return () => clearInterval(timer);
+	}
 }) {
 	const socket = new WebSocket(where());
+	const channel = theConnection({ onConnection });
+	let stopTicking = null;
 	// A reason arrives before the close does, and a console that showed both would tell the
 	// operator their sign-in ended and then that the network did.
 	let told = false;
 
-	socket.addEventListener('open', () => socket.send(HELLO));
+	socket.addEventListener('open', () => {
+		// The clock starts at the open rather than at the first heartbeat: a console with a
+		// socket it has just opened has not missed anything, and measuring from nothing would
+		// have it start the shift a rung up the ladder.
+		channel.opened(Date.now());
+		stopTicking = ticking(() => channel.settle(Date.now()), SETTLES_EVERY);
+		socket.send(HELLO);
+	});
 
 	socket.addEventListener('message', (event) => {
 		const said = read(event.data);
 
-		if (said?.message === 'lobby') {
+		if (said?.message === 'heartbeat') {
+			// **Answered rather than merely counted.** Both ends measure the same gap from
+			// opposite sides, which is what lets this tab withdraw its own push-to-talk at the
+			// moment the server closes its fan-out.
+			//
+			// **Only a heartbeat confirms the channel**, and not the documents arriving beside
+			// it at five a second. Measuring off *anything arrived* would make the ladder a
+			// function of how busy the deployment is, so a quiet console would freeze where a
+			// busy one would not — and the rung would stop meaning what it says.
+			say(socket, { message: 'heartbeat' });
+			channel.confirmed(Date.now(), said.ladder);
+		} else if (said?.message === 'lobby') {
 			onLobby(said);
 		} else if (said?.message === 'presence') {
 			onPresence(said);
@@ -114,6 +168,11 @@ export function openSignalling({
 	});
 
 	socket.addEventListener('close', () => {
+		// **A socket that closed is a fact rather than a silence**, so the ladder is skipped
+		// and this tab is disconnected at once. The rungs are for the gap nobody reported.
+		stopTicking?.();
+		stopTicking = null;
+		channel.gone(Date.now());
 		if (!told) onLost();
 	});
 
@@ -196,6 +255,8 @@ export function openSignalling({
 		mediaPath: (state) => say(socket, { message: 'media-path', state }),
 		close: () => {
 			told = true;
+			stopTicking?.();
+			stopTicking = null;
 			socket.close();
 		}
 	};

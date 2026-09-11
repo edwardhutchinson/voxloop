@@ -41,7 +41,7 @@ pub(crate) use audit::RecordedEntry;
 pub(crate) use audit::{
     AuditEntry, AuditEvent, AuditLog, BlastRadius, ConfigurationWrite, Occupancy, Record, Snapshot,
 };
-pub(crate) use deployment::{Deployment, DeploymentError, Media};
+pub(crate) use deployment::{Deployment, DeploymentError, Ladder, Media};
 pub(crate) use eligibility::{Eligibilities, Eligibility};
 pub(crate) use enrolment::{Enrolment, EnrolmentCode, Outstanding};
 pub(crate) use grid::{Cell, Grid, Permission};

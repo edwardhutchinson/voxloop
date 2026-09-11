@@ -48,16 +48,18 @@ function operating() {
 	const keyed = [];
 	const latched = [];
 	const dropped = [];
+	const announced = [];
 
 	const keys = keyingModes({
 		on: there.on,
 		onKeying: (wants) => keyed.push(wants),
 		onLatched: (is) => latched.push(is),
-		onDropped: (source) => dropped.push(source)
+		onDropped: (source) => dropped.push(source),
+		onLatchDropped: () => announced.push(true)
 	});
 	keys.available(true);
 
-	return { there, keyed, latched, dropped, keys };
+	return { there, keyed, latched, dropped, announced, keys };
 }
 
 /** The default keys, pressed and released as a hand does it. */
@@ -263,4 +265,85 @@ test('relinquishing under a latch stops it', () => {
 
 	assert.deepEqual(keyed, [true, false]);
 	assert.deepEqual(latched, [true, false]);
+});
+
+// ---- #43: a latch this console can no longer show ------------------------------------------
+
+// **A latched emission is dropped once the console cannot be trusted to show it, and a
+// momentary key survives** (ADR-0018). The asymmetry is the whole rule: a held button is a
+// human continuously asserting intent with their thumb, and a latch is an assertion made
+// once, possibly minutes ago, whose entire safety story is that the console will show it to
+// you.
+test('a latch the console cannot show is dropped', () => {
+	const { there, keys, keyed, latched } = operating();
+	there.press(latching());
+	there.release(latching());
+
+	keys.theLatchCannotBeShown();
+
+	assert.deepEqual(latched, [true, false]);
+	assert.deepEqual(keyed, [true, false]);
+});
+
+test('a momentary key survives what takes the latch down', () => {
+	const { there, keys, keyed } = operating();
+	there.press(held());
+
+	keys.theLatchCannotBeShown();
+
+	assert.deepEqual(keyed, [true], 'a held button was cut off mid-word');
+});
+
+// **The one user-facing message in the product that does not originate at the server**
+// (ADR-0018). The case it exists for is the console being unable to be told anything, so
+// waiting to be told would be waiting forever — and an operator who believes they are still
+// transmitting is the failure the rule was written to remove, arriving through the other
+// door.
+test('a latch taken down by anything but the operator is announced', () => {
+	const { there, keys, announced } = operating();
+	there.press(latching());
+	there.release(latching());
+
+	keys.theLatchCannotBeShown();
+
+	assert.deepEqual(announced, [true]);
+});
+
+// Withdrawal is the other end of the same outage and takes everything, latch included — so it
+// announces the latch too, because *why* the console stopped emitting is said elsewhere and
+// *what it cost* is said here.
+test('a withdrawal announces the latch it took with it', () => {
+	const { there, keys, announced, latched } = operating();
+	there.press(latching());
+	there.release(latching());
+
+	keys.available(false);
+
+	assert.deepEqual(latched, [true, false]);
+	assert.deepEqual(announced, [true]);
+});
+
+// A latch the operator closed themselves needs no announcement: they are the one who did it,
+// and telling somebody what they just did is noise where it matters most.
+test('a latch the operator closed is not announced', () => {
+	const { there, announced } = operating();
+	there.press(latching());
+	there.release(latching());
+
+	there.press(latching());
+	there.release(latching());
+
+	assert.deepEqual(announced, []);
+});
+
+// Said once per latch rather than on every reading. The console asks whenever the ladder
+// moves, and a rung that stayed where it was has taken nothing down.
+test('nothing is announced where there was no latch to drop', () => {
+	const { keys, announced, keyed } = operating();
+
+	keys.theLatchCannotBeShown();
+	keys.theLatchCannotBeShown();
+
+	assert.deepEqual(announced, []);
+	assert.deepEqual(keyed, []);
 });

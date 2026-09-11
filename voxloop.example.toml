@@ -37,6 +37,33 @@ listen_address = "0.0.0.0"
 # Optional; this is the default.
 port = 44444
 
+[connection]
+# The signalling channel's health ladder, all four **in seconds** and all four optional;
+# these are the defaults (v1 §7, ADR-0018). A session with no signalling channel has no
+# emission path, and these say when that starts to be true.
+#
+# Every value has a hard ceiling and a number past it refuses to start rather than being
+# quietly clamped. `disconnected` is a safety parameter rather than a display preference —
+# it is how long a network hiccup may leave a microphone open that nobody's console can show,
+# no loop can attribute and no authority holder can cut — so it must be tuned against this
+# site's own VPN, and it cannot be turned into five minutes.
+#
+# The rungs have to climb: heartbeat, then unconfirmed, then disconnected.
+
+# How often each end says it is still there.
+heartbeat = 2
+# How long a session goes unheard from before its console freezes its displayed state and
+# marks it stale with a running age. Push-to-talk still stands here, deliberately: a single
+# threshold would mute the Flight Director mid-sentence for a reroute that heals itself.
+unconfirmed = 5
+# How long a *latched* emission survives once the state is unconfirmed. A latch's whole
+# safety story is that the console will show it to you, and that story is void the moment
+# the console cannot be trusted.
+latch_dropped = 2
+# How long a session goes unheard from before emission is withdrawn at both ends: the client
+# disables push-to-talk and the server closes the fan-out.
+disconnected = 12
+
 [store]
 # The one SQLite file. The box is the database: there is no replica and no network
 # endpoint, so backing this up is a real deployment obligation. Required.

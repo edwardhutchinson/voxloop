@@ -27,7 +27,7 @@
 	import { holdFrame } from '$lib/frame.js';
 	import { openAudio } from '$lib/audio.js';
 	import { principal, signOut } from '$lib/server.js';
-	import { openSignalling } from '$lib/session.js';
+	import { CONFIRMED, openSignalling } from '$lib/session.js';
 
 	let { children } = $props();
 
@@ -59,10 +59,16 @@
 		// genuinely stopped, so a console that merely reappeared in the lobby would be
 		// leaving the operator to work out what happened (v1 §2).
 		relinquished: null,
-		// The channel went away without saying why. What was last shown stays on screen and
-		// is marked, rather than blanked: an empty page reads as *nothing is happening*, when
-		// in fact anything may be happening and the console simply cannot see it (ADR-0018).
-		lost: false,
+		// Where this tab stands with the signalling channel, how long ago it was last
+		// confirmed, and whether a latched emission may still stand (ADR-0018).
+		//
+		// **The one thing here the server did not say.** Everything else is a document that
+		// arrived; this is the console counting the heartbeats it is not getting, because the
+		// one thing a server cannot do to a console it has lost is tell it that it has been
+		// lost. What was last shown stays on screen and is marked stale rather than blanked:
+		// an empty page reads as *nothing is happening*, when in fact anything may be
+		// happening and the console simply cannot see it.
+		connection: { state: CONFIRMED, since: 0, aLatchStands: true },
 		// The last thing the socket would not do, and why. It is not the end of anything, so
 		// it is shown where it happened rather than taking the page away.
 		refused: null,
@@ -120,7 +126,6 @@
 				// The lobby is where a session ends up, so arriving at it clears the session
 				// rather than leaving two documents on screen describing two different states.
 				frame.presence = null;
-				frame.lost = false;
 				frame.refused = null;
 			},
 			onPresence: (said) => {
@@ -128,7 +133,6 @@
 				// A role taken up is the answer to whatever the lobby was refusing, and it is
 				// the end of whatever ended before it.
 				frame.relinquished = null;
-				frame.lost = false;
 				frame.refused = null;
 			},
 			onSessionEnded: (reason) => {
@@ -142,7 +146,11 @@
 			},
 			onRefused: (reason) => (frame.refused = reason),
 			onEnded: itEnded,
-			onLost: () => (frame.lost = true),
+			// The socket going is the ladder's bottom rung reached at once rather than a
+			// second kind of loss, so there is nothing to set here beyond what
+			// `onConnection` is about to say.
+			onLost: () => {},
+			onConnection: (standing) => (frame.connection = standing),
 			// The four halves of the client's own media negotiation. They are handed straight
 			// to Audio: nothing here reads them, and nothing on screen comes out of them.
 			onPathToBuild: (path) => {

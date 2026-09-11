@@ -1354,13 +1354,7 @@ mod tests {
             .await
             .expect("the assume to be sent");
 
-        let said = socket
-            .next()
-            .await
-            .expect("the socket to say something")
-            .expect("a readable message")
-            .into_text()
-            .expect("text");
+        let said = next_said(&mut socket).await;
         assert!(
             said.contains(r#""message":"presence""#) && said.contains(r#""name":"Observer""#),
             "the socket answered {said}"
@@ -1376,21 +1370,9 @@ mod tests {
             .await
             .expect("the relinquish to be sent");
 
-        let ended = socket
-            .next()
-            .await
-            .expect("the socket to say something")
-            .expect("a readable message")
-            .into_text()
-            .expect("text");
+        let ended = next_said(&mut socket).await;
         assert!(ended.contains(r#""message":"session-ended""#), "{ended}");
-        let back = socket
-            .next()
-            .await
-            .expect("the socket to say something")
-            .expect("a readable message")
-            .into_text()
-            .expect("text");
+        let back = next_said(&mut socket).await;
         assert!(back.contains(r#""message":"lobby""#), "{back}");
 
         serving.stop().await;
@@ -1507,8 +1489,24 @@ mod tests {
         serving.stop().await;
     }
 
-    /// The next thing a real socket says, or a failure rather than a test that hangs.
+    /// The next **document** a real socket says, or a failure rather than a test that hangs.
+    ///
+    /// Heartbeats are skipped rather than asserted around. They are the channel's own clock
+    /// and arrive on their own schedule whatever the socket is doing (v1 §7), so a test that
+    /// counted them would be a test about `tokio::time::interval`. What each end does with a
+    /// heartbeat it does not get is `signalling.rs`'s and `state.rs`'s.
     async fn next_said(
+        socket: &mut tokio_tungstenite::WebSocketStream<reqwest::Upgraded>,
+    ) -> String {
+        loop {
+            let said = next_message(socket).await;
+            if !said.contains(r#""message":"heartbeat""#) {
+                return said;
+            }
+        }
+    }
+
+    async fn next_message(
         socket: &mut tokio_tungstenite::WebSocketStream<reqwest::Upgraded>,
     ) -> String {
         use futures_util::StreamExt;

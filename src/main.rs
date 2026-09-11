@@ -156,7 +156,12 @@ async fn serve(deployment: &Path) -> Result<(), Fatal> {
     // a restart ends every session, because the media plane cannot survive one and occupancy
     // restored without an audio path would be a lie (ADR-0039). Sign-ins are durable and
     // survive, so everybody who was on console is signed in, in the lobby.
-    let state = Arc::new(StateAuthority::empty());
+    //
+    // It is handed the connection ladder here because this is where the deployment file is
+    // read and nothing else may read one (ADR-0040): the four timers are startup settings
+    // with a hard ceiling, already refused at load if a site asked for a threshold long
+    // enough to reintroduce the hot mic ADR-0018 removes.
+    let state = Arc::new(StateAuthority::keeping_time_by(deployment.connection));
 
     // One Worker, one Router and one port, before anything is served. A deployment that
     // cannot carry audio has lost its whole purpose, so it refuses to start rather than

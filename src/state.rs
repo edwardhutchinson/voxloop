@@ -24,7 +24,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::configuration::{LoopId, Permission, RoleId, SignInToken, UserId};
+use crate::configuration::{Ladder, LoopId, Permission, RoleId, SignInToken, UserId};
 use crate::secrets;
 
 /// How long a session's tombstone is kept after the session ends ([ADR-0041]).
@@ -57,6 +57,61 @@ impl SessionId {
 
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// A session's standing with the signalling channel ([ADR-0018]).
+///
+/// The first of the three axes any console state has to be read against, and it describes
+/// the **state channel and never the audio path** — that is [`MediaPath`], and the two fail
+/// independently in both directions.
+///
+/// **A session with no signalling channel has no emission path.** Every talking indicator
+/// anyone sees is a server broadcast ([ADR-0008]), so an operator keying with no channel
+/// transmits into a system where nobody's console shows them, no loop attributes it and no
+/// authority holder can cut it. The audio arrives; the accountability does not.
+///
+/// `Unconfirmed` is the band that makes withdrawing emission safe rather than fragile. A
+/// single threshold would mean a VPN reroute mutes the Flight Director mid-sentence, trading
+/// a state-honesty problem for a worse availability one. Its honest reading is *we cannot
+/// confirm your transmission right now*, which is a materially different statement from *we
+/// know you are disconnected* — so emission still stands on it.
+///
+/// **The order of these lines is the ladder** and it is derived from the declaration order,
+/// so moving one of them changes which rung a session is read at.
+///
+/// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+/// [ADR-0018]: ../../docs/adr/0018-no-signalling-channel-means-no-emission-path.md
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Connection {
+    /// Heartbeats current: everything normal.
+    #[default]
+    Confirmed,
+    /// Heartbeats missed. The console's displayed state is frozen and marked stale with a
+    /// running age, and **push-to-talk stays live**.
+    Unconfirmed,
+    /// Past the threshold. The client disables push-to-talk and the server closes the
+    /// fan-out — the client-side half alone would be a courtesy in exactly the situation
+    /// where the client may be wedged.
+    Disconnected,
+}
+
+impl Connection {
+    /// The word this rung goes by, which is the word `CONTEXT.md` and the spec use.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::Unconfirmed => "unconfirmed",
+            Self::Disconnected => "disconnected",
+        }
+    }
+
+    /// Whether emission stands at this rung.
+    ///
+    /// The whole of ADR-0018's server-side rule, in one place so that the fan-out and the
+    /// talking indicator cannot come to disagree about it.
+    fn carries_emission(self) -> bool {
+        self != Self::Disconnected
     }
 }
 
@@ -207,6 +262,26 @@ struct Session {
     /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
     said_by_the_client: MediaPath,
     seen_by_the_server: MediaPath,
+    /// When this session was last heard from on the signalling channel, which is what its
+    /// connection state is measured from ([ADR-0018]).
+    ///
+    /// It starts at the assume that minted the session rather than at nothing, because a
+    /// seat just taken has demonstrably been heard from — the act that created it arrived on
+    /// the socket that is about to carry its heartbeats.
+    ///
+    /// [ADR-0018]: ../../docs/adr/0018-no-signalling-channel-means-no-emission-path.md
+    heard_from: Instant,
+    /// Whether the channel is **known** to have gone, rather than merely unheard from.
+    ///
+    /// A socket that closed is a fact rather than a silence, so it does not wait out the
+    /// ladder: a tab closed, a browser quit or a network that reset is `disconnected` at
+    /// once, and the fan-out closes with it. The rungs are for the case nobody reported —
+    /// the wedged client, the flapping VPN — where all the server has is a gap.
+    ///
+    /// **It does not end the session.** Occupancy survives the loss of the channel and is
+    /// held for the reconnection window (#50); this is the standing of the channel, not of
+    /// the seat.
+    the_channel_is_gone: bool,
     /// The loops this session is monitoring right now.
     ///
     /// **A subscription is live state and ends with the session** (v1 §5). What outlives it
@@ -265,6 +340,38 @@ struct Session {
 }
 
 impl Session {
+    /// Where this session stands with the signalling channel, as of `now`.
+    ///
+    /// **It is derived rather than stored**, which is what keeps it from going stale: a rung
+    /// held as a field would have to be moved by somebody remembering to move it, and the
+    /// one case that matters is the case where nothing is arriving to remind them. The
+    /// answer is a gap and two thresholds, computed wherever it is read.
+    fn connection(&self, by: Ladder, now: Instant) -> Connection {
+        if self.the_channel_is_gone {
+            return Connection::Disconnected;
+        }
+
+        match now.saturating_duration_since(self.heard_from) {
+            unheard if unheard >= by.disconnected() => Connection::Disconnected,
+            unheard if unheard >= by.unconfirmed() => Connection::Unconfirmed,
+            _ => Connection::Confirmed,
+        }
+    }
+
+    /// Whether this session is on the air, which is its own claim **and** a channel to make
+    /// it on.
+    ///
+    /// The key is the client's claim ([ADR-0008]) and it is the last one it managed to send.
+    /// A session past the disconnect threshold is not transmitting whatever it last said,
+    /// because the server has closed its fan-out and there is nowhere for the voice to go —
+    /// so the talking indicator and the fan-out are read off one answer rather than two that
+    /// agree until one of them is edited.
+    ///
+    /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    fn is_transmitting(&self, by: Ladder, now: Instant) -> bool {
+        self.keyed && self.connection(by, now).carries_emission()
+    }
+
     /// What the two ends amount to. Green needs both, red needs one.
     fn media_path(&self) -> MediaPath {
         self.said_by_the_client
@@ -324,6 +431,17 @@ struct Tombstone {
 /// Everything live, behind one lock so there is one writer.
 #[derive(Default)]
 struct Live {
+    /// The four timers the connection ladder is read against, fixed at startup and never
+    /// re-read ([ADR-0018], v1 §7).
+    ///
+    /// It is a value handed in at construction rather than something asked for per call,
+    /// because it is neither live state nor durable state: it is what this process was
+    /// started with, and every rung read anywhere in here has to be read against the same
+    /// one. The same rule the rest of this module holds still holds — nothing durable is
+    /// read here.
+    ///
+    /// [ADR-0018]: ../../docs/adr/0018-no-signalling-channel-means-no-emission-path.md
+    ladder: Ladder,
     /// One per occupied seat. A user has at most one, though they may be signed in on
     /// several machines (v1 §2).
     sessions: Vec<Session>,
@@ -538,6 +656,33 @@ pub(crate) struct Presence {
     ///
     /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
     pub(crate) media_path: MediaPath,
+    /// Where the **server** has this session standing with the signalling channel
+    /// ([ADR-0018]).
+    ///
+    /// It is deliberately not the console's own reading, and the console does not replace its
+    /// reading with this one: **they are two facts and they merge pessimistically**, which is
+    /// the rule already used for the media path's two ends ([ADR-0042]) — green needs both,
+    /// red needs one.
+    ///
+    /// The two can honestly disagree, because the two ends measure different silences. This
+    /// end measures the answers it is not getting; the console measures the heartbeats it is
+    /// not getting. A console whose replies are lost while the server's still arrive is the
+    /// case that needs this field: the server reaches the disconnect threshold and closes the
+    /// fan-out, and without being told the console would go on offering a key control over a
+    /// route that is already closed — which is [ADR-0008]'s residual arriving as a feature.
+    ///
+    /// It cannot always arrive, and that is why the console runs its own clock rather than
+    /// waiting for this. A session that hears nothing is told nothing, by construction. What
+    /// this covers is the half of the failure where the server can still be heard.
+    ///
+    /// **The age is not here.** A running age would move the document's version five times a
+    /// second, and the version answers *is this the same state* (v1 §6). The console has its
+    /// own clock and the age is that clock's.
+    ///
+    /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
+    /// [ADR-0018]: ../../docs/adr/0018-no-signalling-channel-means-no-emission-path.md
+    /// [ADR-0042]: ../../docs/adr/0042-the-media-path-has-its-own-ladder.md
+    pub(crate) connection: Connection,
     /// Whether the server has this session down as transmitting.
     ///
     /// **This is the transmitting lamp** ([ADR-0008]). It is in the document because the
@@ -553,9 +698,34 @@ pub(crate) struct Presence {
 }
 
 impl StateAuthority {
-    /// A running system with nobody on it, which is what a restart leaves.
+    /// A running system with nobody on it — which is what a restart leaves — keeping time by
+    /// the ladder this deployment was started with.
+    pub(crate) fn keeping_time_by(ladder: Ladder) -> Self {
+        Self {
+            live: Mutex::new(Live {
+                ladder,
+                ..Live::default()
+            }),
+        }
+    }
+
+    /// The same, on the ladder v1 §7 fixes.
+    ///
+    /// It is what a test runs on, and it is the same ladder a deployment that has tuned
+    /// nothing runs on — so a test asking about a rung is asking about the numbers the spec
+    /// names rather than about numbers of its own.
+    #[cfg(test)]
     pub(crate) fn empty() -> Self {
         Self::default()
+    }
+
+    /// The four timers this deployment runs on.
+    ///
+    /// Transport asks for them twice: to space the heartbeats it sends, and to carry the
+    /// whole ladder to the console — which runs the client's half of it, because the one
+    /// thing a server cannot do to a console it has lost is tell it anything.
+    pub(crate) fn ladder(&self) -> Ladder {
+        self.read(|live| live.ladder)
     }
 
     /// Take up a role, creating the session that carries voice.
@@ -630,6 +800,8 @@ impl StateAuthority {
                 // instant they assumed, which is why nothing remembers one.
                 arms: Vec::new(),
                 keyed: false,
+                heard_from: Instant::now(),
+                the_channel_is_gone: false,
                 reach: Vec::new(),
             });
 
@@ -916,12 +1088,13 @@ impl StateAuthority {
     /// [ADR-0063]: ../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
     pub(crate) fn the_routing_if_it_moved(&self) -> Option<Vec<WhoHears>> {
         self.write(|live| {
+            let now = Instant::now();
             let routing: Vec<WhoHears> = live
                 .sessions
                 .iter()
                 .map(|talker| WhoHears {
                     talker: talker.id.clone(),
-                    listeners: live.who_hears(talker),
+                    listeners: live.who_hears(talker, now),
                 })
                 .collect();
 
@@ -969,14 +1142,17 @@ impl StateAuthority {
             // Worked out before the session is borrowed again, because it reads every other
             // session: a loop is being spoken on because *somebody* is armed and keyed on
             // it, and who that is never reaches the document ([ADR-0033]).
-            let spoken_on = live.the_loops_being_spoken_on();
+            let now = Instant::now();
+            let spoken_on = live.the_loops_being_spoken_on(now);
+            let ladder = live.ladder;
 
             let held = live.sessions.iter_mut().find(|held| &held.id == session)?;
             let presence = Presence {
                 session: held.id.clone(),
                 role: held.role.clone(),
                 media_path: held.media_path(),
-                keyed: held.keyed,
+                connection: held.connection(ladder, now),
+                keyed: held.is_transmitting(ladder, now),
                 // **The narrowing happens here and nowhere else.** The session's set holds
                 // whatever it holds; the reach handed in decides what is rendered, so a
                 // subscription outside it is inert rather than lost ([ADR-0051]).
@@ -998,6 +1174,81 @@ impl StateAuthority {
             }
 
             Some((held.version, presence))
+        })
+    }
+
+    /// The client answered a heartbeat: this session's channel is confirmed as of now.
+    ///
+    /// **It is the only thing that moves the ladder back down**, and it says nothing about
+    /// anything else. A heartbeat is the machine noticing it can still be reached, not a
+    /// person doing something, so it clears no assertion, refreshes no sign-in and is not
+    /// evidence that anybody is in the chair (v1 §6).
+    ///
+    /// Nothing where the id names no session, which is what a client answering into a session
+    /// that ended under it finds.
+    pub(crate) fn the_client_is_there(&self, session: &SessionId) {
+        self.write(|live| {
+            if let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) {
+                held.heard_from = Instant::now();
+                held.the_channel_is_gone = false;
+            }
+        });
+    }
+
+    /// The signalling channel for this session has gone, and the server knows it rather than
+    /// merely failing to hear it.
+    ///
+    /// **It does not end the session** ([ADR-0041]): occupancy survives the loss of the
+    /// channel and is held for the reconnection window, so this moves one axis and nothing
+    /// else. What it does move is immediate — a closed socket is a fact, not a silence, so
+    /// there is nothing to wait out and the fan-out closes on the next turn.
+    ///
+    /// [ADR-0041]: ../../docs/adr/0041-a-session-is-resumed-by-name.md
+    pub(crate) fn the_channel_is_gone(&self, session: &SessionId) {
+        self.write(|live| {
+            if let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) {
+                held.the_channel_is_gone = true;
+            }
+        });
+    }
+
+    /// Push a session's last heartbeat back by `ago`, so that a test can stand at a rung
+    /// without waiting for the clock to reach it.
+    ///
+    /// It moves exactly the one fact the ladder is measured from and nothing else, which is
+    /// what keeps it a wound-on clock rather than a way of setting a rung by hand: the rungs
+    /// themselves are still derived, still by the same arithmetic the product runs, and still
+    /// against the ladder v1 §7 fixes.
+    #[cfg(test)]
+    pub(crate) fn unheard_from_for(&self, session: &SessionId, ago: Duration) {
+        self.write(|live| {
+            if let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) {
+                held.heard_from = Instant::now() - ago;
+            }
+        });
+    }
+
+    /// Where a session stands with the signalling channel, now.
+    ///
+    /// It is deliberately **not** in the presence document: a session at `disconnected` is by
+    /// definition one nothing can be delivered to, so a field telling it so would be the one
+    /// field in the document that could never arrive when it mattered. The console runs its
+    /// own half of the ladder off the heartbeats it is missing.
+    ///
+    /// So nothing above this seam reads a rung yet, and the rung is not offered to anything
+    /// that does not: the fan-out and the talking indicator are read off it inside this
+    /// module. **It goes on a surface with #48**, where the loops a disconnected session
+    /// staffs drop to `away — unreachable` with the age, and it stops being a test-only
+    /// answer then.
+    #[cfg(test)]
+    pub(crate) fn connection_of(&self, session: &SessionId) -> Option<Connection> {
+        let now = Instant::now();
+
+        self.read(|live| {
+            live.sessions
+                .iter()
+                .find(|held| &held.id == session)
+                .map(|held| held.connection(live.ladder, now))
         })
     }
 
@@ -1150,9 +1401,33 @@ impl Live {
     /// **Nothing here asks whether anybody is keyed**, for the reason
     /// [`StateAuthority::the_routing_if_it_moved`] gives.
     ///
+    /// **A talker with no signalling channel reaches nobody**, and that is the server's half
+    /// of ADR-0018 rather than a second reading of the arm set. Disabling push-to-talk in the
+    /// client is not sufficient: the situation that motivates the rule is precisely the one
+    /// where the client may be wedged, and a wedged client's audio is still arriving at a
+    /// perfectly healthy media transport. So the route is not built, using the machinery
+    /// revocation and Cut already use. The arms themselves are left standing — the operator
+    /// chose them, nothing has taken the rung away, and they are what the console comes back
+    /// to.
+    ///
+    /// It is done here rather than by clearing the key, because the fan-out is per arm rather
+    /// than per key: closing it means having no destinations, and that is this answer.
+    ///
+    /// **The loop is not told the transmission was cut, and [ADR-0018] says it should be** —
+    /// with the reason *signalling lost*, so that listeners hear a voice cut rather than
+    /// vanish. Nothing in v1 tells a loop anything about a transmission ending yet: the
+    /// machinery is [ADR-0014]'s Cut, which is not built. It is recorded here rather than
+    /// left to be discovered, and it lands with Cut.
+    ///
+    /// [ADR-0014]: ../../docs/adr/0014-authority-acts-on-emission-are-transient.md
+    ///
     /// [ADR-0008]: ../../docs/adr/0008-emission-is-armed-by-the-server-and-keyed-by-the-client.md
     /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
-    fn who_hears(&self, talker: &Session) -> Vec<Heard> {
+    fn who_hears(&self, talker: &Session, now: Instant) -> Vec<Heard> {
+        if !talker.connection(self.ladder, now).carries_emission() {
+            return Vec::new();
+        }
+
         talker
             .arms
             .iter()
@@ -1176,11 +1451,15 @@ impl Live {
     /// afterwards. Nothing in here says who, which is [ADR-0033] and the reason this answers
     /// with loops rather than with talkers.
     ///
+    /// **A session with no signalling channel is not spoken on**, for the same reason its
+    /// fan-out is closed: the audio has nowhere to go, so an indicator saying otherwise would
+    /// be the console reporting a transmission nobody is receiving.
+    ///
     /// [ADR-0033]: ../../docs/adr/0033-the-console-shows-that-someone-is-talking-never-who.md
-    fn the_loops_being_spoken_on(&self) -> Vec<LoopId> {
+    fn the_loops_being_spoken_on(&self, now: Instant) -> Vec<LoopId> {
         self.sessions
             .iter()
-            .filter(|held| held.keyed)
+            .filter(|held| held.is_transmitting(self.ladder, now))
             .flat_map(|held| held.arms.iter().cloned())
             .collect()
     }
@@ -2469,6 +2748,248 @@ mod tests {
         assert!(!live.the_client_keys(&session));
         assert!(!live.the_client_unkeys(&session));
         assert!(!live.is_keyed(&session));
+    }
+
+    /// A seat just taken has demonstrably been heard from: the act that created it arrived on
+    /// the socket about to carry its heartbeats.
+    #[tokio::test]
+    async fn a_session_starts_confirmed() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+
+        assert_eq!(live.connection_of(&session), Some(Connection::Confirmed));
+    }
+
+    /// **The three rungs, at the thresholds v1 §7 fixes**: 5 s unheard from is `unconfirmed`
+    /// and 12 s is `disconnected`. The band between them is what makes withdrawing emission
+    /// safe rather than fragile — a single threshold would mute the Flight Director
+    /// mid-sentence for a VPN reroute.
+    #[tokio::test]
+    async fn the_ladder_climbs_at_five_seconds_and_at_twelve() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+
+        for (unheard_for, rung) in [
+            (Duration::from_secs(4), Connection::Confirmed),
+            (Duration::from_secs(5), Connection::Unconfirmed),
+            (Duration::from_secs(11), Connection::Unconfirmed),
+            (Duration::from_secs(12), Connection::Disconnected),
+            (Duration::from_secs(600), Connection::Disconnected),
+        ] {
+            live.unheard_from_for(&session, unheard_for);
+
+            assert_eq!(
+                live.connection_of(&session),
+                Some(rung),
+                "unheard from for {unheard_for:?}"
+            );
+        }
+    }
+
+    /// A heartbeat answered is the only thing that moves the ladder back down, and it moves
+    /// it the whole way: the gap it is measured from starts again.
+    #[tokio::test]
+    async fn a_heartbeat_confirms_the_channel_again() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        live.unheard_from_for(&session, Duration::from_secs(30));
+
+        live.the_client_is_there(&session);
+
+        assert_eq!(live.connection_of(&session), Some(Connection::Confirmed));
+    }
+
+    /// **A closed socket is a fact rather than a silence**, so it does not wait out the
+    /// ladder. A tab closed or a network reset is `disconnected` at once, and the rungs are
+    /// left to the case nobody reported.
+    #[tokio::test]
+    async fn a_channel_known_to_have_gone_is_disconnected_at_once() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+
+        live.the_channel_is_gone(&session);
+
+        assert_eq!(live.connection_of(&session), Some(Connection::Disconnected));
+        assert!(
+            live.is_held_by(&session, &live_occupant(&live, &session)),
+            "losing the channel ended the session, which is the reconnection window's call"
+        );
+    }
+
+    /// **Emission still stands at `unconfirmed`** (ADR-0018). *We cannot confirm your
+    /// transmission right now* is a materially different statement from *we know you are
+    /// disconnected*, and cutting somebody off mid-word for a 500 ms blip is exactly the
+    /// failure the band exists to prevent.
+    #[tokio::test]
+    async fn an_unconfirmed_talker_still_reaches_their_audience() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_and_a_listener(&live, &store).await;
+
+        live.unheard_from_for(&talker, Duration::from_secs(6));
+
+        assert_eq!(
+            heard_by(&live, &talker),
+            vec![(listener.as_str().to_owned(), "air-to-ground".to_owned())],
+            "an unconfirmed session lost its fan-out, which is the disconnect threshold's job"
+        );
+    }
+
+    /// **The server closes the fan-out** (ADR-0018), and it does it independently of the
+    /// client. Disabling push-to-talk in the client is not sufficient: the situation that
+    /// motivates the rule is the one where the client may be wedged, and a wedged client's
+    /// audio is still arriving at a perfectly healthy media transport.
+    #[tokio::test]
+    async fn a_disconnected_talker_reaches_nobody() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, _listener) = a_talker_and_a_listener(&live, &store).await;
+
+        live.unheard_from_for(&talker, Duration::from_secs(12));
+
+        assert!(
+            heard_by(&live, &talker).is_empty(),
+            "a session nobody could be told about was still routed to its loops"
+        );
+    }
+
+    /// The arms stand through it. Nothing has taken the rung away, the operator chose them,
+    /// and they are what the console comes back to — so the fan-out closes and reopens rather
+    /// than being rebuilt by hand.
+    #[tokio::test]
+    async fn the_fan_out_reopens_when_the_channel_does() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_and_a_listener(&live, &store).await;
+        live.unheard_from_for(&talker, Duration::from_secs(12));
+        assert!(heard_by(&live, &talker).is_empty());
+
+        live.the_client_is_there(&talker);
+
+        assert_eq!(
+            heard_by(&live, &talker),
+            vec![(listener.as_str().to_owned(), "air-to-ground".to_owned())]
+        );
+    }
+
+    /// **Every talking indicator anyone sees is a server broadcast** (ADR-0008), so a session
+    /// nobody can be told about is not shown talking on anybody's console — which is the
+    /// whole argument for taking its emission path away rather than a second rule.
+    #[tokio::test]
+    async fn a_disconnected_talker_is_not_shown_talking() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_and_a_listener(&live, &store).await;
+        live.the_client_keys(&talker);
+        assert_eq!(
+            talking(&live, &listener, vec![a_loop("air-to-ground")]),
+            vec!["air-to-ground".to_owned()]
+        );
+
+        live.unheard_from_for(&talker, Duration::from_secs(12));
+
+        assert!(
+            talking(&live, &listener, vec![a_loop("air-to-ground")]).is_empty(),
+            "a console showed a transmission nobody was receiving"
+        );
+    }
+
+    /// The talker's own lamp goes out with it, and for the same reason: the lamp is the
+    /// server's answer about whether a transmission is happening, and past the threshold none
+    /// is (ADR-0008).
+    #[tokio::test]
+    async fn a_disconnected_session_is_not_keyed_in_its_own_document() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, _listener) = a_talker_and_a_listener(&live, &store).await;
+        live.the_client_keys(&talker);
+
+        live.unheard_from_for(&talker, Duration::from_secs(12));
+
+        let (_, presence) = live
+            .presence(&talker, vec![a_loop_to_emit_on("air-to-ground")])
+            .expect("a document");
+        assert!(!presence.keyed);
+    }
+
+    /// **The server's own reading rides in the document** ([ADR-0018]), for the half of the
+    /// failure where it can still be heard: a console whose answers are being lost while the
+    /// server's heartbeats still arrive has no way of its own to know its fan-out has closed.
+    #[tokio::test]
+    async fn the_document_carries_the_server_s_reading_of_the_channel() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let reach = vec![a_loop_to_emit_on("air-to-ground")];
+
+        for (unheard_for, rung) in [
+            (Duration::ZERO, Connection::Confirmed),
+            (Duration::from_secs(5), Connection::Unconfirmed),
+            (Duration::from_secs(12), Connection::Disconnected),
+        ] {
+            live.unheard_from_for(&session, unheard_for);
+
+            let (_, presence) = live.presence(&session, reach.clone()).expect("a document");
+            assert_eq!(
+                presence.connection, rung,
+                "unheard from for {unheard_for:?}"
+            );
+        }
+    }
+
+    /// The rung moves the version, because the console renders it. The **age** is deliberately
+    /// not in the document for the opposite reason: a number that moved five times a second
+    /// would make *is this the same state* unanswerable, which is the one question versioning
+    /// is for.
+    #[tokio::test]
+    async fn the_version_moves_when_the_channel_s_rung_does_and_not_with_its_age() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let reach = vec![a_loop_to_emit_on("air-to-ground")];
+        let (first, _) = live.presence(&session, reach.clone()).expect("a document");
+
+        live.unheard_from_for(&session, Duration::from_secs(3));
+        let (aged, _) = live.presence(&session, reach.clone()).expect("a document");
+        assert_eq!(aged, first, "the version moved for an age nothing renders");
+
+        live.unheard_from_for(&session, Duration::from_secs(6));
+        let (moved, _) = live.presence(&session, reach).expect("a document");
+        assert_eq!(moved, first + 1);
+    }
+
+    /// A talker armed and a listener monitoring the same loop, which is the smallest thing
+    /// with a fan-out in it.
+    async fn a_talker_and_a_listener(
+        live: &StateAuthority,
+        store: &Store,
+    ) -> (SessionId, SessionId) {
+        let talker = a_session(live, store, "flight").await;
+        let listener = a_session(live, store, "capcom").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+
+        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")]);
+        live.presence(&listener, vec![a_loop("air-to-ground")]);
+        live.arm(&talker, &air_to_ground);
+        live.subscribe(&listener, &air_to_ground);
+
+        (talker, listener)
+    }
+
+    /// Whoever holds this session, for a test that has to name them to ask whether they still
+    /// do.
+    fn live_occupant(live: &StateAuthority, session: &SessionId) -> UserId {
+        live.read(|held| {
+            held.sessions
+                .iter()
+                .find(|session_held| &session_held.id == session)
+                .map(|session_held| session_held.occupant.clone())
+                .expect("a session")
+        })
     }
 
     /// One loop in reach, named the way a grid row hands it over.
