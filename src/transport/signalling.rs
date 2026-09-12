@@ -962,31 +962,18 @@ struct Reachable {
     staffs: bool,
 }
 
-/// Group the staffing pairs Configuration answered with by the loop they are about.
+/// What Configuration answered, as the state authority is handed it.
 ///
-/// The read is one row per (loop, role) because that is what the flag is set on; both
-/// documents want it the other way round — *what staffs this loop* — because staffing state
-/// is a property of the loop, computed across every occupant of every role that staffs it.
-/// In the base loop order, which the read already answers in.
-fn by_loop(pairs: Vec<(Loop, RoleId)>) -> Vec<(Loop, StaffedBy)> {
-    let mut staffed: Vec<(Loop, StaffedBy)> = Vec::new();
-    for (held_on, role) in pairs {
-        match staffed
-            .iter_mut()
-            .find(|(already, _)| already.id == held_on.id)
-        {
-            Some((_, staffing)) => staffing.roles.push(role),
-            None => staffed.push((
-                held_on.clone(),
-                StaffedBy {
-                    held_on: held_on.id,
-                    roles: vec![role],
-                },
-            )),
-        }
-    }
-
-    staffed
+/// The loop's record stays on this side: the state authority is told which loops and which
+/// roles and nothing else, because a name is Configuration's and it has no use for one.
+fn staffed_by(staffing: &[(Loop, Vec<RoleId>)]) -> Vec<StaffedBy> {
+    staffing
+        .iter()
+        .map(|(held_on, roles)| StaffedBy {
+            held_on: held_on.id.clone(),
+            roles: roles.clone(),
+        })
+        .collect()
 }
 
 impl Conversation {
@@ -1927,10 +1914,7 @@ impl Conversation {
         // Which roles staff which loops is Configuration's and who is hearing what is the
         // state authority's, so the first is handed to the second as a value ([ADR-0039]) —
         // the same way the reach beside it is.
-        let staffed: Vec<StaffedBy> = by_loop(staffing)
-            .into_iter()
-            .map(|(_held_on, roles)| roles)
-            .collect();
+        let staffed = staffed_by(&staffing);
 
         // The session's role cannot change under it — a re-assume mints a new session — so
         // the name read above is the name of the role this document comes back bound to.
@@ -2089,17 +2073,12 @@ impl Conversation {
                 .the_roles_open_to(&self.user)
                 .await?
                 .map_or_else(Vec::new, |(_user, roles)| roles);
-            let staffed = by_loop(transaction.the_staffing_roles().await?);
+            let staffed = transaction.the_staffing_roles().await?;
 
             // Every loop with staffing roles, not only the ones these roles staff: a loop is
             // staffed by whoever is hearing it, which is an occupant of **any** role that
             // staffs it, and asking about a subset would be asking a different question.
-            let staffing = self.api.state.the_staffing_of(
-                &staffed
-                    .iter()
-                    .map(|(_held_on, roles)| roles.clone())
-                    .collect::<Vec<_>>(),
-            );
+            let staffing = self.api.state.the_staffing_of(&staffed_by(&staffed));
 
             let mut seats = Vec::with_capacity(eligible_for.len());
             for role in &eligible_for {
@@ -2128,7 +2107,7 @@ impl Conversation {
         &self,
         transaction: &mut Transaction,
         role: &Role,
-        staffed: &[(Loop, StaffedBy)],
+        staffed: &[(Loop, Vec<RoleId>)],
         staffing: &[(LoopId, Staffing)],
     ) -> Result<Seat, StoreError> {
         let mut occupants = Vec::new();
@@ -2145,8 +2124,8 @@ impl Conversation {
             occupants,
             staffs: staffed
                 .iter()
-                .filter(|(_held_on, by)| by.roles.contains(&role.id))
-                .filter_map(|(held_on, _by)| {
+                .filter(|(_held_on, roles)| roles.contains(&role.id))
+                .filter_map(|(held_on, _roles)| {
                     staffing
                         .iter()
                         .find(|(loop_id, _)| loop_id == &held_on.id)
@@ -5958,6 +5937,49 @@ mod tests {
             as_json(&assumed)["loops"][0]["subscribed"],
             serde_json::Value::Bool(false),
             "the staffing flag subscribed somebody"
+        );
+    }
+
+    /// The other half of it: a console that is already up does not move either. The flag is
+    /// a report, so a session's subscription set is exactly what it was a moment before —
+    /// which is what makes `away — not subscribed` a standing state somebody has to fix
+    /// rather than one the server closes behind them (ADR-0052, ADR-0065).
+    #[tokio::test]
+    async fn marking_a_staffing_role_moves_nothing_on_a_console_that_is_already_up() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        lobby
+            .a_loop_reachable_by("Sim", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let sim = lobby.loop_named("Sim").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        let before = said(&mut socket, &subscribing(&air_to_ground)).await;
+
+        the_role_staffs(&lobby, &flight, &sim, true).await;
+        let after = socket
+            .pushed_presence()
+            .await
+            .expect("the socket to answer")
+            .pop()
+            .expect("the staffing state to move the document");
+
+        let subscribed = |said: &Outgoing| {
+            the_presence(said)
+                .1
+                .loops
+                .iter()
+                .map(|held_on| (held_on.name.clone(), held_on.subscribed))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            subscribed(&after),
+            subscribed(&before),
+            "marking a staffing role changed what was on the console"
         );
     }
 

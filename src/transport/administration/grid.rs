@@ -148,8 +148,11 @@ pub(in crate::transport) struct Setting {
 /// A flag rather than a *mark* and an *unmark*: the pair is the whole address and the value
 /// is one of two, so this is the shape a cell write has rather than the shape eligibility
 /// has — where the grant is present or absent and there is nothing to send.
+///
+/// It is named after the flag rather than after the state, because a **staffing state** is
+/// the three-valued answer `CONTEXT.md` gives that name to, and this is one bit on one cell.
 #[derive(Deserialize)]
-pub(in crate::transport) struct Staffing {
+pub(in crate::transport) struct Marking {
     staffs: bool,
 }
 
@@ -308,15 +311,16 @@ pub(in crate::transport) async fn set(
 /// different things: a log filtered to *what changed what this role may do* must not turn up
 /// the day somebody marked it as cover.
 ///
-/// Refused where the pair holds less than `emit` — a role that cannot answer cannot staff
-/// (v1 §1) — and the refusal is audited like every other refused administration write.
+/// **Marking** is refused where the pair holds less than `emit` — a role that cannot answer
+/// cannot staff (v1 §1) — and the refusal is audited like every other refused administration
+/// write. Unmarking is never refused: the rule constrains what may count as cover.
 ///
 /// [ADR-0065]: ../../../docs/adr/0065-the-staffing-flag-reports-it-never-subscribes.md
 pub(in crate::transport) async fn set_staffing(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
     Path((role, held_on)): Path<(String, String)>,
-    Json(asked): Json<Staffing>,
+    Json(asked): Json<Marking>,
 ) -> Response {
     let Some(acting) = acting(&caller) else {
         return unreachable_caller();

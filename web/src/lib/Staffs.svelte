@@ -18,6 +18,7 @@
 
 {#if mayEmit}
 	<button
+		class="setting"
 		class:held={staffs}
 		aria-pressed={staffs}
 		aria-label="Staffs {of}"
@@ -34,24 +35,3 @@
 {:else}
 	<span class="meaning">a role that may not emit on a loop cannot staff it</span>
 {/if}
-
-<style>
-	button {
-		font-size: var(--type-1);
-		padding: var(--space-1) var(--space-2);
-		color: var(--quiet);
-	}
-
-	/* One em wide whether or not it holds the mark, which is the width of the icon that goes
-	   in it: marking a role must not shift the word beside it under the pointer that has just
-	   pressed it. */
-	.mark {
-		display: inline-block;
-		width: 1em;
-	}
-
-	.held {
-		color: var(--ink);
-		border-color: var(--ink);
-	}
-</style>

@@ -69,6 +69,9 @@
 	//
 	// The mark is a sentence too, and it is here in both its states for the reason it is on
 	// the card in both: it is a fact about this operator's own console rather than an alarm.
+	// Its second state is worded in this console's own word for the subscription —
+	// *monitoring*, which is what the control beside it does — rather than in the `away`
+	// reason's *not subscribed*, which is a word about somebody else's console.
 
 	// Loop health in a sentence. A reading this does not know is said as nothing rather than
 	// guessed at: the server is the only thing entitled to judge a loop received (ADR-0017).
@@ -171,9 +174,9 @@
 						     column of this same row. -->
 						<span class="meaning">
 							{#if reachable.subscribed}
-								You staff this loop, and you are hearing it.
+								You staff this loop, and you are monitoring it.
 							{:else}
-								You staff this loop and it is not on your console. Monitor it to answer for it.
+								You staff this loop and you are not monitoring it. Monitor it to answer for it.
 							{/if}
 						</span>
 					{/if}

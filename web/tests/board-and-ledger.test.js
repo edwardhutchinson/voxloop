@@ -1407,9 +1407,11 @@ test('a loop that loses its last staffing role renders as one that never had one
 test('the staffing mark is in both views, in both of its states', async () => {
 	for (const [at, body] of (await eachView(carrying)).entries()) {
 		assert.match(body, /You staff this/, `${views[at]} does not mark the loops this role staffs`);
+		// One word for the condition in both views, and it is this console's own word for
+		// the subscription rather than the `away` reason's, which is about somebody else's.
 		assert.match(
 			body,
-			/You staff this loop and it is not on your console|You staff this, not monitoring it/,
+			/You staff this(,| loop and you are) not monitoring it/,
 			`${views[at]} does not tell the two states of the mark apart`
 		);
 	}

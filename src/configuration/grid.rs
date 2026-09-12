@@ -198,11 +198,11 @@ pub(crate) trait Grid {
     /// and the one thing it does is put this role's occupants into the answer to *is a human
     /// behind this loop*.
     ///
-    /// Refused where the pair holds less than `emit`, in either direction of the write: a
-    /// role that cannot answer cannot staff (v1 §1), and the flag would be unsettable and
-    /// unclearable in the same breath if the rule were checked on one of them only. A pair
-    /// naming a role or a loop that is not there is no change rather than a refusal, exactly
-    /// as [`Grid::set_cell`] is.
+    /// **Marking** is refused where the pair holds less than `emit`: a role that cannot
+    /// answer cannot staff (v1 §1). **Unmarking never is** — the rule constrains what may
+    /// count as cover, and saying that a role does not is always a thing an administrator
+    /// may say. A pair naming a role or a loop that is not there is no change rather than a
+    /// refusal, exactly as [`Grid::set_cell`] is.
     ///
     /// [ADR-0065]: ../../../docs/adr/0065-the-staffing-flag-reports-it-never-subscribes.md
     async fn set_staffing(
@@ -226,11 +226,16 @@ pub(crate) trait Grid {
     /// permanently ([ADR-0056]). A loop with no staffing roles is simply absent, which is
     /// how the absence of a staffing state is arrived at rather than configured.
     ///
+    /// It answers **by loop** rather than a row per marked pair, because that is the
+    /// question: staffing state is a property of the loop, computed across every occupant
+    /// of every role that staffs it. A caller handed the pairs would regroup them before it
+    /// could ask anything.
+    ///
     /// In the base loop order, like every other read that answers with loops ([ADR-0053]).
     ///
     /// [ADR-0053]: ../../../docs/adr/0053-the-loop-order-is-complete-and-a-new-loop-lands-at-the-end.md
     /// [ADR-0056]: ../../../docs/adr/0056-a-loop-with-no-staffing-roles-has-no-staffing-state.md
-    async fn the_staffing_roles(&mut self) -> Result<Vec<(Loop, RoleId)>, StoreError>;
+    async fn the_staffing_roles(&mut self) -> Result<Vec<(Loop, Vec<RoleId>)>, StoreError>;
 
     /// A role's row: the role, and every loop in the base order with what it holds on each.
     ///
@@ -575,13 +580,14 @@ impl Grid for Transaction {
         let Some(before) = self.a_cell(role, held_on).await? else {
             return Ok(None);
         };
-        if !before.permission.carries(Permission::Emit) {
+        if staffs && !before.permission.carries(Permission::Emit) {
             return Err(AdministrationRefused::CannotStaff);
         }
 
-        // An `UPDATE` and never an upsert: a pair with no row holds `none`, so it has been
-        // refused above, and writing one here would record a deliberate `none` against a
-        // cell nobody has ruled on — which is a decision, and not the one being made.
+        // An `UPDATE` and never an upsert: a pair with no row holds `none`, so marking it
+        // has been refused above and unmarking it has nothing to clear — and writing a row
+        // here would record a deliberate `none` against a cell nobody has ruled on, which
+        // is a decision, and not the one being made.
         sqlx::query(
             "UPDATE grid_cells SET staffs = ?, set_at = ? WHERE role_id = ? AND loop_id = ?",
         )
@@ -599,7 +605,7 @@ impl Grid for Transaction {
         }))
     }
 
-    async fn the_staffing_roles(&mut self) -> Result<Vec<(Loop, RoleId)>, StoreError> {
+    async fn the_staffing_roles(&mut self) -> Result<Vec<(Loop, Vec<RoleId>)>, StoreError> {
         let rows = sqlx::query(
             // `is_unreviewed` is both read and tested: the loop comes back as it stands, and
             // a loop nobody has ruled on is not in the answer at all.
@@ -609,15 +615,25 @@ impl Grid for Transaction {
              JOIN loops ON loops.id = grid_cells.loop_id \
              WHERE grid_cells.staffs <> 0 AND loops.is_unreviewed = 0 \
              ORDER BY loops.position, loops.created_at, loops.id",
+            // Ordered by the loop, which is what lets the rows be gathered as they arrive.
         )
         .fetch_all(self.connection())
         .await
         .map_err(unavailable)?;
 
-        Ok(rows
-            .iter()
-            .map(|row| (a_loop(row), RoleId::known(row.get("role_id"))))
-            .collect())
+        // Gathered here rather than by the caller, and in the order the rows arrive, which
+        // is the base loop order the query already answers in.
+        let mut staffed: Vec<(Loop, Vec<RoleId>)> = Vec::new();
+        for row in &rows {
+            let held_on = a_loop(row);
+            let role = RoleId::known(row.get("role_id"));
+            match staffed.last_mut() {
+                Some((already, roles)) if already.id == held_on.id => roles.push(role),
+                _ => staffed.push((held_on, vec![role])),
+            }
+        }
+
+        Ok(staffed)
     }
 }
 
@@ -1524,7 +1540,7 @@ mod tests {
         assert_eq!(staffing.len(), 1);
         assert_eq!(staffing[0].0.id, held_on);
         assert_eq!(staffing[0].0.name, "FLIGHT");
-        assert_eq!(staffing[0].1, role);
+        assert_eq!(staffing[0].1, vec![role]);
     }
 
     /// An unreviewed loop is `none` on every rung, so nobody could answer on it and nothing
@@ -1590,5 +1606,67 @@ mod tests {
                 .expect("the write to answer")
                 .is_none()
         );
+    }
+
+    /// **Unmarking is never refused.** The rule says what may count as cover; saying that a
+    /// role does not is always a thing an administrator may say, and a flag that could only
+    /// be cleared while the permission it stood on was still there would be unclearable
+    /// exactly where somebody wanted it gone.
+    #[tokio::test]
+    async fn a_role_that_may_not_emit_can_still_be_unmarked() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let (role, held_on) =
+            a_role_and_a_reviewed_loop(&mut transaction, "Flight Director", "FLIGHT").await;
+        transaction
+            .set_cell(&role, &held_on, Permission::Monitor)
+            .await
+            .expect("the cell to be set");
+
+        let unmarked = transaction
+            .set_staffing(&role, &held_on, false)
+            .await
+            .expect("the flag to be clearable")
+            .expect("a change");
+
+        assert!(!unmarked.after.expect("the cell after").staffs);
+    }
+
+    /// The roles that staff one loop come back **together**, because staffing state is a
+    /// property of the loop: a caller handed a row per pair would have to gather them
+    /// before it could ask anything.
+    #[tokio::test]
+    async fn the_staffing_roles_of_one_loop_come_back_together() {
+        let (_directory, store) = a_temporary_store().await;
+        let mut transaction = store.begin().await.expect("a transaction");
+        let (flight_director, held_on) =
+            a_role_and_a_reviewed_loop(&mut transaction, "Flight Director", "FLIGHT").await;
+        let capcom = transaction
+            .create_role(NewRole {
+                name: "CAPCOM".to_owned(),
+                max_occupants: Some(1),
+            })
+            .await
+            .expect("the second role");
+        for role in [&flight_director, &capcom] {
+            transaction
+                .set_cell(role, &held_on, Permission::Emit)
+                .await
+                .expect("the cell to be set");
+            transaction
+                .set_staffing(role, &held_on, true)
+                .await
+                .expect("the flag to be set");
+        }
+
+        let staffing = transaction
+            .the_staffing_roles()
+            .await
+            .expect("the staffing roles to be readable");
+
+        assert_eq!(staffing.len(), 1, "one loop came back as two");
+        assert_eq!(staffing[0].1.len(), 2);
+        assert!(staffing[0].1.contains(&flight_director));
+        assert!(staffing[0].1.contains(&capcom));
     }
 }

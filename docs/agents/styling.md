@@ -22,7 +22,7 @@ the rule without knowing something, write the something down.
 **Shared furniture is a bare element selector in `app.css`.** `button`, `a`, `input`,
 `select`, `table`, `th`, `td`, `h1`, `h2`, plus the utility classes `.quiet`, `.refusal`,
 `.destructive`, `.acts`, `.new`, `.name`, `.lesser`, `.wayin`, `.field`, `.back`, `.meaning`,
-`.nobody` and `.awaiting`. Styling the bare element means an unstyled `<button>` is already correct.
+`.nobody`, `.setting`, `.mark`, `.held` and `.awaiting`. Styling the bare element means an unstyled `<button>` is already correct.
 **A component never declares `:global()`** — if a rule has to escape the component, it is
 furniture and it belongs in `app.css`. **And never an inline `style` attribute**: it is out
 of reach of every rule here, which is the whole of the case against it.
@@ -30,9 +30,12 @@ of reach of every rule here, which is the whole of the case against it.
 The second time a block is written out identically in two components, it is furniture and it
 moves. `.awaiting` — the panel in the corner holding something out to the administrator — got
 here that way, from `Confirm.svelte` and the enrolment code in `Users.svelte`, and #71 moved
-`h1`, `.wayin`, `.field`, `.back`, `.meaning` and `.lesser` the same way. `SignIn.svelte`,
-`Enrol.svelte`, `WhichRoles.svelte`, `WhoMayAssume.svelte` and `RolePage.svelte` were left
-with no `<style>` block at all, which is what the rule looks like when it is working.
+`h1`, `.wayin`, `.field`, `.back`, `.meaning` and `.lesser` the same way. `.setting`, `.mark`
+and `.held` — the chrome of a control that sets one thing on a grid cell — moved when
+`Staffs.svelte` was written beside `Rungs.svelte` and turned out to be the same three blocks.
+`SignIn.svelte`, `Enrol.svelte`, `WhichRoles.svelte`, `WhoMayAssume.svelte`, `RolePage.svelte`
+and `Staffs.svelte` were left with no `<style>` block at all, which is what the rule looks
+like when it is working.
 
 **A link is drawn as a control, because every one of them is one.** `a` sits with `button` in
 `app.css` and takes the same chrome: the console's links are its nav, a row's acts and the way

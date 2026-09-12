@@ -193,6 +193,30 @@ th {
 	color: var(--warning);
 }
 
+/* A control that sets one thing on a grid cell: a rung, or the staffing flag. Small and
+   quiet, because a row of them is read as one control rather than as four or five buttons,
+   and the mark rather than the brighter ink is what carries which value is held — a state is
+   never carried by colour alone. Furniture because `Rungs.svelte` and `Staffs.svelte` were
+   the same three blocks written out twice. */
+.setting {
+	font-size: var(--type-1);
+	padding: var(--space-1) var(--space-2);
+	color: var(--quiet);
+}
+
+/* One em wide whether or not it holds the mark, which is the width of the icon that goes in
+   it: setting a cell must not shuffle what is beside it under the pointer that has just
+   pressed it. */
+.mark {
+	display: inline-block;
+	width: 1em;
+}
+
+.held {
+	color: var(--ink);
+	border-color: var(--ink);
+}
+
 /* A loop no human is behind: `away` with its reason, or `vacant` (v1 §1). In the warning
    colour beside the word or the sentence that says it, never instead of one — `this is true
    and you should look at it`, which is what the colour is kept for. Furniture because the

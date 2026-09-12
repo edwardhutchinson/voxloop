@@ -2362,13 +2362,6 @@ impl StateAuthority {
         });
     }
 
-    /// Who occupies this role, now.
-    ///
-    /// Occupancy means a role somebody has assumed and not relinquished — never somebody
-    /// merely signed in, and never somebody eligible ([ADR-0005]). An empty answer is
-    /// *nobody is in that seat*, which is the answer the lobby exists to give.
-    ///
-    /// [ADR-0005]: ../../docs/adr/0005-occupancy-means-listening-not-signed-in.md
     /// Whether a human is behind each of these loops (v1 §1).
     ///
     /// The live half of staffing state. Which roles staff which loops is Configuration's and
@@ -2391,6 +2384,13 @@ impl StateAuthority {
         self.read(|live| live.the_staffing_of(staffed, now))
     }
 
+    /// Who occupies this role, now.
+    ///
+    /// Occupancy means a role somebody has assumed and not relinquished — never somebody
+    /// merely signed in, and never somebody eligible ([ADR-0005]). An empty answer is
+    /// *nobody is in that seat*, which is the answer the lobby exists to give.
+    ///
+    /// [ADR-0005]: ../../docs/adr/0005-occupancy-means-listening-not-signed-in.md
     pub(crate) fn occupants_of(&self, role: &RoleId) -> Vec<UserId> {
         self.read(|live| {
             live.sessions

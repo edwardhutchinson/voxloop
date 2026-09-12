@@ -16,6 +16,7 @@
 <div class="rungs" role="group" aria-label="Permission for {of}">
 	{#each rungs as rung (rung)}
 		<button
+			class="setting"
 			class:held={rung === held}
 			aria-pressed={rung === held}
 			disabled={busy}
@@ -35,24 +36,5 @@
 	.rungs {
 		display: flex;
 		gap: var(--space-1);
-	}
-
-	.rungs button {
-		font-size: var(--type-1);
-		padding: var(--space-1) var(--space-2);
-		color: var(--quiet);
-	}
-
-	/* One em wide whether or not it holds the mark, which is the width of the icon that goes
-	   in it: setting a permission must not shuffle the other three rungs sideways under the
-	   pointer that has just pressed one. */
-	.mark {
-		display: inline-block;
-		width: 1em;
-	}
-
-	.held {
-		color: var(--ink);
-		border-color: var(--ink);
 	}
 </style>

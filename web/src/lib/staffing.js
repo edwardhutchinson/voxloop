@@ -23,25 +23,20 @@ const words = {
 };
 
 /**
- * Each reason as it reads when it is the only one, which is the plain sentence v1 §8 gives:
- * `away — muted it`, and not `away — 1 muted` when the one occupant is the whole story.
+ * Each reason twice: as it reads when it is the only one — the plain sentence v1 §8 gives,
+ * `away — muted it` — and as it reads with a count in front of it, `1 muted`. Two of the
+ * five differ between the two, which is why both are written out rather than derived.
  */
-const alone = {
-	unreachable: 'unreachable',
-	'off-console': 'off console',
-	'not-subscribed': 'not subscribed to it',
-	'not-receiving': 'not receiving it',
-	muted: 'muted it'
+const because = {
+	unreachable: { alone: 'unreachable', counted: 'unreachable' },
+	'off-console': { alone: 'off console', counted: 'off console' },
+	'not-subscribed': { alone: 'not subscribed to it', counted: 'not subscribed' },
+	'not-receiving': { alone: 'not receiving it', counted: 'not receiving it' },
+	muted: { alone: 'muted it', counted: 'muted' }
 };
 
-/** Each reason as it reads with a count in front of it: `1 muted, 2 not subscribed`. */
-const counted = {
-	unreachable: 'unreachable',
-	'off-console': 'off console',
-	'not-subscribed': 'not subscribed',
-	'not-receiving': 'not receiving it',
-	muted: 'muted'
-};
+/** What one reason reads as, said alone or counted, or the word the document used. */
+const said = (reason, how) => because[reason]?.[how] ?? reason;
 
 /** The word the board carries, or nothing where the loop has no staffing roles. */
 export function theWord(staffing) {
@@ -72,10 +67,10 @@ export function theSentence(staffing) {
 
 	const away = staffing.away ?? [];
 	if (away.length === 1) {
-		return `Away — ${alone[away[0].reason] ?? away[0].reason}.`;
+		return `Away — ${said(away[0].reason, 'alone')}.`;
 	}
 
-	const each = away.map(({ reason, occupants }) => `${occupants} ${counted[reason] ?? reason}`);
+	const each = away.map(({ reason, occupants }) => `${occupants} ${said(reason, 'counted')}`);
 
 	// An `away` with nothing behind it cannot be sent — the server only reaches that state by
 	// counting somebody — and saying the bare word is the honest answer if one ever arrives.
