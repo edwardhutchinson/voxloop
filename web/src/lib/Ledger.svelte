@@ -24,6 +24,11 @@
 	// for most rows would read as a column with nothing in it. Setting it is behind the cog, as
 	// on the card (ADR-0034), and the modal it opens is `Console.svelte`'s.
 	//
+	// **Loop health is a sentence on every monitored row** (#46), the ordinary case included:
+	// this is the reading view, and it is where the gap v1 §16 records can be said — the
+	// sentence for a loop being received says the loop reaches you, and no more, because a
+	// beacon arriving does not prove any given talker would be heard.
+	//
 	// **Every state the board carries is carried here too**, which from this ticket on means
 	// the arm, the blind arm and the talking indicator. The indicator is the one thing that is
 	// literally the same object in both views, because it is one component (ADR-0033) — what
@@ -54,6 +59,15 @@
 		emit: 'Hear it, and speak on it',
 		control: 'Hear it, speak on it, and hold authority on it'
 	};
+
+	// Loop health in a sentence. A reading this does not know is said as nothing rather than
+	// guessed at: the server is the only thing entitled to judge a loop received (ADR-0017).
+	const reaches = {
+		receiving: 'Its beacon is arriving, so this loop reaches you.',
+		checking: 'Checking that this loop reaches you.',
+		'not-receiving':
+			'Its beacon is not arriving, so you may not hear this loop even when somebody talks on it.'
+	};
 </script>
 
 <!-- Never scrolled away (ADR-0034). Here it rides above the rows rather than under them: the
@@ -69,6 +83,7 @@
 			<th>Loop</th>
 			<th>This role may</th>
 			<th>Monitoring</th>
+			<th>Reaching you</th>
 			<th>Volume</th>
 			<th>Emitting to</th>
 		</tr>
@@ -108,6 +123,16 @@
 					{/if}
 					{#if reachable.talking}
 						<Talking priority={reachable.priority} />
+					{/if}
+				</td>
+				<td>
+					<!-- Only on a loop being monitored: there is no beacon counted on any other.
+					     And nothing while the document has no reading, which is a channel not
+					     confirmed — the console already says that, above both views (v1 §6). -->
+					{#if reachable.subscribed && reaches[reachable.health]}
+						<span class="meaning" class:unreceived={reachable.health === 'not-receiving'}>
+							{reaches[reachable.health]}
+						</span>
 					{/if}
 				</td>
 				<td>

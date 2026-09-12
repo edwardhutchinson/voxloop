@@ -91,6 +91,11 @@ function where() {
  * - `onHeardOn(carriage, heardOn)` — a carriage this tab already has is now heard on these
  *   loops. The stream did not change; the loudest volume among them may have.
  * - `onOneFewerTalker(carriage)` — that carriage is closed at the server's end.
+ * - `onOneMoreBeacon(beacon, on)` — one loop's beacon, what to build to count it, and the loop
+ *   it measures. **A message of its own and never one more talker** (ADR-0017): a beacon is
+ *   counted and never played, a talker played and never counted, and neither has to be told
+ *   apart from the other by looking at it.
+ * - `onOneFewerBeacon(carriage)` — that beacon's carriage is closed at the server's end.
  *
  * Answers with the acts a tab can perform on its own session, and the way to close it.
  */
@@ -107,6 +112,8 @@ export function openSignalling({
 	onOneMoreTalker,
 	onHeardOn = () => {},
 	onOneFewerTalker,
+	onOneMoreBeacon = () => {},
+	onOneFewerBeacon = () => {},
 	// What runs the ladder's clock: it is handed an act and an interval and answers with the
 	// way to stop. It is a parameter rather than a reach for `setInterval` so that nothing in
 	// here touches a global — the console is rendered on the server at build time, and a
@@ -171,6 +178,10 @@ export function openSignalling({
 			onHeardOn(said.carriage, said.heard_on ?? []);
 		} else if (said?.message === 'one-fewer-talker') {
 			onOneFewerTalker(said.carriage);
+		} else if (said?.message === 'one-more-beacon') {
+			onOneMoreBeacon(said.beacon, said.on);
+		} else if (said?.message === 'one-fewer-beacon') {
+			onOneFewerBeacon(said.carriage);
 		}
 	});
 
@@ -291,6 +302,17 @@ export function openSignalling({
 		 * The peer connection that drives it is the Audio module's, and it is not built yet.
 		 */
 		mediaPath: (state) => say(socket, { message: 'media-path', state }),
+		/**
+		 * Say how many packets of each loop's beacon this tab has counted, as running totals
+		 * by loop id.
+		 *
+		 * **The client counts and the server judges** (ADR-0017): nothing here concludes that
+		 * a loop is received or lost, because a client that could conclude it could also be
+		 * wrong about it, and a wedged one would say nothing at all — which the server reads as
+		 * receiving nothing, the safe way round. Like the media path report, this is the
+		 * machine noticing something about its own transport, and it renews no sign-in.
+		 */
+		beaconsCounted: (counted) => say(socket, { message: 'beacons-counted', counted }),
 		close: () => {
 			told = true;
 			stopTicking?.();

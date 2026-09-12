@@ -32,6 +32,7 @@
 //! [ADR-0023]: ../../../docs/adr/0023-sign-in-is-to-the-application-and-a-role-is-assumed.md
 //! [ADR-0029]: ../../../docs/adr/0029-an-announcement-is-an-ordinary-transmission.md
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use axum::Extension;
@@ -49,7 +50,7 @@ use crate::configuration::{
 };
 use crate::media_plane::{Audience, Carried, Destination, Hearing, Negotiated, Negotiation, Way};
 use crate::state::{
-    Assuming, Ended, InReach, MediaPath, Pressed, Relinquished, SessionId, WhoHears,
+    Assuming, Ended, InReach, MediaPath, Pressed, Relinquished, SessionId, WhoCounts, WhoHears,
 };
 use crate::telemetry::module;
 
@@ -343,6 +344,17 @@ enum Incoming {
         held_on: String,
         volume: u64,
     },
+    /// How many packets of each loop's beacon this client has counted, as running totals.
+    ///
+    /// `Session` (`docs/spec/api-surface.md`, *Report loop health*). **The client counts and
+    /// the server judges** ([ADR-0017]): a total that moved is a beacon that arrived, and
+    /// loop health is measured from that and from nothing the client concludes for itself.
+    /// It carries loop ids the document already named, and a loop this session is not
+    /// monitoring is not counted — so there is no rung to check, and a count for a loop out
+    /// of reach measures nothing and changes nothing.
+    ///
+    /// [ADR-0017]: ../../../docs/adr/0017-loop-health-is-measured-not-asserted.md
+    BeaconsCounted { counted: BTreeMap<String, u64> },
 }
 
 impl Incoming {
@@ -380,7 +392,11 @@ impl Incoming {
             // not name and the fan-out does not carry.
             | Self::Mute { .. }
             | Self::Unmute { .. }
-            | Self::SetVolume { .. } => Requirement::Session,
+            | Self::SetVolume { .. }
+            // **A count reaches nothing and changes nobody's audio.** It measures the loops
+            // this session already monitors, which were gated on `monitor` when they were
+            // taken up, and a count for any other loop is not taken.
+            | Self::BeaconsCounted { .. } => Requirement::Session,
             // **Emission is enforced here.** The rung is `emit` and the loop is the
             // caller's, so this is a value built per message like the two below it.
             Self::Arm { held_on } | Self::Disarm { held_on } => Requirement::Grid {
@@ -439,7 +455,10 @@ impl Incoming {
             | Self::MediaCanDecode { .. }
             | Self::MediaConnect { .. }
             | Self::MediaSpeaks { .. }
-            | Self::MediaHears { .. } => false,
+            | Self::MediaHears { .. }
+            // The client counting its own beacons, every second, whether or not anybody is
+            // looking at it.
+            | Self::BeaconsCounted { .. } => false,
         }
     }
 
@@ -466,6 +485,7 @@ impl Incoming {
             Self::Mute { .. } => "mute",
             Self::Unmute { .. } => "unmute",
             Self::SetVolume { .. } => "set-volume",
+            Self::BeaconsCounted { .. } => "beacons-counted",
         }
     }
 }
@@ -555,6 +575,16 @@ enum Outgoing {
     },
     /// One fewer. That carriage is closed at this end and the client should let it go.
     OneFewerTalker { carriage: Carried },
+    /// One loop's beacon, what to build in order to count it, and the loop it measures.
+    ///
+    /// **Never played and always counted** ([ADR-0017]), which is why it is not one more
+    /// talker: the client keeps the two apart by the message they arrive in. The loop is one
+    /// this session monitors, as the id the document already carries.
+    ///
+    /// [ADR-0017]: ../../../docs/adr/0017-loop-health-is-measured-not-asserted.md
+    OneMoreBeacon { beacon: Negotiation, on: String },
+    /// That beacon's carriage is closed at this end, and the client should stop counting it.
+    OneFewerBeacon { carriage: Carried },
 }
 
 /// The four timers of the connection ladder, as the console runs them.
@@ -638,8 +668,8 @@ struct Seat {
 /// ([ADR-0048]): the hail picker fetches a roster when it opens rather than riding along at
 /// this document's tick rate.
 ///
-/// Arms (#41), staffing state (#48), loop health (#46) and the audience (#49) land in here
-/// one ticket at a time.
+/// Arms (#41) and loop health (#46) are in it; staffing state (#48) and the audience (#49) land
+/// in here one ticket at a time.
 ///
 /// [ADR-0019]: ../../../docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md
 /// [ADR-0048]: ../../../docs/adr/0048-the-hail-picker-is-the-only-place-the-console-names-a-person.md
@@ -762,6 +792,16 @@ struct Reachable {
     /// at the loudest of the volumes among the loops it hears them on (v1 §5) — so the level
     /// the client plays and the level the card shows are read off the same document.
     volume: u8,
+    /// Whether this session is actually receiving it — `receiving`, `checking` or
+    /// `not-receiving` — measured from its beacon ([ADR-0017]).
+    ///
+    /// **`null` on a loop this session is not monitoring**, because there is no beacon to
+    /// count, and **`null` while the server has this session's channel as anything but
+    /// confirmed**, because connection state already explains the silence and a second reason
+    /// beside it would be one failure arriving as two (v1 §6).
+    ///
+    /// [ADR-0017]: ../../../docs/adr/0017-loop-health-is-measured-not-asserted.md
+    health: Option<&'static str>,
 }
 
 impl Conversation {
@@ -981,6 +1021,7 @@ impl Conversation {
                 self.setting_the_volume(&LoopId::presented(held_on), volume)
                     .await
             }
+            Incoming::BeaconsCounted { counted } => self.the_client_counted(counted).await,
         }
     }
 
@@ -1472,11 +1513,12 @@ impl Conversation {
     /// [ADR-0039]: ../../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
     /// [ADR-0063]: ../../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
     fn hand_down_the_routing(&self) {
-        let Some(routing) = self.api.state.the_routing_if_it_moved() else {
-            return;
-        };
-
-        for WhoHears { talker, listeners } in routing {
+        // The two answers move independently — a loop muted moves the fan-out and not the
+        // beacons, a loop taken up by somebody nobody is talking to moves only the beacons —
+        // so neither waits on the other.
+        for WhoHears { talker, listeners } in
+            self.api.state.the_routing_if_it_moved().unwrap_or_default()
+        {
             let audience = Audience {
                 hearing: listeners
                     .into_iter()
@@ -1488,6 +1530,20 @@ impl Conversation {
             };
 
             self.api.media.these_should_hear(&talker, &audience);
+        }
+
+        // **Who counts each beacon crosses the same way** ([ADR-0017]): worked out above, each
+        // loop labelled here, and executed below without a question asked of it.
+        //
+        // [ADR-0017]: ../../../docs/adr/0017-loop-health-is-measured-not-asserted.md
+        if let Some(counting) = self.api.state.the_beacons_if_they_moved() {
+            for WhoCounts { listener, on } in counting {
+                let on: Vec<Destination> = on
+                    .iter()
+                    .map(|held_on| Destination::labelled(held_on.as_str().to_owned()))
+                    .collect();
+                self.api.media.these_beacons_reach(&listener, &on);
+            }
         }
     }
 
@@ -1581,6 +1637,29 @@ impl Conversation {
         self.presence(Told::OnlyIfItMoved).await
     }
 
+    /// Take the client's counts of the beacons it is carried.
+    ///
+    /// The document is pushed **only if it moved**, and at once when it has: a loop dropping
+    /// to *not receiving* is the reading an operator most needs, and a count that changed
+    /// nothing on screen is the ordinary case every second.
+    async fn the_client_counted(
+        &mut self,
+        counted: BTreeMap<String, u64>,
+    ) -> Result<Vec<Outgoing>, StoreError> {
+        let Some(session) = self.session.clone() else {
+            // Unreachable: `Session` was met a moment ago, and only this socket clears it.
+            return Ok(Vec::new());
+        };
+
+        let counts: Vec<(LoopId, u64)> = counted
+            .into_iter()
+            .map(|(held_on, packets)| (LoopId::presented(held_on), packets))
+            .collect();
+        self.api.state.the_client_counted(&session, &counts);
+
+        self.presence(Told::OnlyIfItMoved).await
+    }
+
     /// The presence document, if this socket should be sent one.
     ///
     /// It is **assembled from both seams and computed by neither alone**: the reach comes
@@ -1664,6 +1743,7 @@ impl Conversation {
                         priority: standing.priority,
                         muted: standing.muted,
                         volume: standing.volume.percent(),
+                        health: standing.health.map(|health| health.as_str()),
                     })
                     .collect(),
             },
@@ -1956,6 +2036,11 @@ fn carrying(negotiated: Negotiated) -> Outgoing {
             heard_on: loops(&heard_on),
         },
         Negotiated::OneFewerTalker(carriage) => Outgoing::OneFewerTalker { carriage },
+        Negotiated::OneMoreBeacon { beacon, on } => Outgoing::OneMoreBeacon {
+            beacon,
+            on: on.as_str().to_owned(),
+        },
+        Negotiated::OneFewerBeacon(carriage) => Outgoing::OneFewerBeacon { carriage },
     }
 }
 
@@ -4891,6 +4976,9 @@ mod tests {
             fields,
             [
                 "armed",
+                // Whether the loop reaches this session: a fact about the listener's own
+                // path, and nothing about any talker (ADR-0017).
+                "health",
                 "id",
                 "muted",
                 "name",
@@ -5083,6 +5171,217 @@ mod tests {
                         .hearing
                         .into_iter()
                         .map(|hearing| hearing.listener.as_str().to_owned())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    // ---- The loop beacon and loop health (#46) ----------------------------------------
+
+    /// What the client says when it has counted each beacon it is carried.
+    fn counting(held_on: &LoopId, packets: u64) -> String {
+        format!(
+            r#"{{"message":"beacons-counted","counted":{{"{}":{packets}}}}}"#,
+            held_on.as_str()
+        )
+    }
+
+    /// This document's health for each loop, by name, where it has one.
+    fn health(said: &Outgoing) -> Vec<(&str, Option<&str>)> {
+        the_presence(said)
+            .1
+            .loops
+            .iter()
+            .map(|held_on| (held_on.name.as_str(), held_on.health))
+            .collect()
+    }
+
+    /// A console monitoring Air-to-ground, and the loop.
+    async fn monitoring_air_to_ground(lobby: &ALobby) -> (Conversation, LoopId) {
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, &subscribing(&air_to_ground)).await;
+
+        (socket, air_to_ground)
+    }
+
+    /// **Loop health is in the document**, per loop, because the document is the API and both
+    /// views render it. A loop just taken up is being checked; a loop nobody here monitors has
+    /// no beacon to count and so no health at all.
+    #[tokio::test]
+    async fn the_document_carries_each_monitored_loop_s_health() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Monitor)
+            .await;
+        lobby
+            .a_loop_reachable_by("Sim", &flight, Permission::Monitor)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+
+        let taken_up = said(&mut socket, &subscribing(&air_to_ground)).await;
+
+        assert_eq!(
+            health(&taken_up),
+            vec![("Air-to-ground", Some("checking")), ("Sim", None)]
+        );
+        assert_eq!(
+            as_json(&taken_up)["loops"][1]["health"],
+            serde_json::Value::Null,
+            "a loop nobody monitors was given a health"
+        );
+    }
+
+    /// **The client counts and the server judges** (ADR-0017). A count that moved is the
+    /// beacon arriving, and the document goes out at once when that changes what it says.
+    #[tokio::test]
+    async fn a_beacon_counted_makes_the_loop_received_in_the_document() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let (mut socket, air_to_ground) = monitoring_air_to_ground(&lobby).await;
+
+        let received = said(&mut socket, &counting(&air_to_ground, 1)).await;
+
+        assert_eq!(
+            health(&received),
+            vec![("Air-to-ground", Some("receiving"))]
+        );
+        assert!(
+            all(&mut socket, &counting(&air_to_ground, 2))
+                .await
+                .is_empty(),
+            "a count that changed nothing in the document pushed it anyway"
+        );
+    }
+
+    /// **A loop whose beacon stops arriving says so.** A quiet loop and an unreachable one
+    /// sound identical, and this is what keeps them from looking identical.
+    #[tokio::test]
+    async fn a_beacon_that_stops_arriving_is_a_loop_not_received_in_the_document() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let (mut socket, air_to_ground) = monitoring_air_to_ground(&lobby).await;
+        all(&mut socket, &counting(&air_to_ground, 1)).await;
+        let session = socket.session.clone().expect("a session");
+
+        lobby
+            .api
+            .state
+            .the_beacons_went_unheard_for(&session, Duration::from_secs(16));
+        let lost = said(&mut socket, &counting(&air_to_ground, 1)).await;
+
+        assert_eq!(
+            health(&lost),
+            vec![("Air-to-ground", Some("not-receiving"))]
+        );
+    }
+
+    /// It is `Session` (`docs/spec/api-surface.md`, *Report loop health*): a lobby has no
+    /// beacons to count.
+    #[tokio::test]
+    async fn a_beacon_count_from_the_lobby_is_refused() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, HELLO).await;
+
+        let refused = said(
+            &mut socket,
+            &counting(&LoopId::presented("l-anything".to_owned()), 1),
+        )
+        .await;
+
+        assert!(
+            matches!(&refused, Outgoing::Refused { was, .. } if was == "beacons-counted"),
+            "{refused:?}"
+        );
+    }
+
+    /// **A count is the machine reporting on its own transport**, and nothing the machine does
+    /// renews a sign-in (v1 §2): it arrives every second from a tab nobody need be looking at.
+    #[test]
+    fn a_beacon_count_is_not_a_deliberate_act() {
+        let message: Incoming =
+            serde_json::from_str(r#"{"message":"beacons-counted","counted":{"l-1":3}}"#)
+                .expect("a message this server reads");
+
+        assert!(!message.was_a_deliberate_act());
+        assert!(matches!(message.requirement(), Requirement::Session));
+    }
+
+    /// **Every subscriber consumes the beacon**, and who that is reaches the media plane as an
+    /// answer with each loop as a label (ADR-0063) — the same way the fan-out does. A muted
+    /// loop is still counted, because a mute is not an unsubscribe.
+    #[tokio::test]
+    async fn who_counts_each_beacon_reaches_the_media_plane_with_the_loop_as_a_label() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let (mut socket, air_to_ground) = monitoring_air_to_ground(&lobby).await;
+        let session = socket.session.clone().expect("a session");
+        all(&mut socket, &muting(&air_to_ground)).await;
+
+        a_turn_of_the_loop(&socket);
+
+        assert_eq!(
+            the_beacons_last_handed_down(&lobby, &session),
+            vec![air_to_ground.as_str().to_owned()]
+        );
+
+        all(&mut socket, &unsubscribing(&air_to_ground)).await;
+        a_turn_of_the_loop(&socket);
+        assert!(the_beacons_last_handed_down(&lobby, &session).is_empty());
+    }
+
+    /// **A beacon's carriage reaches the session it was built for, named by the loop it
+    /// measures**, as a loop id the document already carries — and it goes the same way. It
+    /// is a message of its own rather than one more talker, because a beacon is never played.
+    #[tokio::test]
+    async fn a_beacon_s_carriage_comes_with_the_loop_it_measures() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let (mut socket, air_to_ground) = monitoring_air_to_ground(&lobby).await;
+        let session = socket.session.clone().expect("a session");
+
+        lobby.recording.the_worker_tells(
+            &session,
+            Negotiated::OneMoreBeacon {
+                beacon: Negotiation::presented(serde_json::json!({ "id": "a-beacon" })),
+                on: Destination::labelled(air_to_ground.as_str().to_owned()),
+            },
+        );
+        lobby.recording.the_worker_tells(
+            &session,
+            Negotiated::OneFewerBeacon(Carried::presented("a-beacon".to_owned())),
+        );
+
+        let carried = negotiated(&mut socket);
+
+        assert_eq!(as_json(&carried[0])["message"], "one-more-beacon");
+        assert_eq!(as_json(&carried[0])["beacon"]["id"], "a-beacon");
+        assert_eq!(as_json(&carried[0])["on"], air_to_ground.as_str());
+        assert_eq!(as_json(&carried[1])["message"], "one-fewer-beacon");
+        assert_eq!(as_json(&carried[1])["carriage"], "a-beacon");
+    }
+
+    /// The loops whose beacons the media plane was last told this listener counts.
+    fn the_beacons_last_handed_down(lobby: &ALobby, listener: &SessionId) -> Vec<String> {
+        lobby
+            .recording
+            .instructions()
+            .into_iter()
+            .rev()
+            .find_map(|instruction| match instruction {
+                Instructed::TheseBeaconsReach {
+                    listener: whose,
+                    on,
+                } if &whose == listener => Some(
+                    on.iter()
+                        .map(|destination| destination.as_str().to_owned())
                         .collect(),
                 ),
                 _ => None,

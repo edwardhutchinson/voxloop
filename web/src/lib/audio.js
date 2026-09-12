@@ -23,6 +23,12 @@
 //
 // **Nothing here ever lowers anything for anybody else** (v1 §4). There is no ducking in
 // VoxLoop, so no talker's gain is ever read off another talker's.
+//
+// **Each loop's beacon is counted here and never played** (ADR-0017). It is a carriage like a
+// talker's, built the same way on the same downlink, and that is the point: its arrival is a
+// measurement over the same transport, router and fan-out that speech would take. What goes
+// back up is the running count per loop and nothing concluded from it — the server judges —
+// so a client that has wedged says nothing, and nothing is read as receiving nothing.
 
 import { Device } from 'mediasoup-client';
 
@@ -41,6 +47,11 @@ const HOW_IT_IS_ENCODED = {
 // Mono, because panning is a presentation choice the console makes over mono sources and
 // costs nothing on the wire (ADR-0010). The three cleanups are the browser's own and are
 // what a headset in a control room wants.
+// How often each beacon's count is read, and said where it has moved. Faster than the beacon
+// sounds, so that a packet is reported within a second of arriving rather than an interval
+// late, and nothing is sent at all while nothing arrives.
+const BEACONS_ARE_COUNTED_EVERY = 1000;
+
 const WHAT_THE_MICROPHONE_IS_ASKED_FOR = {
 	audio: {
 		channelCount: 1,
@@ -63,7 +74,17 @@ const WHAT_THE_MICROPHONE_IS_ASKED_FOR = {
  * `failed`; the server merges it pessimistically with its own and pushes the answer back in
  * the presence document, which is the only thing the console renders.
  */
-export function openAudio({ say, onMediaPath }) {
+export function openAudio({
+	say,
+	onMediaPath,
+	// What reads the beacons' counts on a clock, handed in for the reason `openSignalling`
+	// takes one: nothing in here reaches for a global timer.
+	ticking = (act, every) => {
+		const timer = setInterval(act, every);
+
+		return () => clearInterval(timer);
+	}
+}) {
 	const device = new Device();
 	// One element per audible talker, and the loops it is heard on. The browser mixing
 	// several at once **is** the client-side mixing ADR-0007 asks for; the gain on each is
@@ -84,6 +105,35 @@ export function openAudio({ say, onMediaPath }) {
 	let sending = null;
 	let receiving = null;
 	let closed = false;
+
+	// One carriage per loop whose beacon this session counts, by carriage id, and the loop it
+	// measures. **None of them is ever given an element to play through**: a beacon is silent
+	// anyway, and one mixed into somebody's ears would be a talker nobody is.
+	const counting = new Map();
+	// What was last said, so that a count that has not moved is not said again: the server
+	// reads the silence as the beacon not arriving, which is exactly what it is.
+	let saidCounted = null;
+
+	async function countTheBeacons() {
+		if (counting.size === 0) return;
+
+		const counted = {};
+		for (const { carriage, on } of counting.values()) {
+			try {
+				counted[on] = packetsIn(await carriage.getStats());
+			} catch {
+				// A carriage closing under the read counts nothing this time, and is gone by
+				// the next.
+			}
+		}
+
+		const now = JSON.stringify(counted);
+		if (closed || now === saidCounted) return;
+		saidCounted = now;
+		say.beaconsCounted(counted);
+	}
+
+	const stopCounting = ticking(countTheBeacons, BEACONS_ARE_COUNTED_EVERY);
 
 	// This end of the ladder, merged the same way the server merges its two: green needs
 	// both, red needs one. A session that cannot receive is as unable to work as one that
@@ -233,6 +283,37 @@ export function openAudio({ say, onMediaPath }) {
 			for (const held of playing.values()) play(held);
 		},
 
+		/**
+		 * One loop's beacon, to count and never to play (ADR-0017).
+		 *
+		 * Built and then said to be built, like a talker's carriage and for the same reason:
+		 * the server holds it paused until it hears, and a packet sent to an end that does not
+		 * exist yet is one this end could never count.
+		 */
+		async oneMoreBeacon(beacon, on) {
+			if (closed || !receiving) return;
+
+			try {
+				const carriage = await receiving.consume(beacon);
+				counting.set(carriage.id, { carriage, on });
+
+				say.mediaHears(carriage.id);
+			} catch (why) {
+				// Nothing is counted on a carriage that could not be built, so the loop reads
+				// as not received — which is the truth about this end.
+				console.error('VoxLoop could not count a loop’s beacon', why);
+			}
+		},
+
+		/** That beacon's carriage is closed at the far end, and there is nothing left to count. */
+		oneFewerBeacon(carriage) {
+			const held = counting.get(carriage);
+			if (!held) return;
+
+			held.carriage.close();
+			counting.delete(carriage);
+		},
+
 		/** One fewer. The carriage is closed at the far end and there is nothing left to play. */
 		oneFewerTalker(carriage) {
 			const held = playing.get(carriage);
@@ -258,6 +339,9 @@ export function openAudio({ say, onMediaPath }) {
 		/** The session is over. Everything opened here goes with it. */
 		close() {
 			closed = true;
+			stopCounting();
+			for (const { carriage } of counting.values()) carriage.close();
+			counting.clear();
 			for (const { carriage, heard } of playing.values()) {
 				heard.pause();
 				heard.srcObject = null;
@@ -332,6 +416,28 @@ export function loudest(heardOn, loops) {
 	}
 
 	return gain;
+}
+
+/**
+ * How many packets have arrived on one carriage, from its receiver's statistics.
+ *
+ * **What arrived at this end's RTP receiver, and nothing else** (ADR-0017): the inbound stream's
+ * `packetsReceived`. The report carries the transport and the codec beside it, and a count
+ * taken off the transport would be every stream on the downlink rather than this one — which
+ * is the talker's audio standing in for the beacon, the substitution ADR-0017 is written
+ * against. A carriage nothing has arrived on yet has no inbound stream at all, and counts
+ * nothing.
+ *
+ * @param {Map<string, { type: string, packetsReceived?: number }>} report a receiver's
+ *   `RTCStatsReport`, or anything shaped like one
+ */
+export function packetsIn(report) {
+	let packets = 0;
+	for (const stat of report.values()) {
+		if (stat.type === 'inbound-rtp') packets += stat.packetsReceived ?? 0;
+	}
+
+	return packets;
 }
 
 /**

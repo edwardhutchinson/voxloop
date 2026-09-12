@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { loudest, theGain } from '../src/lib/audio.js';
+import { loudest, packetsIn, theGain } from '../src/lib/audio.js';
 
 // Three loops as the presence document carries them: one at unity, one turned down, one
 // turned all the way down.
@@ -93,4 +93,23 @@ test('priority lowers no other talker', () => {
 
 	assert.equal(theGain(['l-sim'], elsewhere), 0.2);
 	assert.equal(theGain(['l-thermal'], elsewhere), 0);
+});
+
+// **Loop health is counted here and judged at the server** (ADR-0017). What is counted is what
+// arrived at this end's RTP receiver for the beacon's carriage — `packetsReceived` on the
+// inbound stream — and nothing a browser reports about any other stream is added to it.
+test('a beacon is counted from what arrived on its inbound stream and nothing else', () => {
+	const report = new Map([
+		['in', { type: 'inbound-rtp', kind: 'audio', packetsReceived: 4 }],
+		['transport', { type: 'transport', packetsReceived: 900 }],
+		['codec', { type: 'codec', mimeType: 'audio/opus' }]
+	]);
+
+	assert.equal(packetsIn(report), 4);
+});
+
+// A carriage built a moment ago has no inbound stream in its report until the first packet
+// lands, and that is a count of nothing rather than a count nobody could read.
+test('a beacon nothing has arrived on yet counts nothing', () => {
+	assert.equal(packetsIn(new Map([['codec', { type: 'codec' }]])), 0);
 });

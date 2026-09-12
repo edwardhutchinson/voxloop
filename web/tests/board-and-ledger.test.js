@@ -34,6 +34,10 @@ const views = ['Board.svelte', 'Ledger.svelte'];
 //
 // `THERMAL` is monitored and muted, and `GNC` is monitored and turned down to 40% (#44). The
 // other loops are at unity, which is where every loop starts (v1 §10).
+//
+// **Loop health is per monitored loop** (#46): `THERMAL`'s beacon is arriving, muted or not,
+// and `GNC`'s is not — it is the loop that sounds exactly like a quiet one and must not look
+// like one. `FLIGHT` is not monitored, so there is no beacon to count and no health at all.
 const inReach = [
 	{
 		id: 'l-3',
@@ -43,7 +47,8 @@ const inReach = [
 		armed: false,
 		talking: false,
 		muted: true,
-		volume: 100
+		volume: 100,
+		health: 'receiving'
 	},
 	{
 		id: 'l-1',
@@ -53,7 +58,8 @@ const inReach = [
 		armed: true,
 		talking: true,
 		muted: false,
-		volume: 100
+		volume: 100,
+		health: null
 	},
 	{
 		id: 'l-2',
@@ -63,7 +69,8 @@ const inReach = [
 		armed: false,
 		talking: false,
 		muted: false,
-		volume: 40
+		volume: 40,
+		health: 'not-receiving'
 	}
 ];
 
@@ -278,7 +285,9 @@ test('nothing that renders the presence document keeps state of its own', async 
 
 // The console itself keeps these things, and each is named here so that one more has to be
 // argued for in a diff a reviewer reads. Which view is showing, and which loop's volume the
-// operator has opened, are facts about the reader;
+// operator has opened, are facts about the reader; whether this desk's audio output has moved
+// under the operator is a fact about the hardware in front of them, which no server can see
+// (ADR-0017);
 // the latch, the source that went while it was held, and a latch taken down by something
 // other than the operator are facts about the input on this desk, knowable here and true the
 // moment they are said (ADR-0016, ADR-0021, ADR-0018). Nothing about the world is among them
@@ -291,7 +300,7 @@ test('the operating console keeps only what is not the server’s to say', async
 
 	assert.deepEqual(
 		kept.toSorted(),
-		['bound', 'dropped', 'latchDropped', 'latched', 'showing', 'volumeOpenFor'],
+		['bound', 'dropped', 'latchDropped', 'latched', 'moved', 'showing', 'volumeOpenFor'],
 		'the console keeps a state of its own — every fact about the world is the server’s'
 	);
 });
@@ -1149,4 +1158,98 @@ test('the priority control is held, and has no latched state to show', async () 
 	assert.match(source, /onpointerup=\{onPriorityUp\}/);
 	assert.match(source, /onpointerleave=\{onPriorityUp\}/);
 	assert.doesNotMatch(source, /Unpriority|unprioritise/i);
+});
+
+// ---- #46: the loop beacon and loop health ---------------------------------------------------
+
+// **A quiet loop and an unreachable loop sound identical, so they must never look identical**
+// (v1 §6). A loop whose beacon is not arriving says so in both views, in words — a word on the
+// card and a sentence in the row — and never in colour alone.
+test('both views say a monitored loop is not being received, in words', async () => {
+	const [board, ledger] = await eachView(carrying);
+
+	assert.match(theCard(board, 'GNC'), />\s*Not receiving\s*</);
+	assert.match(
+		theRow(ledger, 'GNC'),
+		/Its beacon is not arriving, so you may not hear this loop even when somebody talks on it\./
+	);
+});
+
+// **The card carries no word for the ordinary case**, as it carries none for a loop at unity: a
+// word true of nearly every monitored card is one nobody reads, and the card is read at a
+// glance. The ledger is the reading view and says it on every monitored row — including a
+// muted one, because a mute is not an unsubscribe and the beacon keeps arriving.
+test('the ledger says a loop is reaching this console, and the card says nothing of it', async () => {
+	const [board, ledger] = await eachView(carrying);
+
+	assert.match(theRow(ledger, 'THERMAL'), /Its beacon is arriving, so this loop reaches you\./);
+	assert.doesNotMatch(theCard(board, 'THERMAL'), /receiving|Checking/i);
+});
+
+// A loop just taken up has not proved it reaches anybody yet. That is a measurement not yet
+// taken rather than a failure, and it is worded as one in both views.
+test('both views say a loop just taken up is being checked', async () => {
+	const checking = inReach.map((reachable) =>
+		reachable.name === 'GNC' ? { ...reachable, health: 'checking' } : reachable
+	);
+	const [board, ledger] = await eachView({ loops: checking, bar: theBar });
+
+	assert.match(theCard(board, 'GNC'), />\s*Checking\s*</);
+	assert.match(theRow(ledger, 'GNC'), /Checking that this loop reaches you\./);
+});
+
+// A loop nobody here monitors has no beacon being counted, so neither view says anything about
+// whether it is received — a word there would be the console inventing a measurement.
+test('neither view says anything of health on a loop it is not monitoring', async () => {
+	const [board, ledger] = await eachView(carrying);
+
+	for (const [at, found] of [theCard(board, 'FLIGHT'), theRow(ledger, 'FLIGHT')].entries()) {
+		assert.doesNotMatch(found, /receiving|reaches you|Checking|beacon/i, `${views[at]} on FLIGHT`);
+	}
+});
+
+// **Colour is never the only thing carrying a state** (`styling.md`), and loss is marked in the
+// warning colour through a class that names what it is rather than how it looks.
+test('a loop not being received is marked by what it is, in both views', async () => {
+	const [board, ledger] = await eachView(carrying);
+
+	assert.match(theCard(board, 'GNC'), /class="[^"]*\bunreceived\b/);
+	assert.match(theRow(ledger, 'GNC'), /class="[^"]*\bunreceived\b/);
+	assert.doesNotMatch(theCard(board, 'THERMAL'), /unreceived/);
+});
+
+// **The beacon proves audio reached the browser, not the operator's ears** (ADR-0017), so the
+// console asks them: a check tone at assume, offered before anything else is relied on.
+test('a console just assumed asks the operator to confirm they can hear a check tone', async () => {
+	const check = await rendered('OutputCheck.svelte');
+
+	assert.match(check, /<button[^>]*>\s*Play the check tone\s*<\/button>/);
+	assert.match(check, /Check that you can hear VoxLoop/);
+});
+
+// **Any change to the output is surfaced loudly** (ADR-0017): a default swapped under the
+// operator is named, an output unplugged is said, and both come with the way to check again.
+test('an output that moved is said aloud, with the way to check again', async () => {
+	const swapped = await rendered('OutputCheck.svelte', {
+		moved: { swapped: 'Default - Speakers' }
+	});
+	const unplugged = await rendered('OutputCheck.svelte', { moved: { removed: true } });
+
+	for (const said of [swapped, unplugged]) {
+		assert.match(said, /role="alert"/);
+		assert.match(said, /Play the check tone/);
+	}
+	assert.match(swapped, /Default - Speakers/);
+	assert.match(unplugged, /An audio output was unplugged/);
+});
+
+// One check, above both views rather than inside either, because it is about this desk's
+// hardware and not about any loop.
+test('the console holds one output check, above both views', async () => {
+	const source = read(join(lib, 'Console.svelte'));
+
+	assert.equal(source.match(/<OutputCheck\b/g)?.length, 1);
+	for (const view of views) {
+		assert.doesNotMatch(read(join(lib, view)), /OutputCheck/, `${view} holds a check of its own`);
+	}
 });

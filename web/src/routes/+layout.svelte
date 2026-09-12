@@ -177,7 +177,10 @@
 			onUplinkCarried: (carriage) => audio?.theUplinkIsCarried(carriage),
 			onOneMoreTalker: (talker, heardOn) => audio?.oneMoreTalker(talker, heardOn),
 			onHeardOn: (carriage, heardOn) => audio?.heardOn(carriage, heardOn),
-			onOneFewerTalker: (carriage) => audio?.oneFewerTalker(carriage)
+			onOneFewerTalker: (carriage) => audio?.oneFewerTalker(carriage),
+			// Each loop's beacon, which Audio counts and never plays (ADR-0017).
+			onOneMoreBeacon: (beacon, on) => audio?.oneMoreBeacon(beacon, on),
+			onOneFewerBeacon: (carriage) => audio?.oneFewerBeacon(carriage)
 		});
 
 		frame.assume = (role) => {

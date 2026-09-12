@@ -40,9 +40,10 @@
 
 	/* v1 §8: `0 hearing` renders in the warning colour, and the operator keys anyway if they
 	   mean to. It marks the lobby's frozen state too, where the signalling channel has gone
-	   and what is on screen is last-known rather than current (ADR-0018) — the same reading
-	   both times: *this is true and you should look at it*. Never the only thing carrying a
-	   state — the words are always there too. */
+	   and what is on screen is last-known rather than current (ADR-0018), and a loop whose
+	   beacon is not arriving (v1 §6) — the same reading every time: *this is true and you
+	   should look at it*. Never the only thing carrying a state — the words are always there
+	   too. */
 	--warning: #e8c07a;
 
 	color-scheme: dark;
@@ -181,6 +182,14 @@ th {
 .stale,
 .lost {
 	margin: 0 0 var(--space-4);
+	color: var(--warning);
+}
+
+/* A loop this console is not receiving: its beacon is not arriving (ADR-0017). A quiet loop
+   and an unreachable one sound identical, so this is what keeps them from looking identical —
+   in the warning colour, beside the words that say it. Furniture because the board and the
+   ledger both say it, and a state that renders in only one of them is a bug (v1 §8). */
+.unreceived {
 	color: var(--warning);
 }
 

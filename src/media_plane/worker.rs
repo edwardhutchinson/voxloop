@@ -38,14 +38,15 @@ use std::sync::{Arc, Mutex};
 
 use mediasoup::audio_level_observer::{AudioLevelObserver, AudioLevelObserverOptions};
 use mediasoup::consumer::{Consumer, ConsumerOptions};
+use mediasoup::direct_transport::{DirectTransport, DirectTransportOptions};
 use mediasoup::producer::{Producer, ProducerId, ProducerOptions};
 use mediasoup::router::{Router, RouterOptions};
 use mediasoup::rtp_observer::{RtpObserver, RtpObserverAddProducerOptions};
 use mediasoup::transport::Transport;
 use mediasoup::types::data_structures::{DtlsState, IceState, ListenInfo, Protocol};
 use mediasoup::types::rtp_parameters::{
-    MediaKind, MimeTypeAudio, RtpCapabilities, RtpCodecCapability, RtpCodecParametersParameters,
-    RtpParameters,
+    MediaKind, MimeTypeAudio, RtpCapabilities, RtpCodecCapability, RtpCodecParameters,
+    RtpCodecParametersParameters, RtpEncodingParameters, RtpParameters,
 };
 use mediasoup::webrtc_server::{WebRtcServer, WebRtcServerListenInfos, WebRtcServerOptions};
 use mediasoup::webrtc_transport::{
@@ -60,7 +61,7 @@ use super::{
     Audience, Carriage, Carried, Destination, MediaPlaneError, Negotiated, Negotiation, Reported,
     Reporting, Reports, Telling, Way,
 };
-use crate::state::{MediaPath, SessionId};
+use crate::state::{MediaPath, SessionId, THE_BEACON_SOUNDS_EVERY};
 use crate::telemetry::module;
 
 /// Opus, 48 kHz, 20 ms frames, inband FEC and DTX both on ([ADR-0010]).
@@ -119,6 +120,11 @@ enum Instruction {
     Hear {
         talker: SessionId,
         audience: Audience,
+    },
+    Beacons(Vec<Destination>),
+    Count {
+        listener: SessionId,
+        on: Vec<Destination>,
     },
 }
 
@@ -216,6 +222,18 @@ pub(super) async fn start(
     let speaking = Arc::new(Mutex::new(HashMap::new()));
     let observer = watching_who_is_audible(&router, &speaking, &reporting).await?;
 
+    // **Where every loop's beacon is produced from** (ADR-0017). A direct transport is one the
+    // Rust side sends on itself, so the beacon originates on this server and crosses the same
+    // router and the same per-loop fan-out that speech does — which is what makes its arrival
+    // a measurement of the loop rather than of a side channel. It is one transport for every
+    // beacon because a beacon is a producer, not a path.
+    let beacons_on = router
+        .create_direct_transport(DirectTransportOptions::default())
+        .await
+        .map_err(|error| MediaPlaneError::Router {
+            detail: error.to_string(),
+        })?;
+
     tracing::info!(
         target: module::MEDIA_PLANE,
         announced = %media.announced_address,
@@ -231,6 +249,7 @@ pub(super) async fn start(
             router,
             server,
             observer,
+            beacons_on,
         },
         Speaking(speaking),
         reporting,
@@ -358,6 +377,8 @@ struct Owned {
     router: Router,
     server: WebRtcServer,
     observer: AudioLevelObserver,
+    /// What every loop's beacon is produced on. Nothing on it is ever added to `observer`.
+    beacons_on: DirectTransport,
 }
 
 /// Which session each uplink belongs to, shared with the observer's callback.
@@ -407,6 +428,8 @@ struct Path {
     /// One carriage per audible talker, which is what makes the downlink per talker rather
     /// than per (talker, loop).
     hearing: HashMap<SessionId, Heard>,
+    /// One carriage per loop whose beacon this session counts, and never per (loop, talker).
+    counting: HashMap<Destination, Consumer>,
 }
 
 /// One carriage, and the destinations its client was last told it is heard on.
@@ -431,6 +454,16 @@ impl Path {
         if let Some(heard) = self.hearing.remove(talker) {
             let _ = self.telling.send(Negotiated::OneFewerTalker(Carried(
                 heard.carriage.id().to_string(),
+            )));
+        }
+    }
+
+    /// Stop carrying one loop's beacon to this session, and say so — the beacon's half of
+    /// [`Path::stop_hearing`], for the same reason.
+    fn stop_counting(&mut self, on: &Destination) {
+        if let Some(carriage) = self.counting.remove(on) {
+            let _ = self.telling.send(Negotiated::OneFewerBeacon(Carried(
+                carriage.id().to_string(),
             )));
         }
     }
@@ -467,6 +500,70 @@ struct Paths {
     ///
     /// [ADR-0063]: ../../docs/adr/0063-the-media-plane-executes-routing-it-never-computes-it.md
     audiences: HashMap<SessionId, Audience>,
+    /// Every loop's beacon, by the label the loop was handed down as.
+    beacons: HashMap<Destination, Beacon>,
+    /// The last set of beacons each listener was said to count — a memory of an instruction
+    /// for exactly the reason `audiences` is one, replayed when a listener says what it can
+    /// decode and when a beacon it was already meant to count comes into being.
+    counting: HashMap<SessionId, Vec<Destination>>,
+    /// The synchronisation source the next beacon is given. Every beacon is produced on the
+    /// one direct transport, which tells its producers apart by this, so no two may share one.
+    next_ssrc: u32,
+}
+
+/// One loop's beacon: a producer on the direct transport, and where its stream has got to.
+///
+/// **It is silent** ([ADR-0017]): every packet carries Opus's own silence frame. A faintly
+/// audible beacon is a rendering choice over the same packets and v1 does not make it, and
+/// nothing plays one anyway — the client counts a beacon and never mixes it.
+///
+/// [ADR-0017]: ../../docs/adr/0017-loop-health-is-measured-not-asserted.md
+struct Beacon {
+    producer: Producer,
+    ssrc: u32,
+    sequence: u16,
+    timestamp: u32,
+}
+
+/// The payload type a beacon is produced under. It is the producer's own number on the direct
+/// transport and is rewritten for each carriage, so it only has to agree with itself.
+const THE_BEACON_PAYLOAD_TYPE: u8 = 100;
+
+/// Opus's silence frame: one 20 ms CELT frame at full band, mono, decoding to nothing.
+const OPUS_SILENCE: [u8; 3] = [0xf8, 0xff, 0xfe];
+
+impl Beacon {
+    /// Sound once: one silent packet, stamped on from the last.
+    fn sound(&mut self) {
+        let packet = a_silent_packet(self.sequence, self.timestamp, self.ssrc);
+        self.sequence = self.sequence.wrapping_add(1);
+        // The clock the packet says it was sampled on moves by as long as the beacon was
+        // silent for, so a receiver reads one packet an interval rather than a burst.
+        self.timestamp = self
+            .timestamp
+            .wrapping_add(48_000 * THE_BEACON_SOUNDS_EVERY.as_secs() as u32);
+
+        if let Producer::Direct(direct) = &self.producer
+            && let Err(error) = direct.send(packet)
+        {
+            tracing::warn!(
+                target: module::MEDIA_PLANE,
+                %error,
+                "a beacon did not sound, so every loop reads as not received until it does"
+            );
+        }
+    }
+}
+
+/// One RTP packet, version 2, no padding, no extension, no marker, carrying Opus silence.
+fn a_silent_packet(sequence: u16, timestamp: u32, ssrc: u32) -> Vec<u8> {
+    let mut packet = vec![0x80, THE_BEACON_PAYLOAD_TYPE];
+    packet.extend_from_slice(&sequence.to_be_bytes());
+    packet.extend_from_slice(&timestamp.to_be_bytes());
+    packet.extend_from_slice(&ssrc.to_be_bytes());
+    packet.extend_from_slice(&OPUS_SILENCE);
+
+    packet
 }
 
 /// Everything mediasoup owns, in one place, taking instructions until there are none left.
@@ -488,9 +585,32 @@ async fn carry(
     let mut held = Paths {
         paths: HashMap::new(),
         audiences: HashMap::new(),
+        beacons: HashMap::new(),
+        counting: HashMap::new(),
+        next_ssrc: 1,
     };
 
-    while let Some(instruction) = taking.recv().await {
+    // **The beacons sound on this task's own clock**, between instructions rather than beside
+    // them, because this task is the only thing that may touch a producer. A beacon waiting
+    // behind a transport being built is waiting a local round trip, which the window it is
+    // measured against was sized to absorb many times over.
+    let mut sounding = tokio::time::interval(THE_BEACON_SOUNDS_EVERY);
+    sounding.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        let instruction = tokio::select! {
+            instruction = taking.recv() => match instruction {
+                Some(instruction) => instruction,
+                None => break,
+            },
+            _ = sounding.tick() => {
+                for beacon in held.beacons.values_mut() {
+                    beacon.sound();
+                }
+                continue;
+            }
+        };
+
         match instruction {
             Instruction::Open { session, telling } => {
                 match open(
@@ -524,6 +644,7 @@ async fn carry(
                 // on them go too. There is nothing to await and nothing that can fail.
                 held.paths.remove(&session);
                 held.audiences.remove(&session);
+                held.counting.remove(&session);
                 speaking.no_longer(&session);
                 // **Everybody hearing this talker is told.** Their carriage is closed at this
                 // end by the producer going, and a client left holding one it will never be
@@ -540,6 +661,9 @@ async fn carry(
                     }
                     // Whatever this session was already meant to hear, now that it can.
                     carry_what_was_already_said(&owned.router, &mut held, &session).await;
+                    if let Some(on) = held.counting.get(&session).cloned() {
+                        these_count(&owned.router, &mut held, &session, &on).await;
+                    }
                 }
             }
             Instruction::Connect { session, way, keys } => {
@@ -558,7 +682,176 @@ async fn carry(
                 held.audiences.insert(talker.clone(), audience.clone());
                 these_hear(&owned.router, &mut held, &talker, &audience).await;
             }
+            Instruction::Beacons(loops) => {
+                every_loop_runs_a_beacon(&owned, &mut held, &loops).await;
+            }
+            Instruction::Count { listener, on } => {
+                held.counting.insert(listener.clone(), on.clone());
+                these_count(&owned.router, &mut held, &listener, &on).await;
+            }
         }
+    }
+}
+
+/// Make exactly these loops run beacons: start one for each loop that has none, and stop the
+/// beacon of each loop no longer named, with every carriage of it.
+///
+/// **A loop nobody counts runs its beacon all the same** (ADR-0017). It is started here, when
+/// the loop is named, rather than when somebody first counts it — otherwise the mechanism
+/// would be unavailable at exactly the moment somebody subscribes.
+///
+/// **Nothing here reaches the `AudioLevelObserver`**, and nothing here could reach the
+/// recording tap: a beacon is not a session's uplink, so it is never in `Speaking` and never
+/// a talker in an audience. Letting it into either would register a permanent talker on
+/// every loop and a permanent signal in every recording.
+async fn every_loop_runs_a_beacon(owned: &Owned, held: &mut Paths, loops: &[Destination]) {
+    let gone: Vec<Destination> = held
+        .beacons
+        .keys()
+        .filter(|running| !loops.contains(running))
+        .cloned()
+        .collect();
+    for loop_gone in &gone {
+        held.beacons.remove(loop_gone);
+        for path in held.paths.values_mut() {
+            path.stop_counting(loop_gone);
+        }
+        // And it is forgotten as something anybody was told to count, so what is remembered
+        // stays what was instructed **of the loops there are**. Keeping it would leave a
+        // destination in here that nothing can ever satisfy, which is a memory of an
+        // instruction quietly becoming a superset of one.
+        for counted in held.counting.values_mut() {
+            counted.retain(|named| named != loop_gone);
+        }
+    }
+
+    for named in loops {
+        if held.beacons.contains_key(named) {
+            continue;
+        }
+
+        let ssrc = held.next_ssrc;
+        held.next_ssrc = held.next_ssrc.wrapping_add(1);
+        match owned
+            .beacons_on
+            .produce(ProducerOptions::new(
+                MediaKind::Audio,
+                what_a_beacon_sends(ssrc),
+            ))
+            .await
+        {
+            Ok(producer) => {
+                held.beacons.insert(
+                    named.clone(),
+                    Beacon {
+                        producer,
+                        ssrc,
+                        sequence: 0,
+                        timestamp: 0,
+                    },
+                );
+            }
+            Err(error) => tracing::error!(
+                target: module::MEDIA_PLANE,
+                %error,
+                "a loop has no beacon, so everybody monitoring it will read it as not received"
+            ),
+        }
+    }
+
+    // Whoever was already meant to count a beacon that has just come into being.
+    let already: Vec<(SessionId, Vec<Destination>)> = held
+        .counting
+        .iter()
+        .map(|(listener, on)| (listener.clone(), on.clone()))
+        .collect();
+    for (listener, on) in already {
+        these_count(&owned.router, held, &listener, &on).await;
+    }
+}
+
+/// What a beacon's producer says it is sending: Opus, under one synchronisation source.
+///
+/// One per beacon, because every beacon is produced on the one direct transport and a
+/// transport tells its producers apart by exactly this.
+fn what_a_beacon_sends(ssrc: u32) -> RtpParameters {
+    RtpParameters {
+        codecs: vec![RtpCodecParameters::Audio {
+            mime_type: MimeTypeAudio::Opus,
+            payload_type: THE_BEACON_PAYLOAD_TYPE,
+            clock_rate: NonZeroU32::new(48_000).expect("48000 is not zero"),
+            channels: NonZeroU8::new(2).expect("2 is not zero"),
+            parameters: RtpCodecParametersParameters::default(),
+            rtcp_feedback: Vec::new(),
+        }],
+        encodings: vec![RtpEncodingParameters {
+            ssrc: Some(ssrc),
+            ..RtpEncodingParameters::default()
+        }],
+        ..RtpParameters::default()
+    }
+}
+
+/// Make exactly these beacons reach this listener: a carriage for each loop named that it does
+/// not have yet, and none for any loop it was not named on.
+///
+/// It is the same reconciliation [`these_hear`] does for a talker, over loops rather than
+/// talkers — and it is **one carriage per loop**, never per (loop, talker) (v1 §16).
+async fn these_count(router: &Router, held: &mut Paths, listener: &SessionId, on: &[Destination]) {
+    let Some(path) = held.paths.get_mut(listener) else {
+        return;
+    };
+    let stale: Vec<Destination> = path
+        .counting
+        .keys()
+        .filter(|counted| !on.contains(counted))
+        .cloned()
+        .collect();
+    for loop_dropped in &stale {
+        path.stop_counting(loop_dropped);
+    }
+
+    for named in on {
+        one_more_beacon(router, held, listener, named).await;
+    }
+}
+
+/// Give one listener a carriage of one loop's beacon, where they do not have one already.
+///
+/// Built **paused**, like a talker's, and resumed when the client says it has built its end:
+/// a beacon sent to an end that does not exist yet is a packet the client cannot count, and
+/// the loop would read as not received for no reason but the order things were built in.
+async fn one_more_beacon(
+    router: &Router,
+    held: &mut Paths,
+    listener: &SessionId,
+    on: &Destination,
+) {
+    let Some(beacon) = held.beacons.get(on).map(|beacon| beacon.producer.id()) else {
+        // The loop has no beacon yet. The instruction is kept and replayed when it has.
+        return;
+    };
+    let Some(path) = held.paths.get(listener) else {
+        return;
+    };
+    if path.counting.contains_key(on) {
+        return;
+    }
+
+    let Some((carriage, what_to_build)) =
+        a_paused_carriage(router, path, listener, beacon, "a loop's beacon").await
+    else {
+        // Nothing is counted on a carriage that was not built, so the loop reads as not
+        // received — which is the truth about that listener.
+        return;
+    };
+
+    if let Some(path) = held.paths.get_mut(listener) {
+        let _ = path.telling.send(Negotiated::OneMoreBeacon {
+            beacon: what_to_build,
+            on: on.clone(),
+        });
+        path.counting.insert(on.clone(), carriage);
     }
 }
 
@@ -640,6 +933,7 @@ async fn open(
         can_decode: None,
         producer: None,
         hearing: HashMap::new(),
+        counting: HashMap::new(),
     })
 }
 
@@ -912,24 +1206,56 @@ async fn one_more_talker(
     if path.hearing.contains_key(talker) {
         return;
     }
-    let Some(can_decode) = path.can_decode.clone() else {
-        // The client has not said what it can decode yet. The answer is kept and replayed
-        // when it does.
+
+    let Some((carriage, what_to_build)) =
+        a_paused_carriage(router, path, listener, uplink, "a talker").await
+    else {
         return;
     };
-    if !router.can_consume(&uplink, &can_decode) {
+
+    if let Some(path) = held.paths.get_mut(listener) {
+        let _ = path.telling.send(Negotiated::OneMoreTalker {
+            talker: what_to_build,
+            heard_on: on.clone(),
+        });
+        path.hearing.insert(talker.clone(), Heard { carriage, on });
+    }
+}
+
+/// Build one paused carriage on this listener's downlink, and what their client needs in order
+/// to build the far end of it.
+///
+/// **The two things a listener is sent are built exactly alike**, and this is that shape
+/// written once: what the client says it can decode is checked against what it would be sent,
+/// the carriage is built **paused**, and the description goes back for the client to answer.
+///
+/// What differs stays with the callers, because it is the only part that is not this: what the
+/// carriage is filed under — a talker, or a loop — and which message says so. `carrying` is for
+/// the log, so that a carriage that could not be built says which of the two it was.
+async fn a_paused_carriage(
+    router: &Router,
+    path: &Path,
+    listener: &SessionId,
+    of: ProducerId,
+    carrying: &'static str,
+) -> Option<(Consumer, Negotiation)> {
+    // Nothing where the client has not said what it can decode yet: the answer is kept above
+    // and replayed when it does.
+    let can_decode = path.can_decode.clone()?;
+    if !router.can_consume(&of, &can_decode) {
         tracing::warn!(
             target: module::MEDIA_PLANE,
             listener = listener.as_str(),
+            carrying,
             "a client cannot decode what this deployment carries, and will hear nothing"
         );
-        return;
+        return None;
     }
-    let downlink = path.down.clone();
 
-    let carriage = match downlink
+    let carriage = match path
+        .down
         .consume({
-            let mut options = ConsumerOptions::new(uplink, can_decode);
+            let mut options = ConsumerOptions::new(of, can_decode);
             options.paused = true;
             options
         })
@@ -941,9 +1267,10 @@ async fn one_more_talker(
                 target: module::MEDIA_PLANE,
                 %error,
                 listener = listener.as_str(),
-                "a carriage could not be built, so somebody is not hearing a talker"
+                carrying,
+                "a carriage could not be built, so a listener is not being sent something"
             );
-            return;
+            return None;
         }
     };
 
@@ -954,13 +1281,7 @@ async fn one_more_talker(
         "rtpParameters": carriage.rtp_parameters(),
     });
 
-    if let Some(path) = held.paths.get_mut(listener) {
-        let _ = path.telling.send(Negotiated::OneMoreTalker {
-            talker: Negotiation::presented(what_to_build),
-            heard_on: on.clone(),
-        });
-        path.hearing.insert(talker.clone(), Heard { carriage, on });
-    }
+    Some((carriage, Negotiation::presented(what_to_build)))
 }
 
 /// Nobody hears this talker any more, because there is no longer a talker to hear.
@@ -980,6 +1301,7 @@ async fn resume(held: &Paths, session: &SessionId, carriage: &Carried) {
         .hearing
         .values()
         .map(|heard| &heard.carriage)
+        .chain(path.counting.values())
         .find(|held| held.id().to_string() == carriage.0)
     else {
         // A name for a carriage this session is not being sent audio on. It is stale rather
@@ -1147,6 +1469,17 @@ impl Carriage for Carrying {
             audience: audience.clone(),
         });
     }
+
+    fn these_loops_run_beacons(&self, loops: &[Destination]) {
+        self.tell(Instruction::Beacons(loops.to_vec()));
+    }
+
+    fn these_beacons_reach(&self, listener: &SessionId, on: &[Destination]) {
+        self.tell(Instruction::Count {
+            listener: listener.clone(),
+            on: on.to_vec(),
+        });
+    }
 }
 
 impl Carrying {
@@ -1238,6 +1571,41 @@ mod tests {
         // the one router and the one port, rather than anything per loop (ADR-0007).
         assert_ne!(offer["up"]["id"], offer["down"]["id"]);
 
+        // **A loop runs its beacon whether or not anybody counts it** (ADR-0017), and a
+        // session monitoring it is carried one carriage of it — built paused, named by the
+        // loop it measures, and on the session's own channel like everything else. What the
+        // client can decode is the router's own offer read back, which is what a browser's
+        // library would say after loading it.
+        let flight = Destination::labelled("flight".to_owned());
+        carrying.these_loops_run_beacons(std::slice::from_ref(&flight));
+        carrying.the_client_will_hear(&session, Negotiation::presented(offer["router"].clone()));
+        carrying.these_beacons_reach(&session, std::slice::from_ref(&flight));
+
+        let beacon = tokio::time::timeout(std::time::Duration::from_secs(10), told.recv())
+            .await
+            .expect("the beacon to be carried within ten seconds")
+            .expect("a beacon");
+        let Negotiated::OneMoreBeacon {
+            beacon: Negotiation(beacon),
+            on,
+        } = beacon
+        else {
+            panic!("a session monitoring a loop was not carried its beacon: {beacon:?}");
+        };
+        assert_eq!(on, flight);
+        assert_eq!(beacon["kind"], "audio");
+
+        // And the loop leaving the set takes its beacon, and the carriage of it, with it.
+        carrying.these_loops_run_beacons(&[]);
+        let gone = tokio::time::timeout(std::time::Duration::from_secs(10), told.recv())
+            .await
+            .expect("the beacon to go within ten seconds")
+            .expect("something said");
+        assert_eq!(
+            gone,
+            Negotiated::OneFewerBeacon(Carried(beacon["id"].as_str().expect("an id").to_owned()))
+        );
+
         // And it goes when the session does, with nothing to await and nothing to check.
         carrying.close_the_path_of(&session);
         carriageway.stop();
@@ -1283,6 +1651,27 @@ mod tests {
         // mediasoup has no `failed`, and its `disconnected` is thirty seconds of ICE consent
         // freshness — old news by the time it lands, so it is taken at its worst.
         assert_eq!(from_ice(IceState::Disconnected), MediaPath::Lost);
+    }
+
+    /// **A beacon is one silent RTP packet**, stamped on from the last: version 2, the
+    /// beacon's own payload type, its own synchronisation source, and Opus's silence frame as
+    /// the whole of the payload. Nothing in it could register as a voice.
+    #[test]
+    fn a_beacon_sounds_one_silent_packet_at_a_time() {
+        let packet = a_silent_packet(7, 240_000, 42);
+
+        assert_eq!(
+            packet[0], 0x80,
+            "not RTP version 2, or carrying padding or extensions"
+        );
+        assert_eq!(
+            packet[1], THE_BEACON_PAYLOAD_TYPE,
+            "marked, or under another type"
+        );
+        assert_eq!(&packet[2..4], &7_u16.to_be_bytes());
+        assert_eq!(&packet[4..8], &240_000_u32.to_be_bytes());
+        assert_eq!(&packet[8..12], &42_u32.to_be_bytes());
+        assert_eq!(&packet[12..], &OPUS_SILENCE);
     }
 
     /// A deployment asking for a port is given that port; one asking for nothing in
