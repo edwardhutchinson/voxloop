@@ -119,7 +119,7 @@ The staffing state of a loop whose staffing-role occupants exist but none is hea
 _Avoid_: idle, AFK, unavailable
 
 **Off console**:
-A user's assertion that they have stepped away. It drops the staffing state of the loops they staff to `away` and changes nothing else — subscriptions stand and audio keeps flowing. It is never inferred — not from idleness, focus or mouse movement — and it is cleared only by a deliberate act, either keying or clearing the assertion explicitly.
+A user's assertion that they have stepped away, and the one asserted state there is. It drops the staffing state of the loops they staff to `away` and changes nothing else — subscriptions stand and audio keeps flowing. It is never inferred — not from idleness, focus or mouse movement — and it is cleared by **any** deliberate act: keying, changing a subscription or an arm, answering a prompt, dismissing a banner, or saying so outright. It is never remembered across an assume, and it is always shown against how long ago the claimant was last active.
 _Avoid_: away (which is the resulting loop state, not the act), idle, AFK, break
 
 ### Authority
@@ -235,10 +235,6 @@ _Avoid_: known state, verified state, real state
 **Asserted state**:
 A claim a user has made about themselves, of which there is exactly one: off console. It is only ever as true as the moment it was asserted, so it is always shown alongside how long ago the claimant last did anything deliberate. It is never inferred and never rendered like observed state.
 _Avoid_: reported state, self-reported, declared status
-
-**Off console**:
-The one asserted state: a user's own claim that they are not in the chair. It is set and cleared only by the person it is about, and cleared by any deliberate act — keying, changing a subscription or an arm, answering a prompt, dismissing a banner — never by mouse movement, scroll or focus, and never inferred from idleness. Declaring it drops the staffing state of the loops the claimant's role staffs to `away` and changes nothing else: subscriptions stand and audio keeps flowing. It is never remembered across an assume.
-_Avoid_: away (which is a loop's staffing state rather than a person's claim), idle, AFK, busy, status, do not disturb
 
 **Last active**:
 How long ago a session last did something deliberate — an observed fact, recorded per session, and the thing an off-console assertion is always shown against. Nothing the machine does moves it: a heartbeat, a media path report and a beacon count are a tab reporting on itself, not a person at a desk.

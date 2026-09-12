@@ -474,7 +474,7 @@ test('saying you are off console and saying you are back are two things a tab sa
 	lastSocket().happens('open');
 
 	channel.offConsole();
-	channel.onConsole();
+	channel.backOnConsole();
 
 	assert.deepEqual(lastSocket().sent.slice(1), [
 		'{"message":"off-console"}',

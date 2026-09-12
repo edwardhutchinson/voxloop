@@ -375,8 +375,11 @@ and there is exactly one of those: **off console**.
 
 **It is set and cleared by hand, and never inferred.** Idle-based auto-away is rejected
 outright — an operator watching telemetry is idle at the keyboard and very much on console —
-so there is no idle timer anywhere in the product, and `npm test` refuses `mousemove`,
-`scroll`, `focus` and `visibilitychange` across the whole console for that reason.
+so there is no idle timer anywhere in the product, and `web/tests/idleness.test.js` sweeps
+every source file for `mousemove`, `scroll`, `focus`, `visibilitychange` and their neighbours
+— in both the `addEventListener` spelling and the attribute one — for that reason. `blur` is
+excluded and named: the keyboard source releases a key held when the window goes, because no
+key-up is coming for it, and *is this key down* is not *is somebody there*.
 
 **Any deliberate act clears it.** Keying, changing a subscription, changing an arm, answering
 a prompt, dismissing a banner: each of those is a person acting on a console, and each of them
@@ -392,6 +395,13 @@ last did anything deliberate — so there is no rendering in which the claim app
 console draws it in words that say who said it (*You said you are off console. Last active 14
 min ago.*) inside a dashed outline nothing observed wears, above both views, because it is
 about the person in the chair rather than about any loop.
+
+**The age is shown against the claim and nowhere else.** ADR-0016's own sentence is *"on
+console, last active 14 min ago"*, which reads as an age on both sides; what it asks for in
+its Consequences is the narrower thing — *"it is displayed against asserted state, which is
+the only state that needs it"* — and that is what v1 §6 and this ticket's acceptance criteria
+require. An operator is not told how long they have been sitting still, because nothing turns
+on it while they are there.
 
 **This is the one running age in the document.** The connection's age belongs to the console,
 because a session that hears nothing is told nothing; this one belongs to the server, because

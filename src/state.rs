@@ -662,7 +662,18 @@ impl Session {
     /// [ADR-0016]: ../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
     fn asserted(&self, now: Instant) -> Option<Asserted> {
         self.off_console.then(|| Asserted {
-            last_active: now.saturating_duration_since(self.last_active),
+            // **Whole seconds, because the document's version moves when this does.** The age
+            // is genuinely part of the state — a claim and how old its evidence is are one
+            // answer — so a full-precision duration here would make every 200 ms tick a new
+            // version carrying byte-identical JSON, and *is this the same state* is the one
+            // question versioning answers ([ADR-0019]). Seconds is also the resolution the
+            // wire carries and the console renders, so nothing is lost by rounding here
+            // rather than at the edge.
+            //
+            // [ADR-0019]: ../../docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md
+            last_active: Duration::from_secs(
+                now.saturating_duration_since(self.last_active).as_secs(),
+            ),
         })
     }
 
@@ -4840,6 +4851,34 @@ mod tests {
 
         let asserted = asserted_by(&live, &session).expect("the assertion");
         assert_eq!(asserted.last_active.as_secs(), 14 * 60);
+    }
+
+    /// **The version moves when the age does and not five times a second** ([ADR-0019]). The
+    /// age is part of the state, so the document does move while an assertion stands — once a
+    /// second, which is the resolution the age is carried at, rather than on every tick with
+    /// nothing to show for it.
+    #[tokio::test]
+    async fn the_version_moves_with_the_age_once_a_second_and_not_every_tick() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        live.off_console(&session);
+
+        live.last_active_was(&session, Duration::from_secs(5));
+        let (first, _) = live.presence(&session, Vec::new()).expect("a document");
+        live.last_active_was(&session, Duration::from_millis(5_400));
+        let (within_the_same_second, _) = live.presence(&session, Vec::new()).expect("a document");
+        live.last_active_was(&session, Duration::from_secs(6));
+        let (a_second_later, _) = live.presence(&session, Vec::new()).expect("a document");
+
+        assert_eq!(
+            within_the_same_second, first,
+            "the version moved for an age the document does not carry"
+        );
+        assert!(
+            a_second_later > first,
+            "the age moved and the version did not"
+        );
     }
 
     /// **A stale assertion is still shown, with its age** (v1 §6). Nothing expires it and

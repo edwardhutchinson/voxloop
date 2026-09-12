@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { join } from 'node:path';
-import { named, read, src, under } from './console.js';
+import { read, src } from './console.js';
 import { rendered } from './render.js';
 
 const lib = join(src, 'lib');
@@ -1323,28 +1323,4 @@ test('the assertion is above both views rather than inside either', async () => 
 			`${view} draws the assertion itself — there is one of it, above both views`
 		);
 	}
-});
-
-// **VoxLoop never guesses whether a human is in the chair** (ADR-0016). Idle-based auto-away
-// is rejected outright, and this is where that is enforced rather than remembered: an
-// operator watching telemetry is idle at the keyboard and very much on console, and mouse
-// movement, scroll and focus are the machine reporting that a page exists.
-//
-// `blur` is excluded and named: the keyboard source releases a key held when the window goes,
-// because there is no key-up coming for it. That is Input answering *is this key down*, which
-// is not *is somebody there* and never reaches this.
-test('nothing in the console infers off console from idleness', () => {
-	const watching = /'(mousemove|mouseover|mouseenter|pointermove|scroll|visibilitychange|focus)'/;
-
-	for (const path of under(/\.(svelte|js)$/)) {
-		assert.doesNotMatch(
-			read(path),
-			watching,
-			`${named(path)} watches for activity — off console is asserted and never inferred`
-		);
-	}
-
-	// And the claim is made by a hand on a control: there is no clock anywhere near it.
-	const source = read(join(lib, 'OffConsole.svelte'));
-	assert.doesNotMatch(source, /setTimeout|setInterval|Date\.now/);
 });

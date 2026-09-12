@@ -33,6 +33,12 @@
 	// number away. It is not this tab's clock: the acts it is measured from arrive at the
 	// server, and a console counting its own would be a second answer to a question that
 	// already has one (ADR-0016).
+	//
+	// It rolls up to minutes and hours where the connection's age above it does not, and that
+	// is the difference between the two facts rather than an inconsistency to tidy away: a
+	// channel is measured in seconds and is acted on within seconds, and this is measured in
+	// the length of a tea break. `300 s ago` is the right reading of one and the wrong reading
+	// of the other.
 	function howLongAgo(seconds) {
 		if (seconds < 60) return `${seconds} s ago`;
 		if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
@@ -54,10 +60,14 @@
 			     line on the page, and it is said first. -->
 			You said you are off console. Last active {howLongAgo(asserted.last_active_seconds)}.
 		</p>
+		<!-- **What it says is what is true today.** Declaring this drops the staffing state of
+		     the loops your role staffs to `away` — and staffing state does not exist yet (#48),
+		     so the sentence that says so lands with it. A console explaining a consequence
+		     nothing has yet is the class of lie this product exists to avoid, and it is not
+		     made safe by being about the future. -->
 		<p class="quiet">
 			VoxLoop cannot see whether you are at your desk — this is what you told it, not something it
-			has seen. Your loops are still open and audio is still playing. Loops your role staffs read as
-			away until you are back.
+			has seen. Your loops are still open and audio is still playing.
 		</p>
 		<button onclick={onBackOnConsole}>I am back on console</button>
 	</div>

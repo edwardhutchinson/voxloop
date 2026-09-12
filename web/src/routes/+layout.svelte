@@ -231,7 +231,7 @@
 		};
 		frame.backOnConsole = () => {
 			frame.refused = null;
-			channel.onConsole();
+			channel.backOnConsole();
 		};
 		// **The track first, the signal second** (ADR-0008). The client is the one entitled to
 		// key, because it is the one that can do it without a round trip; the server is the
