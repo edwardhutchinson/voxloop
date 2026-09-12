@@ -575,11 +575,11 @@ struct Session {
     /// **It costs one flag on the update**, which is the whole of the mechanism: the server
     /// applies both kinds of change and is the one thing that knows which is which.
     ///
-    /// It stands until the operator does something deliberate, which is the rule the one
-    /// asserted state is already cleared by ([ADR-0016]): an act on this console is the
-    /// evidence that the person at it has read what is on it. There is deliberately no
-    /// dismissal of its own — a mark that had to be clicked away would be a second control on
-    /// the strip an operator reads in the second before keying.
+    /// It stands until the operator does something that shows they have read the console, which
+    /// is the kind of evidence the one asserted state is already cleared by ([ADR-0016]) —
+    /// [`StateAuthority::the_mark_is_answered`], and deliberately not quite the same set of
+    /// acts. There is no dismissal of its own: a mark that had to be clicked away would be a
+    /// second control on the strip an operator reads in the second before keying.
     ///
     /// [ADR-0016]: ../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
     /// [ADR-0058]: ../../docs/adr/0058-the-transmit-bar-is-live-while-keyed.md
@@ -1881,14 +1881,31 @@ impl StateAuthority {
         self.write(|live| {
             if let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) {
                 held.off_console = false;
-                // **The mark on an arm set somebody else moved is answered the same way**
-                // ([ADR-0058]): the operator has acted on this console, so they have read
-                // what is on it. It is the same evidence the assertion above is cleared by,
-                // and it is deliberately not a dismissal of its own.
-                //
-                // [ADR-0058]: ../../docs/adr/0058-the-transmit-bar-is-live-while-keyed.md
-                held.arms_moved_elsewhere = false;
                 held.last_active = Instant::now();
+            }
+        });
+    }
+
+    /// The operator has done something that shows they have read what is on their console, so
+    /// the mark on an arm set somebody else moved comes off.
+    ///
+    /// **It is the same kind of evidence the one asserted state is cleared by** ([ADR-0016])
+    /// and deliberately not the same set of acts: a key going **up** is a hand letting go of
+    /// something it was already holding, and the operator the mark was raised for — the one
+    /// an administrator pulled a cell out from under mid-sentence — sends exactly that message
+    /// next. Which acts count is Transport's ruling, because the messages are Transport's.
+    ///
+    /// There is no dismissal of its own. A mark that had to be clicked away would be a second
+    /// control on the strip an operator reads in the second before keying, and the act that
+    /// answers it is one they were going to take anyway.
+    ///
+    /// Nothing where the id names no session.
+    ///
+    /// [ADR-0016]: ../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+    pub(crate) fn the_mark_is_answered(&self, session: &SessionId) {
+        self.write(|live| {
+            if let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) {
+                held.arms_moved_elsewhere = false;
             }
         });
     }
@@ -6139,6 +6156,35 @@ mod tests {
         );
     }
 
+    /// **A withdrawal does not empty the audience, and that is deliberate.** The counts answer
+    /// *who has these loops up and can hear them*, which is a fact about everybody else's
+    /// console; whether this session's own voice can leave the building is a fact about this
+    /// one, and the bar says it in words directly above them.
+    ///
+    /// They are the three independent axes (v1 §6) kept independent. Folding one into the
+    /// other would make `0 hearing` mean two different things — *nobody is listening* and
+    /// *your path is down* — and it would read as the first, which is the loop state an
+    /// operator acts on. It would also have to be done for the signalling channel and not for
+    /// the audio path, because only one of them closes the fan-out, so the bar would answer
+    /// the same question two ways depending on which failure it was having.
+    #[tokio::test]
+    async fn a_talker_with_no_signalling_channel_still_has_an_audience() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_armed_on_two_loops(&live, &store).await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        live.subscribe(&listener, &air_to_ground);
+        live.the_client_counted(&listener, &counted(air_to_ground.as_str(), 12));
+
+        live.unheard_from_for(&talker, PAST_THE_WINDOW);
+
+        assert_eq!(
+            audience_of(&live, &talker, both_to_emit_on()).hearing,
+            1,
+            "a withdrawal was reported as an empty loop rather than as a withdrawal"
+        );
+    }
+
     /// **Only a change the session did not ask for is marked** (ADR-0058). An administrator
     /// pulling an `emit` cell is the change no hand on this desk made, and the operator may be
     /// mid-sentence when it lands.
@@ -6190,11 +6236,12 @@ mod tests {
         );
     }
 
-    /// The mark stands until the operator does something deliberate, which is the same rule
-    /// the one asserted state is cleared by (ADR-0016): an act on this console is the evidence
-    /// that the person at it has seen what is on it.
+    /// The mark stands until the operator does something that shows they have read the
+    /// console, which is the kind of evidence the one asserted state is cleared by (ADR-0016).
+    /// Which acts count is Transport's ruling; that it comes off when one arrives is this
+    /// side's.
     #[tokio::test]
-    async fn a_deliberate_act_clears_the_mark() {
+    async fn an_act_that_shows_the_console_was_read_answers_the_mark() {
         let (_directory, store) = a_temporary_store().await;
         let live = StateAuthority::empty();
         let session = a_session(&live, &store, "flight").await;
@@ -6202,7 +6249,7 @@ mod tests {
         live.arm(&session, &LoopId::presented("air-to-ground".to_owned()));
         live.presence(&session, vec![a_loop("air-to-ground")], &[]);
 
-        live.a_deliberate_act(&session);
+        live.the_mark_is_answered(&session);
 
         let (_, presence) = live
             .presence(&session, vec![a_loop("air-to-ground")], &[])

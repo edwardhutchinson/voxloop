@@ -146,6 +146,10 @@ const theConsole = {
 		role: { id: 'r-1', name: 'Flight Director' },
 		media_path: 'connected',
 		connection: 'confirmed',
+		// The document always carries both, whatever they say (v1 §6), so a console rendered
+		// without them is a console no session ever sees.
+		audience: { hearing: 0, present_not_hearing: 0 },
+		arms_moved_elsewhere: false,
 		loops: inReach
 	},
 	connection: { state: 'confirmed', since: 0, aLatchStands: true }
@@ -1453,7 +1457,7 @@ test('the mark stands on a loop that is staffed and subscribed', async () => {
 // identically: the first number is reassurance and the second is a warning, and sixteen names
 // is more than anyone reads in the second before keying.
 test('both views carry the audience as two counts', async () => {
-	const heard = { audience: { hearing: 6, present_not_hearing: 1 } };
+	const heard = { audience: { hearing: 6, presentNotHearing: 1 } };
 
 	for (const [at, body] of (await eachView(inAView(heard))).entries()) {
 		assert.match(body, /6 hearing/, `${views[at]} does not say how many would hear`);
@@ -1471,16 +1475,17 @@ test('both views carry the audience as two counts', async () => {
 test('no third audience count reaches the bar', async () => {
 	const said = await rendered('TransmitBar.svelte', {
 		...theBar,
-		audience: { hearing: 2, present_not_hearing: 0, not_subscribed: 9 }
+		audience: { hearing: 2, presentNotHearing: 0, notSubscribed: 9 }
 	});
 
 	// The counts as they are read, rather than the whole strip: an icon's path data is full of
 	// digits and says nothing to anybody.
-	const counted = said.slice(said.indexOf('class="audience'), said.indexOf('</p>'));
+	const from = said.indexOf('class="audience');
+	const counted = said.slice(from, said.indexOf('</p>', from));
 	assert.doesNotMatch(counted, /9/, 'the bar rendered a bucket the operator must not be shown');
 	assert.doesNotMatch(
 		read(join(lib, 'TransmitBar.svelte')),
-		/not_subscribed/,
+		/[nN]ot.?[sS]ubscribed/,
 		'the bar knows about a third bucket'
 	);
 });
@@ -1489,11 +1494,11 @@ test('no third audience count reaches the bar', async () => {
 // and the operator keys anyway if they mean to: blocking it, or interposing a dialog, would be
 // the console overruling an operator about their own operation.
 test('a zero audience is said in words and blocks nothing', async () => {
-	const silent = { ...theBar, audience: { hearing: 0, present_not_hearing: 0 } };
+	const silent = { ...theBar, audience: { hearing: 0, presentNotHearing: 0 } };
 	const said = await rendered('TransmitBar.svelte', silent);
 	const heard = await rendered('TransmitBar.svelte', {
 		...silent,
-		audience: { hearing: 4, present_not_hearing: 0 }
+		audience: { hearing: 4, presentNotHearing: 0 }
 	});
 
 	assert.match(said, /0 hearing/, 'a bar reaching nobody did not say so');

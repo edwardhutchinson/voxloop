@@ -498,6 +498,27 @@ impl Incoming {
         }
     }
 
+    /// Whether this act is evidence that the person at the console has read what is on it.
+    ///
+    /// It is what answers the mark on an arm set somebody else moved ([ADR-0058]), and it is
+    /// every deliberate act but one: **a key going up is not evidence of anything.** The case
+    /// the mark exists for is an administrator pulling an `emit` cell out from under somebody
+    /// mid-sentence, and that operator's next message is the release of the key they were
+    /// already holding — so clearing the mark on it would take the warning off the console of
+    /// the one person who provably had not read it yet.
+    ///
+    /// A key going **down** is the other way round and does answer it: the second before
+    /// keying is the second the bar is read in, which is what the bar is for ([ADR-0034]).
+    ///
+    /// It is derived from [`Incoming::was_a_deliberate_act`] rather than written out again,
+    /// so a message ruled on there cannot go unruled here.
+    ///
+    /// [ADR-0034]: ../../../docs/adr/0034-the-transmit-bar-is-always-visible-and-the-audience-is-a-count.md
+    /// [ADR-0058]: ../../../docs/adr/0058-the-transmit-bar-is-live-while-keyed.md
+    fn answers_the_mark(&self) -> bool {
+        self.was_a_deliberate_act() && !matches!(self, Self::Unkey | Self::UnkeyPriority)
+    }
+
     /// The name for a refusal to say back, so an operator is told which message it was about.
     fn named(&self) -> &'static str {
         match self {
@@ -1183,6 +1204,15 @@ impl Conversation {
         // client sent on its own account, which is why it is asked rather than assumed.
         if message.was_a_deliberate_act() {
             self.note_a_deliberate_act().await?;
+        }
+
+        // The mark on an arm set somebody else moved is answered by a narrower set of acts
+        // than the window is measured from, and the difference is one message: the key going
+        // up, which the operator the mark was raised for sends without having read anything.
+        if message.answers_the_mark()
+            && let Some(session) = &self.session
+        {
+            self.api.state.the_mark_is_answered(session);
         }
 
         match message {
@@ -6235,11 +6265,11 @@ mod tests {
         );
     }
 
-    /// The mark stands until the operator does something deliberate, which is the rule the
-    /// one asserted state is already cleared by (ADR-0016) — an act on this console is the
-    /// evidence that the person at it has read what is on it.
+    /// The mark stands until the operator does something that shows they have read the
+    /// console, which is the kind of evidence the one asserted state is already cleared by
+    /// (ADR-0016).
     #[tokio::test]
-    async fn a_deliberate_act_answers_the_mark() {
+    async fn an_act_that_shows_the_console_was_read_answers_the_mark() {
         let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
         let flight = lobby.role_named("Flight Director").await;
         lobby
@@ -6284,6 +6314,68 @@ mod tests {
         assert!(
             !the_presence(&acted).1.arms_moved_elsewhere,
             "the mark outlived the act that answered it"
+        );
+    }
+    /// **A key going up answers nothing** (ADR-0058). The mark exists for the operator an
+    /// administrator pulled a cell out from under mid-sentence, and that operator's very next
+    /// message is the release of the key they were already holding — so a rule that counted it
+    /// would take the warning off the console of the one person who provably had not read it.
+    #[tokio::test]
+    async fn releasing_the_key_does_not_answer_the_mark() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, &arming(&air_to_ground)).await;
+        all(&mut socket, KEY).await;
+        lobby
+            .the_cell_is(&flight, &air_to_ground, Permission::Monitor)
+            .await;
+
+        let released = said(&mut socket, UNKEY).await;
+
+        assert!(
+            the_presence(&released).1.arms_moved_elsewhere,
+            "letting go of the key took the warning off the console of somebody mid-sentence"
+        );
+    }
+
+    /// The other half of the same rule: a key going **down** does answer it, because the
+    /// second before keying is the second the bar is read in (ADR-0034).
+    #[tokio::test]
+    async fn keying_again_answers_the_mark() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        lobby
+            .a_loop_reachable_by("Sim", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, &arming(&air_to_ground)).await;
+        lobby
+            .the_cell_is(&flight, &air_to_ground, Permission::Monitor)
+            .await;
+        // The revocation reaches the console on the next tick, which is where it is marked.
+        socket
+            .pushed_presence()
+            .await
+            .expect("the socket to answer")
+            .pop()
+            .expect("a revocation to move the document");
+
+        let keyed = said(&mut socket, KEY).await;
+
+        assert!(
+            !the_presence(&keyed).1.arms_moved_elsewhere,
+            "the mark outlived the operator keying over the set it is about"
         );
     }
 }

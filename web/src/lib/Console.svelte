@@ -203,7 +203,13 @@
 		latched,
 		dropped,
 		latchDropped,
-		audience: presence.audience,
+		// The document's two counts, in this console's own words like the media path and the
+		// mark beside it are. Nothing is computed here: the numbers are the server's, and
+		// renaming them is the whole of what this line does.
+		audience: {
+			hearing: presence.audience.hearing,
+			presentNotHearing: presence.audience.present_not_hearing
+		},
 		armsMovedElsewhere: presence.arms_moved_elsewhere,
 		onDown: keys.onScreen[MOMENTARY].down,
 		onUp: keys.onScreen[MOMENTARY].up,
@@ -499,15 +505,6 @@
 	   itself, and `aria-pressed` is what says it to a screen reader. */
 	.views button[aria-pressed='true'] {
 		border-color: var(--ink);
-	}
-
-	/* The hot-latch banner. The warning colour for the reason every other use of it here is —
-	   *this is true and you should look at it* — and never carrying the state alone: the
-	   sentence says the key is open and the number beside it says for how long, and both
-	   would read the same in monochrome. */
-	.hot {
-		margin: 0 0 var(--space-4);
-		color: var(--warning);
 	}
 
 	/* Set off from the loops by a rule and the largest gap on the page, because it is the one

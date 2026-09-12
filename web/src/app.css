@@ -178,9 +178,16 @@ th {
    withdrawn. They are drawn alike and are not the same thing, so a rule that later tells them
    apart has somewhere to go; naming one of them after the other would be the console
    borrowing the wrong word from the ladder. Furniture because the lobby and the operating
-   console both say them. */
+   console both say them.
+
+   `.hot` is the third of them and the one that is not the channel's: a key latched open, said
+   above both views with a running age beside it (v1 §8, ADR-0034). It is the same block
+   written a third time rather than a rendering of its own, so it is here rather than in the
+   console — and it keeps its own name, because *your key is open* and *your console is stale*
+   are not one state. */
 .stale,
-.lost {
+.lost,
+.hot {
 	margin: 0 0 var(--space-4);
 	color: var(--warning);
 }

@@ -120,7 +120,7 @@
 		priority = false,
 		onPriorityDown,
 		onPriorityUp,
-		audience = { hearing: 0, present_not_hearing: 0 },
+		audience = { hearing: 0, presentNotHearing: 0 },
 		armsMovedElsewhere = false
 	} = $props();
 
@@ -135,7 +135,7 @@
 	// The counts as they are rendered, read straight out of the document and computed nowhere
 	// else: what the operator is told is what the server has committed to keeping true.
 	const hearing = $derived(audience.hearing);
-	const presentNotHearing = $derived(audience.present_not_hearing);
+	const presentNotHearing = $derived(audience.presentNotHearing);
 
 	// **The console must not place a focusable control where an operator's hands rest**
 	// (v1 §4). A key pressed with focus on a control is refused, so a key control that took
@@ -323,12 +323,13 @@
 </section>
 
 <style>
-	/* Four names for one rendering, deliberately, the way `.refusal` and `.destructive` are:
+	/* Five names for one rendering, deliberately, the way `.refusal` and `.destructive` are:
 	   a fault that clears itself, a channel that cannot confirm, a fault that has withdrawn
-	   emission and a latch that was taken away read alike and are not the same thing, so a
-	   rule that later tells them apart has somewhere to go. `.impaired` is the media path's
-	   rung and `.unconfirmed` is the signalling channel's, and they are two classes rather
-	   than one because the two ladders are two ladders (`CONTEXT.md`).
+	   emission, a latch that was taken away and an arm set somebody else moved read alike and
+	   are not the same thing, so a rule that later tells them apart has somewhere to go.
+	   `.impaired` is the media path's rung and `.unconfirmed` is the signalling channel's, and
+	   they are two classes rather than one because the two ladders are two ladders
+	   (`CONTEXT.md`).
 
 	   The colour is v1 §8's — *this is true and you should look at it* — and it is never what
 	   carries the state: the sentence says which of the two withdrawal conditions applies and
@@ -336,7 +337,8 @@
 	.impaired,
 	.unconfirmed,
 	.withdrawn,
-	.dropped {
+	.dropped,
+	.moved {
 		margin: 0;
 		color: var(--warning);
 	}
@@ -344,14 +346,6 @@
 	.armed {
 		margin: 0;
 		font-size: var(--type-2);
-	}
-
-	/* The mark on an arm set somebody else moved. It reads like the rungs above it — *this is
-	   true and you should look at it* — and the sentence is what carries it: a state is never
-	   carried by colour alone, and this one is read in the second before keying. */
-	.moved {
-		margin: 0;
-		color: var(--warning);
 	}
 
 	/* The two counts on one line, in the order they are read: the reassurance, then the
