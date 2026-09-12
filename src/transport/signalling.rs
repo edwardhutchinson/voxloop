@@ -779,8 +779,7 @@ impl StaffingAsSeen {
 /// ([ADR-0048]): the hail picker fetches a roster when it opens rather than riding along at
 /// this document's tick rate.
 ///
-/// Arms (#41) and loop health (#46) are in it; staffing state (#48) and the audience (#49) land
-/// in here one ticket at a time.
+/// Arms (#41), loop health (#46), staffing state (#48) and the audience (#49) are in it.
 ///
 /// [ADR-0019]: ../../../docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md
 /// [ADR-0048]: ../../../docs/adr/0048-the-hail-picker-is-the-only-place-the-console-names-a-person.md
@@ -844,7 +843,52 @@ struct Presence {
     ///
     /// [ADR-0016]: ../../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
     off_console: Option<OffConsole>,
+    /// Who would actually hear this session's arm set, as two counts (v1 §6).
+    ///
+    /// **The transmit bar's whole answer to *who will hear me***, and it is here whether or
+    /// not this session is keyed, because the bar answers that question before the key goes
+    /// down and *who am I talking to* under it, with the same words ([ADR-0058]).
+    ///
+    /// [ADR-0058]: ../../../docs/adr/0058-the-transmit-bar-is-live-while-keyed.md
+    audience: AudienceAsSeen,
+    /// Whether the armed set below was last moved by something other than this session.
+    ///
+    /// **Only a change the session did not ask for is marked** ([ADR-0058]): a preset is a
+    /// mid-key change by design and a deliberate arm is the operator's own hand, and marking
+    /// either would train the operator straight past the signal. What reaches this field is an
+    /// administrator pulling an `emit` cell mid-transmission.
+    ///
+    /// [ADR-0058]: ../../../docs/adr/0058-the-transmit-bar-is-live-while-keyed.md
+    arms_moved_elsewhere: bool,
     loops: Vec<Reachable>,
+}
+
+/// The audience, as the console is given it: two counts and no names.
+///
+/// **The third bucket is not here.** People in reach who did not take the loop up are computed
+/// on the other side of the seam and deliberately not carried: they are not actionable, and a
+/// third number beside these two would be read as another flavour of the warning
+/// ([ADR-0034]). The document is the API, so a count the console must not render is a count
+/// the console is not sent.
+///
+/// **Counts and not names** for the same reason: sixteen names is more than anyone reads in
+/// the second before keying, and these two are the two that change a decision. The one place
+/// the console names a person is the hail picker, which fetches its own roster ([ADR-0048]).
+///
+/// [ADR-0034]: ../../../docs/adr/0034-the-transmit-bar-is-always-visible-and-the-audience-is-a-count.md
+/// [ADR-0048]: ../../../docs/adr/0048-the-hail-picker-is-the-only-place-the-console-names-a-person.md
+#[derive(Serialize, Debug, Clone, PartialEq)]
+struct AudienceAsSeen {
+    /// How many people would hear it. **The reassurance**, and `0` is a state the console
+    /// renders in the warning colour and blocks nothing with ([ADR-0034]).
+    ///
+    /// [ADR-0034]: ../../../docs/adr/0034-the-transmit-bar-is-always-visible-and-the-audience-is-a-count.md
+    hearing: usize,
+    /// How many took one of these loops up and will not hear it — muted, off console,
+    /// unreachable, or not receiving its beacon.
+    ///
+    /// **The warning, and the console's only one about mute** (v1 §8).
+    present_not_hearing: usize,
 }
 
 /// The one asserted state, as the console is given it.
@@ -1942,6 +1986,15 @@ impl Conversation {
                 off_console: presence.off_console.map(|asserted| OffConsole {
                     last_active_seconds: asserted.last_active.as_secs(),
                 }),
+                // **Two of the three buckets cross the seam** (ADR-0034). The third is
+                // computed and dropped here, which is the one place it could be dropped: the
+                // document is the API, so a count the console may not render is one it is
+                // never handed.
+                audience: AudienceAsSeen {
+                    hearing: presence.audience.hearing,
+                    present_not_hearing: presence.audience.present_not_hearing,
+                },
+                arms_moved_elsewhere: presence.arms_moved_elsewhere,
                 loops: presence
                     .loops
                     .into_iter()
@@ -2512,6 +2565,46 @@ mod tests {
                 .await
                 .expect("the column to be ruled on");
             transaction.commit().await.expect("the loop to land");
+        }
+
+        /// A second person's socket: their own user, their own sign-in, and no role assumed.
+        ///
+        /// A user holds at most one session, so a test about two consoles needs two people —
+        /// and it needs both of them on sockets rather than seated directly, because a
+        /// session nobody has ever projected has no reach recorded against it and so is in
+        /// nobody's audience.
+        async fn a_socket_for(&self, username: &str, eligible_for: &RoleId) -> Conversation {
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            let occupant = transaction
+                .create_user(NewUser {
+                    username: username.to_owned(),
+                    password_hash: None,
+                    is_system_administrator: false,
+                })
+                .await
+                .expect("the user to be created");
+            let sign_in = transaction
+                .open_sign_in(&occupant)
+                .await
+                .expect("the sign-in to open");
+            transaction
+                .grant_eligibility(&occupant, eligible_for)
+                .await
+                .expect("the eligibility to be granted");
+            transaction.commit().await.expect("the person to land");
+
+            Conversation::opened(self.api.clone(), occupant, sign_in)
+        }
+
+        /// A cell, set to a rung mid-shift: the administrative act that narrows or widens a
+        /// live session's reach without touching it.
+        async fn the_cell_is(&self, role: &RoleId, held_on: &LoopId, permission: Permission) {
+            let mut transaction = self.api.store.begin().await.expect("a transaction");
+            transaction
+                .set_cell(role, held_on, permission)
+                .await
+                .expect("the cell to be set");
+            transaction.commit().await.expect("the edit to land");
         }
 
         /// The deployment-wide base loop order, set whole as system administration sets it
@@ -3412,6 +3505,8 @@ mod tests {
         assert_eq!(
             named,
             [
+                "arms_moved_elsewhere",
+                "audience",
                 "connection",
                 "keyed",
                 "loops",
@@ -3424,6 +3519,17 @@ mod tests {
                 "version"
             ]
         );
+        // **Two counts and no third** (ADR-0034). The bucket the console must not render is
+        // the bucket the console is not sent, which is the only place that promise can be
+        // kept — and no names, at any depth: sixteen of them is more than anybody reads in
+        // the second before keying.
+        let mut counted: Vec<&String> = said["audience"]
+            .as_object()
+            .expect("the audience")
+            .keys()
+            .collect();
+        counted.sort();
+        assert_eq!(counted, ["hearing", "present_not_hearing"]);
     }
 
     /// The wire is JSON for the lobby too, and the lobby is scoped to the one question it
@@ -6031,5 +6137,153 @@ mod tests {
         assert_eq!(staffing["state"], "away");
         assert_eq!(staffing["away"][0]["reason"], "not-subscribed");
         assert_eq!(staffing["away"][0]["occupants"], 1);
+    }
+    // ---- The audience and the transmit bar (#49) ---------------------------------------
+
+    /// The two counts this session's document carries.
+    fn audience(said: &Outgoing) -> (usize, usize) {
+        let audience = &the_presence(said).1.audience;
+
+        (audience.hearing, audience.present_not_hearing)
+    }
+
+    /// **The audience is in the document, as two counts** (v1 §6, ADR-0034), and it moves
+    /// when what somebody else has on their console moves: the three-way split exists so that
+    /// a colleague who took the loop up and muted it is a warning rather than a subscriber.
+    #[tokio::test]
+    async fn the_document_carries_the_audience_as_two_counts() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1)), ("CAPCOM", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        let capcom = lobby.role_named("CAPCOM").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        lobby
+            .the_cell_is(&capcom, &air_to_ground, Permission::Monitor)
+            .await;
+        let mut socket = lobby.a_socket();
+        let mut theirs = lobby.a_socket_for("gene", &capcom).await;
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut theirs, &assuming(&capcom)).await;
+
+        let armed = said(&mut socket, &arming(&air_to_ground)).await;
+        assert_eq!(
+            audience(&armed),
+            (0, 0),
+            "somebody who had not taken the loop up was counted"
+        );
+
+        all(&mut theirs, &subscribing(&air_to_ground)).await;
+        let hearing = said(&mut socket, &subscribing(&air_to_ground)).await;
+        assert_eq!(
+            audience(&hearing),
+            (1, 0),
+            "a subscriber was not counted as hearing"
+        );
+
+        all(&mut theirs, &muting(&air_to_ground)).await;
+        let muted = socket
+            .pushed_presence()
+            .await
+            .expect("the socket to answer")
+            .pop()
+            .expect("a mute to move the document");
+        assert_eq!(
+            audience(&muted),
+            (0, 1),
+            "a colleague who muted the loop was not warned about"
+        );
+    }
+
+    /// **An administrator pulling an `emit` cell is the change no hand on this desk made**
+    /// (ADR-0058), and the operator may be mid-sentence when it lands — so it is marked, and
+    /// the arm goes.
+    #[tokio::test]
+    async fn the_document_marks_an_arm_set_the_operator_did_not_move() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        let on_air = said(&mut socket, &arming(&air_to_ground)).await;
+        assert!(
+            !the_presence(&on_air).1.arms_moved_elsewhere,
+            "the operator's own arm was marked as somebody else's"
+        );
+
+        lobby
+            .the_cell_is(&flight, &air_to_ground, Permission::Monitor)
+            .await;
+        let revoked = socket
+            .pushed_presence()
+            .await
+            .expect("the socket to answer")
+            .pop()
+            .expect("a revocation to move the document");
+
+        assert!(
+            the_presence(&revoked).1.arms_moved_elsewhere,
+            "an arm was taken away and the bar said nothing about who took it"
+        );
+        assert!(
+            armed(&revoked).is_empty(),
+            "an arm outlived the rung under it"
+        );
+    }
+
+    /// The mark stands until the operator does something deliberate, which is the rule the
+    /// one asserted state is already cleared by (ADR-0016) — an act on this console is the
+    /// evidence that the person at it has read what is on it.
+    #[tokio::test]
+    async fn a_deliberate_act_answers_the_mark() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+        all(&mut socket, &arming(&air_to_ground)).await;
+        lobby
+            .the_cell_is(&flight, &air_to_ground, Permission::Monitor)
+            .await;
+        let marked = socket
+            .pushed_presence()
+            .await
+            .expect("the socket to answer")
+            .pop()
+            .expect("a revocation to move the document");
+        assert!(
+            the_presence(&marked).1.arms_moved_elsewhere,
+            "the revocation was never marked, so there is nothing to answer"
+        );
+        // A heartbeat is the machine noticing it can still be reached rather than a person
+        // doing anything, so it answers nothing and clears nothing (v1 §6).
+        all(&mut socket, HEARTBEAT).await;
+        assert!(
+            the_presence(
+                &socket
+                    .pushed_presence()
+                    .await
+                    .expect("the socket to answer")
+                    .pop()
+                    .unwrap_or(marked)
+            )
+            .1
+            .arms_moved_elsewhere,
+            "a heartbeat answered a mark only a person can answer"
+        );
+
+        let acted = said(&mut socket, &subscribing(&air_to_ground)).await;
+
+        assert!(
+            !the_presence(&acted).1.arms_moved_elsewhere,
+            "the mark outlived the act that answered it"
+        );
     }
 }

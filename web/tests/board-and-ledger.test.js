@@ -306,11 +306,14 @@ test('nothing that renders the presence document keeps state of its own', async 
 // operator has opened, are facts about the reader; whether this desk's audio output has moved
 // under the operator is a fact about the hardware in front of them, which no server can see
 // (ADR-0017);
-// the latch, the source that went while it was held, and a latch taken down by something
-// other than the operator are facts about the input on this desk, knowable here and true the
-// moment they are said (ADR-0016, ADR-0021, ADR-0018). Nothing about the world is among them
-// — that all arrives in the presence document, and where this tab stands with the channel
-// arrives as a prop from the one place that measures it.
+// the latch, how long it has been open, the source that went while it was held, and a latch
+// taken down by something other than the operator are facts about the input on this desk,
+// knowable here and true the moment they are said (ADR-0016, ADR-0021, ADR-0018). The age is
+// among them because the latch is: the server is told a key is down and never that it is being
+// held open (ADR-0022), so there is nothing in the document to read it from — and a running
+// age that *was* in the document would move the version five times a second (ADR-0019).
+// Nothing about the world is among them — that all arrives in the presence document, and where
+// this tab stands with the channel arrives as a prop from the one place that measures it.
 test('the operating console keeps only what is not the server’s to say', async () => {
 	const source = read(join(lib, 'Console.svelte'));
 
@@ -318,7 +321,16 @@ test('the operating console keeps only what is not the server’s to say', async
 
 	assert.deepEqual(
 		kept.toSorted(),
-		['bound', 'dropped', 'latchDropped', 'latched', 'moved', 'showing', 'volumeOpenFor'],
+		[
+			'bound',
+			'dropped',
+			'latchDropped',
+			'latched',
+			'latchedFor',
+			'moved',
+			'showing',
+			'volumeOpenFor'
+		],
 		'the console keeps a state of its own — every fact about the world is the server’s'
 	);
 });
@@ -1432,5 +1444,135 @@ test('the mark stands on a loop that is staffed and subscribed', async () => {
 
 	for (const [at, body] of (await eachView(inAView({}, fine))).entries()) {
 		assert.match(body, /You staff this/, `${views[at]} dropped the mark when nothing was wrong`);
+	}
+});
+
+// ---- The audience and the finished transmit bar (#49) --------------------------------
+
+// **The audience is two counts and no names** (ADR-0034), in both views and worded
+// identically: the first number is reassurance and the second is a warning, and sixteen names
+// is more than anyone reads in the second before keying.
+test('both views carry the audience as two counts', async () => {
+	const heard = { audience: { hearing: 6, present_not_hearing: 1 } };
+
+	for (const [at, body] of (await eachView(inAView(heard))).entries()) {
+		assert.match(body, /6 hearing/, `${views[at]} does not say how many would hear`);
+		assert.match(
+			body,
+			/1 present, not hearing/,
+			`${views[at]} does not warn about the people who will not`
+		);
+	}
+});
+
+// **The third bucket is computed and never displayed** (ADR-0034). It is not in the document
+// the console is handed, and the bar has nowhere to render one from — a count beside the other
+// two would be read as another flavour of the warning.
+test('no third audience count reaches the bar', async () => {
+	const said = await rendered('TransmitBar.svelte', {
+		...theBar,
+		audience: { hearing: 2, present_not_hearing: 0, not_subscribed: 9 }
+	});
+
+	// The counts as they are read, rather than the whole strip: an icon's path data is full of
+	// digits and says nothing to anybody.
+	const counted = said.slice(said.indexOf('class="audience'), said.indexOf('</p>'));
+	assert.doesNotMatch(counted, /9/, 'the bar rendered a bucket the operator must not be shown');
+	assert.doesNotMatch(
+		read(join(lib, 'TransmitBar.svelte')),
+		/not_subscribed/,
+		'the bar knows about a third bucket'
+	);
+});
+
+// **A zero audience never blocks a transmission** (ADR-0034). It renders in the warning colour
+// and the operator keys anyway if they mean to: blocking it, or interposing a dialog, would be
+// the console overruling an operator about their own operation.
+test('a zero audience is said in words and blocks nothing', async () => {
+	const silent = { ...theBar, audience: { hearing: 0, present_not_hearing: 0 } };
+	const said = await rendered('TransmitBar.svelte', silent);
+	const heard = await rendered('TransmitBar.svelte', {
+		...silent,
+		audience: { hearing: 4, present_not_hearing: 0 }
+	});
+
+	assert.match(said, /0 hearing/, 'a bar reaching nobody did not say so');
+	assert.notEqual(
+		said.replaceAll(/="[^"]*"/g, ''),
+		heard.replaceAll(/="[^"]*"/g, ''),
+		'a zero audience reads identically to an audience of four'
+	);
+	// The key control is there, and it is neither disabled nor behind anything: the only
+	// difference at zero is what the bar says.
+	assert.match(said, /<button[^>]*class="key /, 'a zero audience took the key control away');
+	assert.doesNotMatch(said, /disabled/, 'a zero audience disabled a control');
+	assert.doesNotMatch(said, /<dialog/, 'a zero audience interposed a dialog');
+});
+
+// **Only a change the session did not ask for is marked** (ADR-0058). A preset is a mid-key
+// change by design and a deliberate arm is the operator's own hand; what gets marked is an
+// administrator pulling an `emit` cell mid-transmission.
+test('an arm set moved from outside the session is marked in both views', async () => {
+	const moved = await eachView(inAView({ armsMovedElsewhere: true }));
+	const asked = await eachView(inAView({ armsMovedElsewhere: false }));
+
+	for (const [at, body] of moved.entries()) {
+		assert.match(body, /permission change/, `${views[at]} does not say who moved the set`);
+		assert.notEqual(body, asked[at], `${views[at]} reads alike either way`);
+	}
+	assert.doesNotMatch(
+		asked[0],
+		/permission change/,
+		'the operator was told their own arm was somebody else’s'
+	);
+});
+
+// **At zero armed the latch stands** (ADR-0058). A revocation can empty the arm set outright,
+// and taking the key out of somebody's hand mid-sentence is a bigger lie than showing them an
+// empty one — so the key control renders differently instead.
+test('an empty arm set renders the key control differently and leaves the latch alone', async () => {
+	const reaching = { ...theBar, armedOn: [], latched: true };
+	const said = await rendered('TransmitBar.svelte', reaching);
+
+	assert.match(said, /Key — reaching nobody/, 'the key control did not say it reaches nobody');
+	assert.match(said, /Unlatch/, 'the latch was released under an empty arm set');
+	assert.match(said, /latched the key open/, 'the bar stopped saying the key was open');
+});
+
+// Nothing between the latch and the arm set, structurally: a latch released at zero armed
+// would have to be released by whatever knows both, and nothing does.
+test('the emission modes know nothing about what is armed', async () => {
+	assert.doesNotMatch(
+		read(join(lib, 'modes.js')),
+		/arm/i,
+		'the emission modes read the arm set — a latch must never be released by one'
+	);
+});
+
+// **A hot latch is announced by a persistent banner with a running age** (v1 §8, ADR-0034),
+// plus the key control rendering live in both views. The banner is above the view switch, so
+// it is on screen whichever view is showing; the key control is in the bar, which both views
+// carry.
+test('a hot latch is announced above both views, with a running age', async () => {
+	const source = read(join(lib, 'Console.svelte'));
+	const banner = source.indexOf('{#if latched}');
+	const viewSwitch = source.indexOf("{#if showing === 'board'}");
+
+	assert.ok(banner > 0, 'the console does not announce a hot latch');
+	assert.ok(banner < viewSwitch, 'the hot-latch banner is inside one view rather than above both');
+	assert.match(
+		source.slice(banner, viewSwitch),
+		/\{latchedFor\} s/,
+		'the hot-latch banner carries no running age'
+	);
+});
+
+test('the key control renders live while the key is latched, in both views', async () => {
+	for (const [at, body] of (await eachView(inAView({ latched: true }))).entries()) {
+		assert.match(
+			body,
+			/aria-pressed="true"[^>]*>\s*Unlatch/,
+			`${views[at]} does not render the latch control live`
+		);
 	}
 });
