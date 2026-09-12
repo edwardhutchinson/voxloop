@@ -38,6 +38,12 @@ const views = ['Board.svelte', 'Ledger.svelte'];
 // **Loop health is per monitored loop** (#46): `THERMAL`'s beacon is arriving, muted or not,
 // and `GNC`'s is not — it is the loop that sounds exactly like a quiet one and must not look
 // like one. `FLIGHT` is not monitored, so there is no beacon to count and no health at all.
+//
+// **Staffing state is per loop and the mark is per console** (#48). This role staffs
+// `THERMAL`, which is staffed, and `FLIGHT`, which is not on this console at all — the mark's
+// second state, and the actionable one. `FLIGHT` is also the loop whose occupants are away
+// for differing reasons, which is the count the ledger spells out. `GNC` has no staffing
+// roles, so it has no staffing state: blank, and not a fourth word (ADR-0056).
 const inReach = [
 	{
 		id: 'l-3',
@@ -48,7 +54,9 @@ const inReach = [
 		talking: false,
 		muted: true,
 		volume: 100,
-		health: 'receiving'
+		health: 'receiving',
+		staffing: { state: 'staffed', away: [] },
+		staffs: true
 	},
 	{
 		id: 'l-1',
@@ -59,7 +67,15 @@ const inReach = [
 		talking: true,
 		muted: false,
 		volume: 100,
-		health: null
+		health: null,
+		staffing: {
+			state: 'away',
+			away: [
+				{ reason: 'not-subscribed', occupants: 2 },
+				{ reason: 'muted', occupants: 1 }
+			]
+		},
+		staffs: true
 	},
 	{
 		id: 'l-2',
@@ -70,7 +86,9 @@ const inReach = [
 		talking: false,
 		muted: false,
 		volume: 40,
-		health: 'not-receiving'
+		health: 'not-receiving',
+		staffing: null,
+		staffs: false
 	}
 ];
 
@@ -1322,5 +1340,95 @@ test('the assertion is above both views rather than inside either', async () => 
 			/OffConsole/,
 			`${view} draws the assertion itself — there is one of it, above both views`
 		);
+	}
+});
+
+// ---- Staffing state (#48) -----------------------------------------------------------
+
+// **A word on the board and a sentence in the ledger** (v1 §8). The division of labour the
+// two views exist for, applied to the state that most needs it: a card cannot hold
+// `away — 2 not subscribed, 1 muted`, and it does not have to.
+test('staffing state is a word on the board and a sentence in the ledger', async () => {
+	const [board, ledger] = await eachView(carrying);
+
+	assert.match(board, /Staffed/, 'the board does not carry the word');
+	assert.match(board, /Away/, 'the board does not carry the word');
+	assert.doesNotMatch(
+		board,
+		/not subscribed/,
+		'the board carries the reason a card has no room for'
+	);
+	assert.match(ledger, /Away — 2 not subscribed, 1 muted\./);
+	assert.match(ledger, /an occupant of a role that staffs this loop is hearing it/);
+});
+
+// **Where occupants are away for different reasons the ledger counts them**, and it ranks
+// nothing: no reason wins by precedence across people, because a mute is one click from
+// hearing and so is a subscription (ADR-0065).
+test('the ledger counts the reasons and puts none of them first', async () => {
+	const [, ledger] = await eachView(carrying);
+
+	assert.match(ledger, /2 not subscribed, 1 muted/);
+	assert.doesNotMatch(ledger, /Away — muted it/, 'one reason was picked as the winner');
+});
+
+// **The absence of a staffing state is not a fourth state.** A loop with no staffing roles
+// renders blank where the word goes: `vacant` there would say nobody is behind a loop two
+// people may be talking on right now (ADR-0056).
+test('a loop with no staffing roles renders blank in both views', async () => {
+	const nothingStaffs = [inReach[2]];
+
+	for (const [at, body] of (await eachView(inAView({}, nothingStaffs))).entries()) {
+		assert.doesNotMatch(body, /Vacant|vacant/, `${views[at]} read no staffing roles as vacant`);
+		assert.doesNotMatch(body, /Staffed|staffed/, `${views[at]} said something about staffing`);
+		assert.doesNotMatch(body, /Away —/, `${views[at]} said something about staffing`);
+		assert.match(body, /GNC/, `${views[at]} lost the loop`);
+	}
+});
+
+// Losing the last staffing role is that blank arriving mid-session, and the console does not
+// treat it as an error — it is the same render as a loop that never had one (ADR-0056).
+test('a loop that loses its last staffing role renders as one that never had one', async () => {
+	const [held] = inReach;
+	const lost = { ...held, staffing: null, staffs: false };
+
+	for (const [at, view] of views.entries()) {
+		assert.equal(
+			await rendered(view, inAView({}, [lost])),
+			await rendered(view, inAView({}, [{ ...lost, staffing: undefined }])),
+			`${views[at]} renders a loop that lost its staffing state differently`
+		);
+	}
+});
+
+// **The loops this role staffs are marked in both views, in two states** (v1 §8), and the
+// mark is on the loop whether or not anything is wrong: showing only the second state would
+// make it an alarm rather than a fact about the operator's own console.
+test('the staffing mark is in both views, in both of its states', async () => {
+	for (const [at, body] of (await eachView(carrying)).entries()) {
+		assert.match(body, /You staff this/, `${views[at]} does not mark the loops this role staffs`);
+		assert.match(
+			body,
+			/You staff this loop and it is not on your console|You staff this, not monitoring it/,
+			`${views[at]} does not tell the two states of the mark apart`
+		);
+	}
+});
+
+test('a loop this role does not staff carries no mark in either view', async () => {
+	const unmarked = [inReach[2]];
+
+	for (const [at, body] of (await eachView(inAView({}, unmarked))).entries()) {
+		assert.doesNotMatch(body, /You staff/, `${views[at]} marked a loop this role does not staff`);
+	}
+});
+
+// The mark is the console's fact and the staffing state is the loop's, so a loop this role
+// staffs and is hearing carries the mark with nothing wrong anywhere.
+test('the mark stands on a loop that is staffed and subscribed', async () => {
+	const fine = [inReach[0]];
+
+	for (const [at, body] of (await eachView(inAView({}, fine))).entries()) {
+		assert.match(body, /You staff this/, `${views[at]} dropped the mark when nothing was wrong`);
 	}
 });

@@ -21,8 +21,8 @@ the rule without knowing something, write the something down.
 
 **Shared furniture is a bare element selector in `app.css`.** `button`, `a`, `input`,
 `select`, `table`, `th`, `td`, `h1`, `h2`, plus the utility classes `.quiet`, `.refusal`,
-`.destructive`, `.acts`, `.new`, `.name`, `.lesser`, `.wayin`, `.field`, `.back`, `.meaning`
-and `.awaiting`. Styling the bare element means an unstyled `<button>` is already correct.
+`.destructive`, `.acts`, `.new`, `.name`, `.lesser`, `.wayin`, `.field`, `.back`, `.meaning`,
+`.nobody` and `.awaiting`. Styling the bare element means an unstyled `<button>` is already correct.
 **A component never declares `:global()`** — if a rule has to escape the component, it is
 furniture and it belongs in `app.css`. **And never an inline `style` attribute**: it is out
 of reach of every rule here, which is the whole of the case against it.

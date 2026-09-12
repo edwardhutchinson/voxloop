@@ -14,7 +14,9 @@
 
 	import Icon from './Icon.svelte';
 	import Rungs from './Rungs.svelte';
-	import { roleRow, setCell, whatWentWrong } from './server.js';
+	import Staffs from './Staffs.svelte';
+	import { roleRow, setCell, setStaffing, whatWentWrong } from './server.js';
+	import { carries } from './rungs.js';
 
 	let { role } = $props();
 
@@ -53,6 +55,17 @@
 		setting = null;
 		await read(role);
 	}
+
+	// The second write on the same pair, and it is a second act rather than a step in the
+	// first: marking a staffing role grants nothing, and granting `emit` says nothing about
+	// who answers for the loop (ADR-0065). Lowering a cell below `emit` clears the flag, so
+	// the row is read again after either write.
+	async function staff(held, staffs) {
+		setting = held.id;
+		await attempt(() => setStaffing(role, held.id, staffs));
+		setting = null;
+		await read(role);
+	}
 </script>
 
 <section>
@@ -73,6 +86,12 @@
 				<strong>emit</strong> can monitor. Granting one person one extra loop costs a role — there is
 				no per-person exception anywhere in VoxLoop.
 			</p>
+			<p>
+				A loop this role <strong>staffs</strong> counts its occupants toward that loop's staffing
+				state — <em>is a human behind this loop</em>. It confers nothing: nobody is subscribed by it
+				and no console changes. Only a loop this role may emit on can be staffed by it, and taking
+				that permission away takes the marking with it.
+			</p>
 		</header>
 
 		{#if refusal}
@@ -87,6 +106,7 @@
 					<tr>
 						<th>Loop</th>
 						<th>Permission</th>
+						<th>Staffing</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -112,6 +132,15 @@
 									of="{row.role.name} on {cell.loop.name}"
 									busy={setting === cell.loop.id}
 									onset={(permission) => set(cell.loop, permission)}
+								/>
+							</td>
+							<td>
+								<Staffs
+									staffs={cell.staffs}
+									mayEmit={carries(cell.permission, 'emit')}
+									of="{row.role.name} on {cell.loop.name}"
+									busy={setting === cell.loop.id}
+									onset={(staffs) => staff(cell.loop, staffs)}
 								/>
 							</td>
 						</tr>

@@ -193,6 +193,15 @@ th {
 	color: var(--warning);
 }
 
+/* A loop no human is behind: `away` with its reason, or `vacant` (v1 §1). In the warning
+   colour beside the word or the sentence that says it, never instead of one — `this is true
+   and you should look at it`, which is what the colour is kept for. Furniture because the
+   board, the ledger and the lobby all say it, and a state that renders in only one of the
+   two views is a bug (v1 §8). */
+.nobody {
+	color: var(--warning);
+}
+
 /* A session that has ended, said once in the lobby it landed back in. It is not a refusal
    and not a warning — it is the ordinary end of a shift, or a role taken up on another
    machine — so it reads as the quiet statement of fact it is. */

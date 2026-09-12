@@ -200,6 +200,20 @@ export const setCell = (role, held, permission) =>
 	});
 
 /**
+ * Mark a role as staffing a loop, or stop marking it.
+ *
+ * The same pair and a second write, because it says a second thing about them: this role
+ * counts toward that loop's staffing state, and it **confers nothing** (ADR-0065) — nobody
+ * is subscribed by it and no console changes. Refused where the pair holds less than
+ * `emit`, because a role that cannot answer cannot staff.
+ */
+export const setStaffing = (role, held, staffs) =>
+	ask(`/api/grid/${encodeURIComponent(role)}/${encodeURIComponent(held)}/staffing`, {
+		method: 'PUT',
+		...sending({ staffs })
+	});
+
+/**
  * Rule on a loop's column, clearing its unreviewed mark.
  *
  * It is per loop, never per cell, and it records a deliberate `none` against every role

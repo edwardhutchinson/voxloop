@@ -45,12 +45,25 @@
 	// live operational control, so nothing here can nudge it: the cog opens a modal scoped to
 	// the loop, which `Console.svelte` holds above both views.
 	//
-	// The staffing marks are #48. Nothing here decides which act a click is: it says which
-	// loop was clicked, and `Console.svelte` reads the document to know the rest.
+	// **Staffing state is a word here and a sentence in the ledger** (v1 §8, ADR-0065). A card
+	// cannot hold `away — 1 muted, 2 not subscribed`, and it does not have to: the word says
+	// whether a human is behind the loop, which is what a glance is for, and the reading view
+	// says why. A loop with no staffing roles says nothing where the word goes — blank, never
+	// a fourth word (ADR-0056).
+	//
+	// **The loops this role staffs are marked, in two states**, and the mark is on the card
+	// whether or not anything is wrong: *you staff this*, and *you would staff this and are
+	// not monitoring it*. Showing only the second would make it an alarm rather than a fact
+	// about the operator's own console, appearing for the first time at the moment something
+	// is wrong. Clicking the body is the whole fix, and it is already the card's act.
+	//
+	// Nothing here decides which act a click is: it says which loop was clicked, and
+	// `Console.svelte` reads the document to know the rest.
 	import Icon from './Icon.svelte';
 	import Talking from './Talking.svelte';
 	import TransmitBar from './TransmitBar.svelte';
 	import { carries } from './rungs.js';
+	import { theWord } from './staffing.js';
 
 	// `bar` is everything the transmit bar renders, handed over whole and never read here.
 	// **Placing it is this view's business and wording it is the bar's** (ADR-0034), so this
@@ -79,6 +92,20 @@
 				{/if}
 				{#if reachable.volume < 100}
 					<span class="volume">{reachable.volume}%</span>
+				{/if}
+				<!-- Whether a human is behind the loop: a fact about the loop rather than about
+				     this console, and blank where nothing staffs it (ADR-0056). -->
+				{#if theWord(reachable.staffing)}
+					<span class="staffing" class:nobody={reachable.staffing.state !== 'staffed'}>
+						{theWord(reachable.staffing)}
+					</span>
+				{/if}
+				<!-- The mark, in words rather than in colour alone, and in both its states. The
+				     second is the actionable one: this card's body is what fixes it. -->
+				{#if reachable.staffs}
+					<span class="staffs">
+						{reachable.subscribed ? 'You staff this' : 'You staff this, not monitoring it'}
+					</span>
 				{/if}
 				{#if reachable.subscribed && reachable.health === 'not-receiving'}
 					<span class="health unreceived">Not receiving</span>
@@ -223,7 +250,9 @@
 
 	.muted,
 	.volume,
-	.health {
+	.health,
+	.staffing,
+	.staffs {
 		display: block;
 		margin-top: var(--space-1);
 		font-size: var(--type-2);

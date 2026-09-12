@@ -1,7 +1,7 @@
 <script>
 	// The ledger: a compact table row per loop in reach, and the reading view (ADR-0032). It
 	// holds the same loops as the board, in the same order, and it is where state too long
-	// for a card lives — the staffing reason above all, when #48 brings it.
+	// for a card lives — **the staffing reason above all** (#48).
 	//
 	// What it spells out today is the rung and the subscription. The board says `emit` and
 	// `Monitoring`; here the row says what `emit` lets this role do with the loop, and what
@@ -38,6 +38,7 @@
 	import Talking from './Talking.svelte';
 	import TransmitBar from './TransmitBar.svelte';
 	import { carries } from './rungs.js';
+	import { theSentence } from './staffing.js';
 
 	// `bar` is everything the transmit bar renders, handed over whole and never read here.
 	// **Placing it is this view's business and wording it is the bar's** (ADR-0034), so this
@@ -59,6 +60,15 @@
 		emit: 'Hear it, and speak on it',
 		control: 'Hear it, speak on it, and hold authority on it'
 	};
+
+	// **Staffing state is a sentence here and a word on the board** (v1 §8). The reason is
+	// counted over occupants where they differ — `away — 1 muted, 2 not subscribed` — and it
+	// collapses to the plain sentence where they agree. Neither the wording nor the
+	// collapsing is this view's: `staffing.js` holds both, because the lobby says the same
+	// thing and a second implementation is how two surfaces come to disagree.
+	//
+	// The mark is a sentence too, and it is here in both its states for the reason it is on
+	// the card in both: it is a fact about this operator's own console rather than an alarm.
 
 	// Loop health in a sentence. A reading this does not know is said as nothing rather than
 	// guessed at: the server is the only thing entitled to judge a loop received (ADR-0017).
@@ -85,6 +95,7 @@
 			<th>Monitoring</th>
 			<th>Reaching you</th>
 			<th>Volume</th>
+			<th>Staffing</th>
 			<th>Emitting to</th>
 		</tr>
 	</thead>
@@ -144,6 +155,28 @@
 					<button aria-label="Volume for {reachable.name}" onclick={() => onCog(reachable)}>
 						<Icon name="settings" />
 					</button>
+				</td>
+				<td>
+					<!-- Nothing at all where the loop has no staffing roles: the absence of a
+					     staffing state is not a fourth state and does not read as one
+					     (ADR-0056). -->
+					{#if theSentence(reachable.staffing)}
+						<span class="meaning" class:nobody={reachable.staffing.state !== 'staffed'}>
+							{theSentence(reachable.staffing)}
+						</span>
+					{/if}
+					{#if reachable.staffs}
+						<!-- The sentence the card has no room for. The second state is the
+						     actionable one, and what fixes it is the control in the Monitoring
+						     column of this same row. -->
+						<span class="meaning">
+							{#if reachable.subscribed}
+								You staff this loop, and you are hearing it.
+							{:else}
+								You staff this loop and it is not on your console. Monitor it to answer for it.
+							{/if}
+						</span>
+					{/if}
 				</td>
 				<td>
 					{#if mayEmit(reachable)}
