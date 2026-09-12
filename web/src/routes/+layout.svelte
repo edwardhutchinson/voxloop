@@ -90,6 +90,11 @@
 		mute: () => {},
 		unmute: () => {},
 		setVolume: () => {},
+		// Saying this operator is not in the chair, and saying they are back. **The one
+		// asserted state** (ADR-0016): nothing here infers it, and nothing here renders off
+		// it either — the claim is on screen because the document carries it.
+		offConsole: () => {},
+		backOnConsole: () => {},
 		// Keying. **The local track goes first and the server is told second**, which is the
 		// order that buys key-to-first-audio under 100 ms (ADR-0008) — and nothing here
 		// renders off either half, because the transmitting lamp is the document's.
@@ -220,6 +225,14 @@
 			frame.refused = null;
 			channel.setVolume(held, volume);
 		};
+		frame.offConsole = () => {
+			frame.refused = null;
+			channel.offConsole();
+		};
+		frame.backOnConsole = () => {
+			frame.refused = null;
+			channel.onConsole();
+		};
 		// **The track first, the signal second** (ADR-0008). The client is the one entitled to
 		// key, because it is the one that can do it without a round trip; the server is the
 		// one entitled to say it is happening, which is why the second half is a message and
@@ -247,6 +260,8 @@
 			frame.mute = () => {};
 			frame.unmute = () => {};
 			frame.setVolume = () => {};
+			frame.offConsole = () => {};
+			frame.backOnConsole = () => {};
 			frame.keying = () => {};
 			frame.priority = () => {};
 			audio?.close();

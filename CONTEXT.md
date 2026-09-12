@@ -236,6 +236,14 @@ _Avoid_: known state, verified state, real state
 A claim a user has made about themselves, of which there is exactly one: off console. It is only ever as true as the moment it was asserted, so it is always shown alongside how long ago the claimant last did anything deliberate. It is never inferred and never rendered like observed state.
 _Avoid_: reported state, self-reported, declared status
 
+**Off console**:
+The one asserted state: a user's own claim that they are not in the chair. It is set and cleared only by the person it is about, and cleared by any deliberate act — keying, changing a subscription or an arm, answering a prompt, dismissing a banner — never by mouse movement, scroll or focus, and never inferred from idleness. Declaring it drops the staffing state of the loops the claimant's role staffs to `away` and changes nothing else: subscriptions stand and audio keeps flowing. It is never remembered across an assume.
+_Avoid_: away (which is a loop's staffing state rather than a person's claim), idle, AFK, busy, status, do not disturb
+
+**Last active**:
+How long ago a session last did something deliberate — an observed fact, recorded per session, and the thing an off-console assertion is always shown against. Nothing the machine does moves it: a heartbeat, a media path report and a beacon count are a tab reporting on itself, not a person at a desk.
+_Avoid_: last seen, idle time, activity, heartbeat
+
 **Presence document**:
 The single versioned document, one per session, carrying every state that session may see. It is pushed by the server and rendered atomically, so what is on screen was simultaneously true; it is scoped to the loops the session's role may monitor.
 _Avoid_: state feed, snapshot, sync payload

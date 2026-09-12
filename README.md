@@ -348,9 +348,8 @@ it says nothing about a loop at unity. The ledger says it in a sentence on every
 
 **Beacon loss is one of the reasons an occupant is not hearing a loop**, which is what turns
 `staffed` from *says they're listening* into *demonstrably receiving*. The state authority
-answers that per occupant, taking the reason furthest upstream: `unreachable`, then `not
-subscribed`, then `not receiving it`, then `muted`, with off console
-([#47](https://github.com/edwardhutchinson/voxloop/issues/47)) to join them. Staffing state
+answers that per occupant, taking the reason furthest upstream: `unreachable`, then `off
+console`, then `not subscribed`, then `not receiving it`, then `muted`. Staffing state
 itself, counted across every occupant of every staffing role, is
 [#48](https://github.com/edwardhutchinson/voxloop/issues/48).
 
@@ -366,6 +365,55 @@ events, so a headset unplugged or a default swapped under the operator is **said
 the tone offered again**. The swap detection is asserted at moderate confidence and is to be
 confirmed on real hardware alongside
 [#17](https://github.com/edwardhutchinson/voxloop/issues/17).
+
+## Off console
+
+**Every state VoxLoop shows is observed or asserted**
+([ADR-0016](docs/adr/0016-displayed-state-is-observed-or-asserted.md)). Observed state is
+something the server saw for itself; asserted state is a claim a user made about themselves,
+and there is exactly one of those: **off console**.
+
+**It is set and cleared by hand, and never inferred.** Idle-based auto-away is rejected
+outright — an operator watching telemetry is idle at the keyboard and very much on console —
+so there is no idle timer anywhere in the product, and `npm test` refuses `mousemove`,
+`scroll`, `focus` and `visibilitychange` across the whole console for that reason.
+
+**Any deliberate act clears it.** Keying, changing a subscription, changing an arm, answering
+a prompt, dismissing a banner: each of those is a person acting on a console, and each of them
+already arrives at the server as a signalling message. Transport rules on every message
+exhaustively — the same function that decides what renews a sign-in — so a heartbeat, a media
+path report and a beacon count clear nothing and refresh nothing, and a message nobody has
+ruled on does not compile. *I am back on console* is one of those acts rather than a second
+mechanism: its handler does nothing but answer with the document.
+
+**The claim is never shown without the age of its evidence.** The document carries the two as
+one value — `off_console` is `null`, or an object holding how many seconds ago the claimant
+last did anything deliberate — so there is no rendering in which the claim appears alone. The
+console draws it in words that say who said it (*You said you are off console. Last active 14
+min ago.*) inside a dashed outline nothing observed wears, above both views, because it is
+about the person in the chair rather than about any loop.
+
+**This is the one running age in the document.** The connection's age belongs to the console,
+because a session that hears nothing is told nothing; this one belongs to the server, because
+the acts it measures arrive there and because everyone else who is later shown the claim — the
+audience ([#49](https://github.com/edwardhutchinson/voxloop/issues/49)), the staffing reason
+([#48](https://github.com/edwardhutchinson/voxloop/issues/48)) — has no clock of their own to
+run it on. It moves the version once a second, and only while somebody is off console.
+
+**A stale assertion is still shown, with its age.** Nothing expires one and nothing resolves
+it: an operator who said they were stepping out three hours ago reads exactly that, and the
+judgement is the reader's. That is a deliberate refusal to be helpful.
+
+**Declaring it changes nothing else.** Subscriptions stand, arms stand and audio keeps
+flowing, so the operator who steps away and hears something over their headset from three
+metres away still hears it, and coming back is a click rather than a resynchronisation. What
+it costs is the staffing state of the loops the role staffs, which drops to `away` — the state
+authority already reports off console as the reason an occupant is not hearing a loop, and
+counting that across occupants is [#48](https://github.com/edwardhutchinson/voxloop/issues/48).
+
+**It is never remembered.** Nothing writes it anywhere, so a seat taken up again starts on
+console: a day-old assertion is not a fact about anything
+([ADR-0050](docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md)).
 
 ## The operating console
 

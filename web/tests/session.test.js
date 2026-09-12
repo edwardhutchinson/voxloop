@@ -464,6 +464,25 @@ test('muting, unmuting and setting a volume are what a tab says, and it renders 
 	assert.deepEqual(page.told, []);
 });
 
+// **The one asserted state, and it is only ever said by hand** (ADR-0016). Both halves are
+// messages a person's click sends: nothing here infers the claim, and nothing here clears it
+// either — the server clears it on any deliberate act, and this tab learns it happened when
+// the document says so.
+test('saying you are off console and saying you are back are two things a tab says', () => {
+	const page = listening();
+	const channel = openSignalling(page);
+	lastSocket().happens('open');
+
+	channel.offConsole();
+	channel.onConsole();
+
+	assert.deepEqual(lastSocket().sent.slice(1), [
+		'{"message":"off-console"}',
+		'{"message":"on-console"}'
+	]);
+	assert.deepEqual(page.told, []);
+});
+
 test('nothing is said on a socket that is not open', () => {
 	const channel = openSignalling(listening());
 	lastSocket().happens('open');
