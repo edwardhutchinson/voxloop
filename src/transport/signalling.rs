@@ -344,6 +344,28 @@ enum Incoming {
         held_on: String,
         volume: u64,
     },
+    /// Say that this operator is not in the chair.
+    ///
+    /// `Session` (`docs/spec/api-surface.md`) and **never inferred** ([ADR-0016]): it is the one
+    /// asserted state in VoxLoop, and the only way into it is a person saying so. It reaches
+    /// nothing and nobody — subscriptions stand and audio keeps flowing — so there is no rung
+    /// for it to need, and it is **never remembered** ([ADR-0050]).
+    ///
+    /// It is a deliberate act like every other message a person sends, which is why the
+    /// assertion is made *after* that act has been noted rather than before: the operator was
+    /// demonstrably at the desk at the moment they said they were leaving it, and the age the
+    /// claim is shown against runs from there.
+    ///
+    /// [ADR-0016]: ../../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+    /// [ADR-0050]: ../../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
+    OffConsole,
+    /// The operator is back at the desk. `Session`, the other half of the act.
+    ///
+    /// **It clears the assertion by being a deliberate act and not by being this message**
+    /// (v1 §6). Keying, a subscription, an arm, answering a prompt and dismissing a banner all
+    /// clear it the same way; this exists so that somebody who has come back can say so
+    /// without having to do something else first, and it is not a second mechanism.
+    OnConsole,
     /// How many packets of each loop's beacon this client has counted, as running totals.
     ///
     /// `Session` (`docs/spec/api-surface.md`, *Report loop health*). **The client counts and
@@ -393,6 +415,13 @@ impl Incoming {
             | Self::Mute { .. }
             | Self::Unmute { .. }
             | Self::SetVolume { .. }
+            // **An assertion about oneself reaches nothing and nobody** either. It is about
+            // the human in the chair rather than about any loop, and it takes nothing away
+            // from anybody — what it costs is the staffing state of the loops this role
+            // staffs, which is a consequence VoxLoop reports rather than a permission it
+            // checks.
+            | Self::OffConsole
+            | Self::OnConsole
             // **A count reaches nothing and changes nobody's audio.** It measures the loops
             // this session already monitors, which were gated on `monitor` when they were
             // taken up, and a count for any other loop is not taken.
@@ -435,6 +464,12 @@ impl Incoming {
             | Self::Mute { .. }
             | Self::Unmute { .. }
             | Self::SetVolume { .. }
+            // **Both halves of the assertion are deliberate acts**, and the second one is how
+            // an operator comes back (v1 §6). Saying *I am off console* is somebody at a desk
+            // saying something about themselves, which is why the age the claim is shown
+            // against starts at the moment they said it rather than before it.
+            | Self::OffConsole
+            | Self::OnConsole
             // **Keying is the most deliberate act there is**, and it is also what clears an
             // off-console assertion (`CONTEXT.md`). A console somebody is talking on is
             // emphatically one somebody is sitting at.
@@ -485,6 +520,8 @@ impl Incoming {
             Self::Mute { .. } => "mute",
             Self::Unmute { .. } => "unmute",
             Self::SetVolume { .. } => "set-volume",
+            Self::OffConsole => "off-console",
+            Self::OnConsole => "on-console",
             Self::BeaconsCounted { .. } => "beacons-counted",
         }
     }
@@ -722,7 +759,33 @@ struct Presence {
     ///
     /// [ADR-0046]: ../../../docs/adr/0046-priority-is-keyed-not-held.md
     priority: bool,
+    /// What this operator has claimed about themselves, or `null` where they have claimed
+    /// nothing.
+    ///
+    /// **The one asserted field in the document** ([ADR-0016]), and it is an object rather
+    /// than a flag so that the claim cannot cross the wire without the age of its evidence:
+    /// a console handed a bare `true` would be free to draw it like something the server had
+    /// seen, which is the one thing the rule forbids. *On console* is the absence of a claim
+    /// rather than a second one, so there is nothing to say when nobody has said anything.
+    ///
+    /// [ADR-0016]: ../../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+    off_console: Option<OffConsole>,
     loops: Vec<Reachable>,
+}
+
+/// The one asserted state, as the console is given it.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+struct OffConsole {
+    /// How long ago the claimant last did anything deliberate, in whole seconds.
+    ///
+    /// **The assertion is only as true as this is small**, and the console says the number
+    /// rather than resolving it: a stale claim is still shown, with its age, and the judgement
+    /// is left with the human (v1 §6).
+    ///
+    /// Seconds rather than a timestamp, because the two ends do not share a clock and an
+    /// instant one of them had to correct for skew would be a worse answer than a duration
+    /// neither has to interpret.
+    last_active_seconds: u64,
 }
 
 /// The role a session is bound to, named so a console can say what it is.
@@ -1021,6 +1084,12 @@ impl Conversation {
                 self.setting_the_volume(&LoopId::presented(held_on), volume)
                     .await
             }
+            Incoming::OffConsole => self.off_console().await,
+            // **Nothing to do but answer.** The deliberate act above has already cleared the
+            // assertion, because that is the whole of how one is cleared (v1 §6) — a second
+            // mechanism here would be a way back on console that did not go through the
+            // evidence, and the next act to arrive would have to agree with it.
+            Incoming::OnConsole => self.presence(Told::WhetherOrNotItMoved).await,
             Incoming::BeaconsCounted { counted } => self.the_client_counted(counted).await,
         }
     }
@@ -1363,6 +1432,28 @@ impl Conversation {
             Muted::Muted => self.api.state.mute(&session, held_on),
             Muted::Unmuted => self.api.state.unmute(&session, held_on),
         };
+
+        self.presence(Told::WhetherOrNotItMoved).await
+    }
+
+    /// Say that this operator is not in the chair.
+    ///
+    /// **Nothing is remembered and nothing else moves.** An assertion that outlived its
+    /// session would be a claim about where somebody was sitting yesterday ([ADR-0050]), and
+    /// there is no personalisation write here and no row for one. Subscriptions stand, arms
+    /// stand and the fan-out is untouched (v1 §6).
+    ///
+    /// **There is no handler on the other side of this.** Coming back is any deliberate act,
+    /// and the message that says so is one of them.
+    ///
+    /// [ADR-0050]: ../../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
+    async fn off_console(&mut self) -> Result<Vec<Outgoing>, StoreError> {
+        let Some(session) = self.session.clone() else {
+            // Unreachable: `Session` was met a moment ago, and only this socket clears it.
+            return Ok(Vec::new());
+        };
+
+        self.api.state.off_console(&session);
 
         self.presence(Told::WhetherOrNotItMoved).await
     }
@@ -1730,6 +1821,9 @@ impl Conversation {
                 connection: presence.connection.as_str(),
                 keyed: presence.keyed,
                 priority: presence.priority,
+                off_console: presence.off_console.map(|asserted| OffConsole {
+                    last_active_seconds: asserted.last_active.as_secs(),
+                }),
                 loops: presence
                     .loops
                     .into_iter()
@@ -1944,9 +2038,26 @@ impl Conversation {
 
     /// Note that the person holding this sign-in did something deliberate.
     ///
-    /// The 24-hour window is measured from these, and **nothing the server pushes counts**:
-    /// a console left open on a desk has done nothing, which is what the window is for.
+    /// **Two clocks and one piece of evidence.** The durable one is the 24-hour window the
+    /// sign-in is reaped on, and **nothing the server pushes counts** towards it: a console
+    /// left open on a desk has done nothing, which is what the window is for. The live one is
+    /// this session's last-active, which an off-console assertion is shown against and which
+    /// any deliberate act clears that assertion by moving ([ADR-0016]).
+    ///
+    /// They are moved together because they are the same fact, and this is the one place that
+    /// can tell a person's act from the machine's: [`Incoming::was_a_deliberate_act`] rules on
+    /// every message exhaustively, so a message nobody has ruled on does not compile. Mouse
+    /// movement, scroll and focus are not messages and reach neither clock.
+    ///
+    /// The live half is skipped on a lobby socket, which has no session and so no chair to be
+    /// in.
+    ///
+    /// [ADR-0016]: ../../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
     async fn note_a_deliberate_act(&self) -> Result<(), StoreError> {
+        if let Some(session) = &self.session {
+            self.api.state.a_deliberate_act(session);
+        }
+
         let mut transaction = self.api.store.begin().await?;
         transaction.note_a_deliberate_act(&self.sign_in).await?;
         transaction.commit().await?;
@@ -3144,6 +3255,9 @@ mod tests {
         assert_eq!(said["keyed"], false);
         assert_eq!(said["priority"], false);
         assert_eq!(said["loops"][0]["priority"], false);
+        // **`null` is the whole of what *on console* is.** Asserted state is a claim somebody
+        // made, so its absence is nobody having made one rather than a second claim (ADR-0016).
+        assert!(said["off_console"].is_null());
         let mut named: Vec<&String> = said.as_object().expect("a document").keys().collect();
         named.sort();
         assert_eq!(
@@ -3154,6 +3268,7 @@ mod tests {
                 "loops",
                 "media_path",
                 "message",
+                "off_console",
                 "priority",
                 "role",
                 "session",
@@ -5366,6 +5481,138 @@ mod tests {
         assert_eq!(as_json(&carried[0])["on"], air_to_ground.as_str());
         assert_eq!(as_json(&carried[1])["message"], "one-fewer-beacon");
         assert_eq!(as_json(&carried[1])["carriage"], "a-beacon");
+    }
+
+    // ---- Off console (#47) --------------------------------------------------------------
+
+    const OFF_CONSOLE: &str = r#"{"message":"off-console"}"#;
+    const ON_CONSOLE: &str = r#"{"message":"on-console"}"#;
+
+    /// What a document says this operator has claimed about themselves.
+    fn asserted(said: &Outgoing) -> Option<&OffConsole> {
+        the_presence(said).1.off_console.as_ref()
+    }
+
+    /// **An operator sets and clears it explicitly** (v1 §6), and the document says which —
+    /// with the age of the evidence behind it, because there is no field that carries one
+    /// without the other.
+    #[tokio::test]
+    async fn an_operator_can_say_they_are_off_console_and_say_they_are_back() {
+        let (_lobby, _flight, _air_to_ground, mut socket) = a_console_monitoring_one_loop().await;
+
+        let away = said(&mut socket, OFF_CONSOLE).await;
+        assert!(
+            asserted(&away).is_some(),
+            "the document does not carry the assertion"
+        );
+        // The claim crosses the wire with the age of its evidence or not at all, and the age
+        // runs from the act that made the claim — which was a person, at that desk, then.
+        assert_eq!(as_json(&away)["off_console"]["last_active_seconds"], 0);
+
+        let back = said(&mut socket, ON_CONSOLE).await;
+        assert_eq!(asserted(&back), None, "the assertion outlived the operator");
+    }
+
+    /// **Any deliberate act clears it** (v1 §6). Keying is the unambiguous one and a
+    /// subscription is the ordinary one; neither is a special case, because both arrive as
+    /// evidence that somebody is at the desk.
+    #[tokio::test]
+    async fn keying_and_taking_a_loop_up_each_clear_the_assertion() {
+        let (_lobby, _flight, air_to_ground, mut socket) = a_console_monitoring_one_loop().await;
+
+        all(&mut socket, OFF_CONSOLE).await;
+        let keyed = said(&mut socket, r#"{"message":"key"}"#).await;
+        assert_eq!(asserted(&keyed), None, "keying left the operator away");
+
+        all(&mut socket, r#"{"message":"unkey"}"#).await;
+        all(&mut socket, OFF_CONSOLE).await;
+        let taken = said(&mut socket, &unsubscribing(&air_to_ground)).await;
+        assert_eq!(
+            asserted(&taken),
+            None,
+            "a subscription left the operator away"
+        );
+    }
+
+    /// **The machine's own messages are not evidence that anybody is in the chair**
+    /// (ADR-0016). A heartbeat arrives every two seconds from a tab nobody is looking at, a
+    /// media path report is ICE negotiating with itself, and a beacon count is the client
+    /// counting packets — and an assertion cleared by any of them would be cleared by a
+    /// console left open on an empty desk.
+    #[tokio::test]
+    async fn nothing_the_machine_says_on_its_own_account_clears_the_assertion() {
+        let (_lobby, _flight, air_to_ground, mut socket) = a_console_monitoring_one_loop().await;
+        all(&mut socket, OFF_CONSOLE).await;
+
+        all(&mut socket, HEARTBEAT).await;
+        all(
+            &mut socket,
+            r#"{"message":"media-path","state":"connected"}"#,
+        )
+        .await;
+
+        let still = said(&mut socket, &counting(&air_to_ground, 4)).await;
+        assert!(
+            asserted(&still).is_some(),
+            "a message the machine sent on its own account was read as a person"
+        );
+    }
+
+    /// **It is a deliberate act in both directions** (v1 §6), and the second half is the whole
+    /// of how somebody comes back: the handler for `on-console` does nothing but answer,
+    /// because this is what cleared the assertion.
+    #[test]
+    fn both_halves_of_the_assertion_are_deliberate_acts() {
+        for message in [OFF_CONSOLE, ON_CONSOLE] {
+            let message: Incoming =
+                serde_json::from_str(message).expect("a message this server reads");
+
+            assert!(message.was_a_deliberate_act());
+            assert!(matches!(message.requirement(), Requirement::Session));
+        }
+    }
+
+    /// **Declaring it changes nothing else** (v1 §6): the subscription stands and the audio
+    /// keeps flowing, so coming back is a click rather than a resynchronisation.
+    #[tokio::test]
+    async fn going_off_console_leaves_the_console_exactly_as_it_was() {
+        let (_lobby, _flight, _air_to_ground, mut socket) = a_console_monitoring_one_loop().await;
+
+        let away = said(&mut socket, OFF_CONSOLE).await;
+
+        assert_eq!(monitoring(&away), ["Air-to-ground"]);
+        assert!(!the_loop(&away).muted, "stepping away muted a loop");
+    }
+
+    /// **It is never remembered** (v1 §10). A day-old assertion is not a fact about anything,
+    /// so the seat comes back on console and the subscription — which *is* remembered — comes
+    /// back with it.
+    #[tokio::test]
+    async fn an_assertion_is_gone_at_the_next_assume_and_the_subscription_is_not() {
+        let (_lobby, flight, _air_to_ground, mut socket) = a_console_monitoring_one_loop().await;
+        all(&mut socket, OFF_CONSOLE).await;
+        all(&mut socket, RELINQUISH).await;
+
+        let again = all(&mut socket, &assuming(&flight)).await;
+        let again = again.last().expect("a document");
+
+        assert_eq!(asserted(again), None, "an assertion outlived its session");
+        assert_eq!(monitoring(again), ["Air-to-ground"]);
+    }
+
+    /// It is `Session` (`docs/spec/api-surface.md`): a lobby has no chair to be out of.
+    #[tokio::test]
+    async fn an_assertion_from_the_lobby_is_refused() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, HELLO).await;
+
+        let refused = said(&mut socket, OFF_CONSOLE).await;
+
+        assert!(
+            matches!(&refused, Outgoing::Refused { was, .. } if was == "off-console"),
+            "{refused:?}"
+        );
     }
 
     /// The loops whose beacons the media plane was last told this listener counts.

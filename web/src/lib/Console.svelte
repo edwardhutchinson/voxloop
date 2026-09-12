@@ -33,6 +33,7 @@
 	import Board from './Board.svelte';
 	import Ledger from './Ledger.svelte';
 	import LoopVolume from './LoopVolume.svelte';
+	import OffConsole from './OffConsole.svelte';
 	import OutputCheck from './OutputCheck.svelte';
 	import { watchTheOutput } from './output.js';
 	import { CONFIRMED, DISCONNECTED, UNCONFIRMED, worse } from './session.js';
@@ -53,6 +54,8 @@
 		onMute,
 		onUnmute,
 		onSetVolume,
+		onOffConsole,
+		onBackOnConsole,
 		onKeying,
 		onPriority
 	} = $props();
@@ -355,6 +358,17 @@
 	<!-- Above both views rather than inside either: it is about the headset on this desk, not
 	     about any loop, and every loop can read as received while the sound goes nowhere. -->
 	<OutputCheck {moved} onConfirmed={heardTheTone} />
+
+	<!-- **The one asserted state** (ADR-0016), and it is about the person in the chair rather
+	     than about any loop — so it sits above both views like the marks around it, and is on
+	     screen whichever view is showing. It is not in the transmit bar: the bar is what an
+	     operator reads before keying, and a claim about where somebody is sitting is not part
+	     of *who will hear me*.
+
+	     **Declaring it changes nothing here.** The loops below are untouched, the audio keeps
+	     playing, and the card that would have to change is on everybody else's console — which
+	     is what makes the sentence under the claim worth the room it takes. -->
+	<OffConsole asserted={presence.off_console} {onOffConsole} {onBackOnConsole} />
 
 	{#if inOrder.length === 0}
 		<!-- A fact about reach rather than about either view, so it is said here and once. The

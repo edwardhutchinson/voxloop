@@ -1253,3 +1253,74 @@ test('the console holds one output check, above both views', async () => {
 		assert.doesNotMatch(read(join(lib, view)), /OutputCheck/, `${view} holds a check of its own`);
 	}
 });
+
+// ---- Off console (#47) ----------------------------------------------------------------
+
+// The one claim in the product, and the one the console is forbidden from drawing like a
+// fact (ADR-0016). Fourteen minutes is the age ADR-0016 itself uses as the example of what
+// an honest rendering says.
+const away = { last_active_seconds: 14 * 60 };
+
+const theConsoleOffConsole = {
+	...theConsole,
+	presence: { ...theConsole.presence, off_console: away }
+};
+
+test('the console offers a way to say you are off console, and a way back', async () => {
+	const on = await rendered('Console.svelte', theConsole);
+	const off = await rendered('Console.svelte', theConsoleOffConsole);
+
+	assert.match(on, />Off console</, 'a console with no way to say you are stepping away');
+	assert.match(off, />I am back on console</, 'an assertion with no way out of it');
+});
+
+// **The claim and the age of its evidence are one value** (v1 §6), so the age moves with the
+// document and there is no rendering in which the claim appears without it.
+test('an assertion is never shown without how long ago its claimant was last active', async () => {
+	const said = await Promise.all(
+		[9, 14 * 60, 3 * 3600 + 20 * 60].map((last_active_seconds) =>
+			rendered('OffConsole.svelte', { asserted: { last_active_seconds } })
+		)
+	);
+
+	assert.match(said[0], /Last active 9 s ago/);
+	assert.match(said[1], /Last active 14 min ago/);
+	assert.match(said[2], /Last active 3 h 20 min ago/);
+	// **A stale assertion is still shown, with its age** — nothing rounds three hours away,
+	// hides it, or resolves the ambiguity on the reader's behalf.
+	assert.match(said[2], /You said you are off console/);
+});
+
+// **The console may not render the asserted and the observed alike** (ADR-0016). The words
+// carry it first — *you said*, which nothing the server observed would ever be written as —
+// and the outline carries it second, because colour is never the only thing carrying a state.
+test('an assertion is not drawn like anything the server observed', async () => {
+	const body = await rendered('OffConsole.svelte', { asserted: away });
+	const source = read(join(lib, 'OffConsole.svelte'));
+
+	assert.match(body, /You said/, 'the claim is not marked as a claim in words');
+	assert.match(asRead(body), /not something it has seen/);
+	assert.match(source, /border:[^;]*dashed/, 'the claim wears the outline of an observed state');
+	// The stale and lost marks are what an observed state that wants looking at reads like,
+	// and this is not one of them: an operator's claim about themselves is not a fault.
+	assert.doesNotMatch(source, /--warning/);
+});
+
+// It is about the person in the chair rather than about any loop, so it sits above both views
+// like the stale mark and the output check — on screen whichever view is showing, and worded
+// once because there is one of it.
+test('the assertion is above both views rather than inside either', async () => {
+	const body = await rendered('Console.svelte', theConsoleOffConsole);
+
+	assert.ok(
+		body.includes(await rendered('OffConsole.svelte', { asserted: away })),
+		'the console does not carry the assertion'
+	);
+	for (const view of views) {
+		assert.doesNotMatch(
+			read(join(lib, view)),
+			/OffConsole/,
+			`${view} draws the assertion itself — there is one of it, above both views`
+		);
+	}
+});

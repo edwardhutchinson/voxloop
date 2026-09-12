@@ -276,6 +276,25 @@ export function openSignalling({
 		 */
 		setVolume: (heldOn, volume) => say(socket, { message: 'set-volume', loop: heldOn, volume }),
 		/**
+		 * Say that this operator is not in the chair, or that they are back.
+		 *
+		 * **The one asserted state in the product, and it is only ever said by hand** (ADR-0016).
+		 * Nothing here infers it: there is no idle timer, no `mousemove` listener and no focus
+		 * handler anywhere in the console, because an operator watching telemetry is idle at the
+		 * keyboard and very much on console.
+		 *
+		 * **Coming back is not a special act.** Any deliberate act clears the claim at the server
+		 * — keying, a subscription, an arm, answering a prompt, dismissing a banner — and
+		 * `backOnConsole` is here for somebody who has come back and has nothing else to do yet.
+		 * The claim goes when the document says it has, like everything else on the page.
+		 *
+		 * The pair is named for the two acts rather than for the two messages: `on-console` on
+		 * the wire reads as the opposite of `off-console`, and `onConsole` in a console written
+		 * in Svelte reads as a handler for something.
+		 */
+		offConsole: () => say(socket, { message: 'off-console' }),
+		backOnConsole: () => say(socket, { message: 'on-console' }),
+		/**
 		 * The four halves of the client's own media negotiation, carried and never read here.
 		 *
 		 * They are the Audio module's, and this file's only part in them is that they go on

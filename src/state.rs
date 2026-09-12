@@ -271,6 +271,13 @@ pub(crate) enum NotHearing {
     /// The signalling channel is gone. Nothing this session reports is arriving, beacon
     /// counts included, so this is the one reason that stands in for all the others.
     Unreachable,
+    /// **The occupant has said they are not in the chair** ([ADR-0016]). It is the one
+    /// asserted reason among observed ones, and it sits second because the conditions nest:
+    /// it is still true if everything below it were fixed, and it is not true of a session
+    /// that cannot be reached at all — that one explains the silence on its own.
+    ///
+    /// [ADR-0016]: ../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+    OffConsole,
     /// The loop is not on this console.
     NotSubscribed,
     /// **The loop's beacon is not arriving** ([ADR-0017]). It is what upgrades `staffed` from
@@ -547,6 +554,35 @@ struct Session {
     ///
     /// [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
     reach: Vec<InReach>,
+    /// Whether this operator has said they are not in the chair.
+    ///
+    /// **The one asserted state in VoxLoop** ([ADR-0016]), and the only field here that is a
+    /// claim rather than something the server saw. Nothing derives it: idle-based auto-away
+    /// is rejected outright, because an operator watching telemetry is idle at the keyboard
+    /// and very much on console, so a clock that flipped this would be a fabrication in the
+    /// opposite direction from the one it was meant to fix.
+    ///
+    /// **It is never remembered** ([ADR-0050]), so a seat just taken starts on console
+    /// whatever the last session in it claimed: a day-old assertion is not a fact about
+    /// anything.
+    ///
+    /// [ADR-0016]: ../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+    /// [ADR-0050]: ../../docs/adr/0050-personalisation-persists-what-is-safe-to-be-stale.md
+    off_console: bool,
+    /// When this session last did something deliberate — the observed fact the assertion
+    /// above is shown against.
+    ///
+    /// **An assertion is only as true as the moment it was made**, so it is never shown
+    /// without this ([ADR-0016]). It is free, because every deliberate act already arrives
+    /// here as a signalling message and Transport is the one thing that can tell a person's
+    /// act from the machine's: a heartbeat, a media path report and a beacon count are a tab
+    /// noticing things about itself and move nothing here.
+    ///
+    /// It starts at the assume that minted the session, which is the most deliberate thing
+    /// anybody has done in it.
+    ///
+    /// [ADR-0016]: ../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+    last_active: Instant,
 }
 
 impl Session {
@@ -615,6 +651,32 @@ impl Session {
             .pessimistically_with(self.seen_by_the_server)
     }
 
+    /// The assertion this operator has made about themselves, where they have made one.
+    ///
+    /// **The claim and the age of its evidence are one answer**, so there is no way to render
+    /// the first without the second ([ADR-0016]): a console handed the assertion on its own
+    /// would be free to draw it as though the server had seen it, which is the one thing the
+    /// rule forbids. Nothing at all where nobody has claimed anything — *on console* is the
+    /// absence of an assertion rather than a second one.
+    ///
+    /// [ADR-0016]: ../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+    fn asserted(&self, now: Instant) -> Option<Asserted> {
+        self.off_console.then(|| Asserted {
+            // **Whole seconds, because the document's version moves when this does.** The age
+            // is genuinely part of the state — a claim and how old its evidence is are one
+            // answer — so a full-precision duration here would make every 200 ms tick a new
+            // version carrying byte-identical JSON, and *is this the same state* is the one
+            // question versioning answers ([ADR-0019]). Seconds is also the resolution the
+            // wire carries and the console renders, so nothing is lost by rounding here
+            // rather than at the edge.
+            //
+            // [ADR-0019]: ../../docs/adr/0019-presence-is-one-versioned-document-scoped-to-reach.md
+            last_active: Duration::from_secs(
+                now.saturating_duration_since(self.last_active).as_secs(),
+            ),
+        })
+    }
+
     /// Whether this session may hear that loop: it is in reach, it is monitored, and it is
     /// not muted.
     ///
@@ -674,6 +736,9 @@ impl Session {
     fn not_hearing(&self, held_on: &LoopId, by: Ladder, now: Instant) -> Option<NotHearing> {
         if self.connection(by, now) == Connection::Disconnected {
             return Some(NotHearing::Unreachable);
+        }
+        if self.off_console {
+            return Some(NotHearing::OffConsole);
         }
         if !self.monitors(held_on) {
             return Some(NotHearing::NotSubscribed);
@@ -1041,6 +1106,25 @@ pub(crate) struct WhoHears {
     pub(crate) listeners: Vec<Heard>,
 }
 
+/// The one asserted state, as it stands: the claim, and how old the evidence behind it is.
+///
+/// It is a pair rather than a flag because **asserted state is never shown alone**
+/// ([ADR-0016]). A user said they were off console at some moment; what makes that honest
+/// rather than misleading is the second half — how long ago they last did anything
+/// deliberate — and a type that could carry the first without the second would leave the
+/// console free to omit it.
+///
+/// **A stale assertion is still one**, and it is still shown, with its age. VoxLoop does not
+/// resolve the ambiguity of somebody who walked away and never said so; it makes the
+/// ambiguity visible and leaves the judgement with the human.
+///
+/// [ADR-0016]: ../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Asserted {
+    /// How long ago the claimant last did anything deliberate.
+    pub(crate) last_active: Duration,
+}
+
 /// The presence document: everything one session may see, as of one moment.
 ///
 /// It is a **projection** rather than a record. Nothing here is stored and read back — it is
@@ -1119,6 +1203,24 @@ pub(crate) struct Presence {
     ///
     /// [ADR-0046]: ../../docs/adr/0046-priority-is-keyed-not-held.md
     pub(crate) priority: bool,
+    /// What this operator has claimed about themselves, where they have claimed anything.
+    ///
+    /// **The only asserted field in the document**, and the only one the server has not seen
+    /// for itself ([ADR-0016]). It carries the age of its own evidence with it, so a console
+    /// cannot render the claim as though it were observed without leaving the age out, and
+    /// there is nowhere to leave it out from.
+    ///
+    /// **This is the one place a running age is in the document**, and it is the exception the
+    /// connection's age is not. The connection's age belongs to the console because a session
+    /// that hears nothing is told nothing; this age belongs to the server because the acts it
+    /// is measured from arrive here, and everyone who is later shown this claim — the audience
+    /// (#49), the staffing reason (#48) — is somebody else's console, which has no clock of
+    /// its own to run it on. It moves the version once a second, and only while somebody is
+    /// off console: a state in which, by its own claim, nothing else on that console is moving
+    /// at all.
+    ///
+    /// [ADR-0016]: ../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+    pub(crate) off_console: Option<Asserted>,
     pub(crate) loops: Vec<Standing>,
 }
 
@@ -1241,6 +1343,13 @@ impl StateAuthority {
                 heard_from: now,
                 the_channel_is_gone: false,
                 reach: Vec::new(),
+                // **Nobody is off console on a seat just taken.** Nothing remembers an
+                // assertion (ADR-0050) and nothing could honestly restore one: a day-old
+                // claim about where somebody was sitting is not a fact about anything.
+                off_console: false,
+                // Assuming a role is the most deliberate act there is, so the clock the
+                // assertion would be shown against starts full rather than at nothing.
+                last_active: now,
             });
 
             Ok(Assumed { session, displaced })
@@ -1435,6 +1544,67 @@ impl StateAuthority {
 
             true
         })
+    }
+
+    /// Say that this operator is not in the chair.
+    ///
+    /// **The one asserted state in VoxLoop, and it is only ever set by the person it is about**
+    /// ([ADR-0016]). There is no clock here and no idleness anywhere near it: an operator
+    /// watching telemetry for twenty minutes is doing their job, and a console that demoted
+    /// them would be inventing a state to be helpful with.
+    ///
+    /// **It changes nothing else.** Subscriptions stand, arms stand, volumes stand and the
+    /// fan-out is untouched, so the operator who steps away and hears something over their
+    /// headset from three metres away still hears it, and coming back is a click rather than a
+    /// resynchronisation. What it costs is the staffing state of the loops this session's role
+    /// staffs, which drops to `away` — computed with #48, from [`Session::not_hearing`], which
+    /// already reads it.
+    ///
+    /// It is a **set** like every other act here: a second press on a control that has not
+    /// caught up says the same thing twice and lands on the same state.
+    ///
+    /// It answers whether a live session took the act. Nothing where the id names no session.
+    ///
+    /// [ADR-0016]: ../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+    pub(crate) fn off_console(&self, session: &SessionId) -> bool {
+        self.write(|live| {
+            let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) else {
+                return false;
+            };
+
+            held.off_console = true;
+
+            true
+        })
+    }
+
+    /// Somebody did something deliberate on this session: they are in the chair, as of now.
+    ///
+    /// **This is the whole of how an off-console assertion is cleared** ([ADR-0016]), and
+    /// there is deliberately no second way out of one. Keying, changing a subscription or an
+    /// arm, answering a prompt, dismissing a banner — each is a person acting on a console,
+    /// and each is unambiguous evidence of the thing the assertion denies. Saying *I am back*
+    /// is one of them rather than a special case, which is why nothing here is named for it.
+    ///
+    /// **What is not one of them is the whole point.** Mouse movement, scroll and focus never
+    /// reach this: they are the machine reporting that a page exists, and a cat on a keyboard
+    /// clearing an assertion is the guessing this rule forbids, arriving through the other
+    /// door. Which messages count is Transport's answer, and it is exhaustive over the
+    /// protocol so that a message nobody has ruled on does not compile.
+    ///
+    /// It refreshes the last-active clock whether or not an assertion stands, because that
+    /// clock is what the *next* assertion will be shown against.
+    ///
+    /// Nothing where the id names no session — a lobby socket has no chair to be in.
+    ///
+    /// [ADR-0016]: ../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+    pub(crate) fn a_deliberate_act(&self, session: &SessionId) {
+        self.write(|live| {
+            if let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) {
+                held.off_console = false;
+                held.last_active = Instant::now();
+            }
+        });
     }
 
     /// Set how loud a loop plays in this operator's ears.
@@ -1795,6 +1965,7 @@ impl StateAuthority {
                 connection: held.connection(ladder, now),
                 keyed: held.is_transmitting(ladder, now),
                 priority: held.is_at_priority(ladder, now),
+                off_console: held.asserted(now),
                 // **The narrowing happens here and nowhere else.** The session's set holds
                 // whatever it holds; the reach handed in decides what is rendered, so a
                 // subscription outside it is inert rather than lost ([ADR-0051]).
@@ -1960,6 +2131,22 @@ impl StateAuthority {
         self.write(|live| {
             if let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) {
                 held.heard_from = Instant::now() - ago;
+            }
+        });
+    }
+
+    /// Push a session's last deliberate act back by `ago`, so that a test can stand at an age
+    /// without waiting for the clock to reach it.
+    ///
+    /// It winds the one fact the age is measured from, exactly as [`StateAuthority::unheard_from_for`]
+    /// winds the one the ladder is measured from. **It asserts nothing**: a session wound back
+    /// an hour is a session nobody has touched for an hour, which is not the same statement as
+    /// being off console and is not written like one.
+    #[cfg(test)]
+    pub(crate) fn last_active_was(&self, session: &SessionId, ago: Duration) {
+        self.write(|live| {
+            if let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) {
+                held.last_active = Instant::now() - ago;
             }
         });
     }
@@ -4631,6 +4818,246 @@ mod tests {
         assert_eq!(
             health_of(&live, &session, "flight"),
             Some(LoopHealth::Receiving)
+        );
+    }
+
+    // ---- Off console (#47) ----------------------------------------------------------------
+
+    /// What one session's own document says it has claimed about itself.
+    fn asserted_by(live: &StateAuthority, session: &SessionId) -> Option<Asserted> {
+        live.presence(session, Vec::new())
+            .expect("a document")
+            .1
+            .off_console
+    }
+
+    /// **The claim and the age of its evidence arrive together** (ADR-0016, v1 §6). There is no
+    /// document in which one of them is present and the other is not, because they are one
+    /// value.
+    #[tokio::test]
+    async fn an_assertion_is_shown_with_how_long_ago_its_claimant_was_last_active() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+
+        assert_eq!(
+            asserted_by(&live, &session),
+            None,
+            "a seat just taken claims something"
+        );
+
+        live.last_active_was(&session, Duration::from_secs(14 * 60));
+        assert!(live.off_console(&session));
+
+        let asserted = asserted_by(&live, &session).expect("the assertion");
+        assert_eq!(asserted.last_active.as_secs(), 14 * 60);
+    }
+
+    /// **The version moves when the age does and not five times a second** ([ADR-0019]). The
+    /// age is part of the state, so the document does move while an assertion stands — once a
+    /// second, which is the resolution the age is carried at, rather than on every tick with
+    /// nothing to show for it.
+    #[tokio::test]
+    async fn the_version_moves_with_the_age_once_a_second_and_not_every_tick() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        live.off_console(&session);
+
+        live.last_active_was(&session, Duration::from_secs(5));
+        let (first, _) = live.presence(&session, Vec::new()).expect("a document");
+        live.last_active_was(&session, Duration::from_millis(5_400));
+        let (within_the_same_second, _) = live.presence(&session, Vec::new()).expect("a document");
+        live.last_active_was(&session, Duration::from_secs(6));
+        let (a_second_later, _) = live.presence(&session, Vec::new()).expect("a document");
+
+        assert_eq!(
+            within_the_same_second, first,
+            "the version moved for an age the document does not carry"
+        );
+        assert!(
+            a_second_later > first,
+            "the age moved and the version did not"
+        );
+    }
+
+    /// **A stale assertion is still shown, with its age** (v1 §6). Nothing expires it and
+    /// nothing resolves it: the ambiguity of somebody who walked away is made visible and the
+    /// judgement is left with the human, which is a deliberate refusal to be helpful.
+    #[tokio::test]
+    async fn an_hours_old_assertion_still_stands_and_says_how_old_it_is() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+
+        live.off_console(&session);
+        live.last_active_was(&session, Duration::from_secs(3 * 3600));
+
+        let asserted = asserted_by(&live, &session).expect("the assertion expired on its own");
+        assert_eq!(asserted.last_active.as_secs(), 3 * 3600);
+    }
+
+    /// **Any deliberate act clears it** (v1 §6), and there is one way in rather than one per
+    /// act: keying, a subscription, an arm, answering a prompt and dismissing a banner all
+    /// arrive here as the same evidence, and so does saying *I am back*.
+    #[tokio::test]
+    async fn a_deliberate_act_clears_the_assertion_and_restarts_the_age() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+
+        live.last_active_was(&session, Duration::from_secs(600));
+        live.off_console(&session);
+        assert!(asserted_by(&live, &session).is_some());
+
+        live.a_deliberate_act(&session);
+
+        assert_eq!(asserted_by(&live, &session), None, "the assertion outlived");
+        // And the clock the *next* assertion is shown against starts from that act rather
+        // than from the last one before it.
+        live.off_console(&session);
+        assert!(
+            asserted_by(&live, &session)
+                .expect("the assertion")
+                .last_active
+                < Duration::from_secs(600),
+            "an act cleared the claim and left the evidence where it was"
+        );
+    }
+
+    /// **VoxLoop never guesses whether a human is in the chair** (ADR-0016). A heartbeat is the
+    /// machine noticing it can still be reached, so it is not evidence in either direction: it
+    /// neither clears an assertion nor refreshes the clock one would be shown against.
+    #[tokio::test]
+    async fn a_heartbeat_is_not_evidence_that_anybody_is_in_the_chair() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+
+        live.last_active_was(&session, Duration::from_secs(900));
+        live.off_console(&session);
+
+        live.the_client_is_there(&session);
+
+        let asserted = asserted_by(&live, &session).expect("a heartbeat cleared the claim");
+        assert_eq!(
+            asserted.last_active.as_secs(),
+            900,
+            "a heartbeat was read as a person"
+        );
+    }
+
+    /// **Nothing is inferred from idleness** (ADR-0016). A session nobody has touched for an
+    /// hour is a session whose operator is watching telemetry, and the only thing VoxLoop says
+    /// about it is how long ago they last did something.
+    #[tokio::test]
+    async fn a_session_nobody_has_touched_for_an_hour_is_still_on_console() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+
+        live.last_active_was(&session, Duration::from_secs(3600));
+
+        assert_eq!(
+            asserted_by(&live, &session),
+            None,
+            "idleness was read as an assertion"
+        );
+    }
+
+    /// **Declaring it changes nothing else** (v1 §6): subscriptions stand, audio keeps
+    /// flowing, and the fan-out does not move at all — so the operator who steps away and
+    /// hears something from three metres away still hears it.
+    #[tokio::test]
+    async fn going_off_console_moves_no_subscription_and_no_route() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let talker = a_session(&live, &store, "flight").await;
+        let listener = a_session(&live, &store, "capcom").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        let emitting = vec![a_loop_to_emit_on("air-to-ground")];
+        live.presence(&talker, emitting.clone());
+        live.presence(&listener, emitting.clone());
+        live.arm(&talker, &air_to_ground);
+        live.subscribe(&listener, &air_to_ground);
+        live.the_client_keys(&talker);
+        live.presence(&listener, emitting.clone());
+
+        assert_eq!(
+            heard_by(&live, &talker),
+            vec![(listener.as_str().to_owned(), "air-to-ground".to_owned())],
+            "the listener was not hearing the talker to begin with"
+        );
+
+        live.off_console(&listener);
+        live.presence(&listener, emitting.clone());
+
+        assert_eq!(
+            live.the_routing_if_it_moved(),
+            None,
+            "stepping away from the desk moved a route"
+        );
+        assert!(
+            standing_of(&live, &listener, emitting).subscribed,
+            "stepping away from the desk dropped a subscription"
+        );
+    }
+
+    /// **It is never persisted across an assume** (v1 §10). A day-old assertion is not a fact
+    /// about anything, so a seat taken up again starts on console.
+    #[tokio::test]
+    async fn an_assertion_is_gone_at_the_next_assume() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (sign_in, user, role) = a_seat(&store, "flight", "Flight Director").await;
+        let session = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free")
+            .session;
+
+        live.off_console(&session);
+        live.ended_by_its_own_holder(&session);
+
+        let again = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free")
+            .session;
+
+        assert_eq!(
+            asserted_by(&live, &again),
+            None,
+            "an assertion outlived the session it was made in"
+        );
+    }
+
+    /// **Off console is one of the reasons an occupant is not hearing a loop** (ADR-0065), and
+    /// it sits second: a session that cannot be reached at all explains the silence on its own,
+    /// and everything below is still true if the loop were fixed.
+    #[tokio::test]
+    async fn off_console_is_the_reason_an_occupant_is_not_hearing_a_loop_they_monitor() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let flight = LoopId::presented("flight".to_owned());
+        live.presence(&session, vec![a_loop("flight")]);
+        live.subscribe(&session, &flight);
+        live.the_client_counted(&session, &counted("flight", 12));
+
+        assert_eq!(live.why_not_hearing(&session, &flight), None);
+
+        live.off_console(&session);
+        assert_eq!(
+            live.why_not_hearing(&session, &flight),
+            Some(NotHearing::OffConsole),
+            "an operator who said they were away was counted as hearing the loop"
+        );
+
+        // It is not the reason for a session nobody can reach: that one is furthest upstream
+        // and stands in for every reason below it, assertions included.
+        live.unheard_from_for(&session, PAST_THE_WINDOW);
+        assert_eq!(
+            live.why_not_hearing(&session, &flight),
+            Some(NotHearing::Unreachable)
         );
     }
 

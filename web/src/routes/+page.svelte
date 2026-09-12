@@ -31,6 +31,8 @@
 		onMute={frame.mute}
 		onUnmute={frame.unmute}
 		onSetVolume={frame.setVolume}
+		onOffConsole={frame.offConsole}
+		onBackOnConsole={frame.backOnConsole}
 		onKeying={frame.keying}
 		onPriority={frame.priority}
 	/>
