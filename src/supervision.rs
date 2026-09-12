@@ -205,7 +205,7 @@ mod tests {
     /// What the session's document says its media path is, right now.
     fn as_documented(state: &StateAuthority, session: &SessionId) -> MediaPath {
         state
-            .presence(session, Vec::<InReach>::new())
+            .presence(session, Vec::<InReach>::new(), &[])
             .expect("a live session")
             .1
             .media_path

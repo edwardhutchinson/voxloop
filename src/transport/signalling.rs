@@ -44,13 +44,14 @@ use serde::{Deserialize, Serialize};
 use super::{Api, answers, unmet};
 use crate::authorisation::{self, Caller, Outcome, Presented, Requirement};
 use crate::configuration::{
-    AuditEntry, AuditEvent, AuditLog, Eligibilities, Grid, Ladder, LoopId, Occupancy, Permission,
-    Personalisation, PriorityPress, Role, RoleId, Roles, SignInToken, SignIns, StoreError,
-    Transaction, UserId, Users, Volume,
+    AuditEntry, AuditEvent, AuditLog, Eligibilities, Grid, Ladder, Loop, LoopId, Occupancy,
+    Permission, Personalisation, PriorityPress, Role, RoleId, Roles, SignInToken, SignIns,
+    StoreError, Transaction, UserId, Users, Volume,
 };
 use crate::media_plane::{Audience, Carried, Destination, Hearing, Negotiated, Negotiation, Way};
 use crate::state::{
-    Assuming, Ended, InReach, MediaPath, Pressed, Relinquished, SessionId, WhoCounts, WhoHears,
+    Assuming, Ended, InReach, MediaPath, Pressed, Relinquished, SessionId, StaffedBy, Staffing,
+    WhoCounts, WhoHears,
 };
 use crate::telemetry::module;
 
@@ -662,9 +663,10 @@ impl TheLadder {
 /// reach, no talking indicators: the user holds no authority while standing here, which is
 /// the whole reason this is allowed to read across roles at all ([ADR-0023]).
 ///
-/// The staffing state of the loops those roles staff belongs here too, ledger-style with its
-/// reason in full, and arrives with #48 — the lobby is read once and deliberately, by
-/// somebody about to be in a position to fix what it says.
+/// The staffing state of the loops those roles staff is here too, **ledger-style with its
+/// reason in full**: the lobby is read once and deliberately, by somebody about to be in a
+/// position to fix what it says, and `away — 2 not subscribed` tells them the seat's loops
+/// need setting up before they take it.
 ///
 /// [ADR-0023]: ../../../docs/adr/0023-sign-in-is-to-the-application-and-a-role-is-assumed.md
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -692,6 +694,78 @@ struct Seat {
     ///
     /// [ADR-0005]: ../../../docs/adr/0005-occupancy-means-listening-not-signed-in.md
     occupants: Vec<String>,
+    /// The loops this role staffs, each with whether a human is behind it.
+    ///
+    /// **The loops this seat answers for**, which is the one thing beyond who is in it that
+    /// changes *should I assume a role, and which?*. It is not reach: a role reaches loops
+    /// it does not staff, and those are not this page's business — the lobby holds no
+    /// authority and shows no console.
+    ///
+    /// Empty where the role staffs nothing, which is every role on a deployment nobody has
+    /// marked a staffing role on yet.
+    staffs: Vec<StaffedLoop>,
+}
+
+/// One loop a role staffs, and whether a human is behind it.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+struct StaffedLoop {
+    id: String,
+    name: String,
+    /// `staffed`, `away` or `vacant`, with the reasons where it is `away`.
+    ///
+    /// Never null here, unlike the console's: a loop is in this list because a role staffs
+    /// it, which is the condition for having a staffing state at all ([ADR-0056]).
+    ///
+    /// [ADR-0056]: ../../../docs/adr/0056-a-loop-with-no-staffing-roles-has-no-staffing-state.md
+    staffing: StaffingAsSeen,
+}
+
+/// Whether a human is behind a loop, as both documents carry it.
+///
+/// The state and the reasons are **one object**, so nothing can render the word without
+/// having been handed what is behind it. The board draws the word and the ledger and the
+/// lobby spell the reasons out (v1 §8), which is one document read two ways rather than two
+/// shapes on the wire.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+struct StaffingAsSeen {
+    /// `staffed`, `away` or `vacant`. The fourth case is the absence of this object.
+    state: &'static str,
+    /// Why each occupant is not hearing it, counted — `away — 1 muted, 2 not subscribed`.
+    ///
+    /// **Counts rather than a winner** ([ADR-0065]): occupants can be away for different
+    /// reasons at once and no ordering across people is defensible, so nothing here ranks
+    /// them. Empty unless the state is `away`, and it collapses to the plain sentence
+    /// wherever they agree, which is the reader's job rather than this document's.
+    ///
+    /// [ADR-0065]: ../../../docs/adr/0065-the-staffing-flag-reports-it-never-subscribes.md
+    away: Vec<AwayBecause>,
+}
+
+/// One reason occupants are not hearing a loop, and how many of them it is true of.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+struct AwayBecause {
+    /// `unreachable`, `off-console`, `not-subscribed`, `not-receiving` or `muted`, and they
+    /// arrive furthest upstream first — the order a reason is chosen in within one occupant.
+    reason: &'static str,
+    occupants: usize,
+}
+
+impl StaffingAsSeen {
+    fn of(staffing: &Staffing) -> Self {
+        Self {
+            state: staffing.as_str(),
+            away: match staffing {
+                Staffing::Away(reasons) => reasons
+                    .iter()
+                    .map(|(reason, occupants)| AwayBecause {
+                        reason: reason.as_str(),
+                        occupants: *occupants,
+                    })
+                    .collect(),
+                Staffing::Staffed | Staffing::Vacant => Vec::new(),
+            },
+        }
+    }
 }
 
 /// The presence document, as the console renders it.
@@ -865,6 +939,54 @@ struct Reachable {
     ///
     /// [ADR-0017]: ../../../docs/adr/0017-loop-health-is-measured-not-asserted.md
     health: Option<&'static str>,
+    /// Whether a human is behind it — `staffed`, `away` with the reasons, or `vacant`.
+    ///
+    /// **`null` where the loop has no staffing roles**, which is the absence of a state and
+    /// not a fourth one: the console renders it blank rather than as a word ([ADR-0056]).
+    /// A loop whose last staffing role is removed moves to `null` mid-session, and that is
+    /// an ordinary configuration change rather than an error.
+    ///
+    /// [ADR-0056]: ../../../docs/adr/0056-a-loop-with-no-staffing-roles-has-no-staffing-state.md
+    staffing: Option<StaffingAsSeen>,
+    /// Whether **this session's role** staffs it.
+    ///
+    /// The mark, in the document because the console may not infer it: staffing is per
+    /// (role, loop) and there is nothing on the client to derive it from ([ADR-0065]). Its
+    /// second state — *you would staff this and are not subscribed* — is this field beside
+    /// `subscribed`, which the console already has.
+    ///
+    /// It is here whether or not anything is wrong, because it is a fact about this
+    /// operator's own console rather than an alarm.
+    ///
+    /// [ADR-0065]: ../../../docs/adr/0065-the-staffing-flag-reports-it-never-subscribes.md
+    staffs: bool,
+}
+
+/// Group the staffing pairs Configuration answered with by the loop they are about.
+///
+/// The read is one row per (loop, role) because that is what the flag is set on; both
+/// documents want it the other way round — *what staffs this loop* — because staffing state
+/// is a property of the loop, computed across every occupant of every role that staffs it.
+/// In the base loop order, which the read already answers in.
+fn by_loop(pairs: Vec<(Loop, RoleId)>) -> Vec<(Loop, StaffedBy)> {
+    let mut staffed: Vec<(Loop, StaffedBy)> = Vec::new();
+    for (held_on, role) in pairs {
+        match staffed
+            .iter_mut()
+            .find(|(already, _)| already.id == held_on.id)
+        {
+            Some((_, staffing)) => staffing.roles.push(role),
+            None => staffed.push((
+                held_on.clone(),
+                StaffedBy {
+                    held_on: held_on.id,
+                    roles: vec![role],
+                },
+            )),
+        }
+    }
+
+    staffed
 }
 
 impl Conversation {
@@ -1777,12 +1899,16 @@ impl Conversation {
         let read = async {
             let named = transaction.role(&role).await?;
             let reach = transaction.the_reach_of(&role, Permission::Monitor).await?;
+            // Read afresh with the reach and for the same reason: an administrator marking
+            // a staffing role, or removing the last one from a loop, lands on a live
+            // session's document at the next tick like a cell edit does.
+            let staffing = transaction.the_staffing_roles().await?;
 
-            Ok((named, reach))
+            Ok((named, reach, staffing))
         }
         .await;
         transaction.roll_back().await?;
-        let (Some(named), reach) = read? else {
+        let (Some(named), reach, staffing) = read? else {
             // The role was deleted out from under a live session. Ending it belongs to the
             // blast radius #53 computes; until then the honest answer is that there is
             // nothing to render, and the socket is told the session is over.
@@ -1798,9 +1924,17 @@ impl Conversation {
             })
             .collect();
 
+        // Which roles staff which loops is Configuration's and who is hearing what is the
+        // state authority's, so the first is handed to the second as a value ([ADR-0039]) —
+        // the same way the reach beside it is.
+        let staffed: Vec<StaffedBy> = by_loop(staffing)
+            .into_iter()
+            .map(|(_held_on, roles)| roles)
+            .collect();
+
         // The session's role cannot change under it — a re-assume mints a new session — so
         // the name read above is the name of the role this document comes back bound to.
-        let Some((version, presence)) = self.api.state.presence(&session, within) else {
+        let Some((version, presence)) = self.api.state.presence(&session, within, &staffed) else {
             return self.the_session_ended().await;
         };
 
@@ -1838,6 +1972,8 @@ impl Conversation {
                         muted: standing.muted,
                         volume: standing.volume.percent(),
                         health: standing.health.map(|health| health.as_str()),
+                        staffing: standing.staffing.as_ref().map(StaffingAsSeen::of),
+                        staffs: standing.staffs,
                     })
                     .collect(),
             },
@@ -1953,10 +2089,24 @@ impl Conversation {
                 .the_roles_open_to(&self.user)
                 .await?
                 .map_or_else(Vec::new, |(_user, roles)| roles);
+            let staffed = by_loop(transaction.the_staffing_roles().await?);
+
+            // Every loop with staffing roles, not only the ones these roles staff: a loop is
+            // staffed by whoever is hearing it, which is an occupant of **any** role that
+            // staffs it, and asking about a subset would be asking a different question.
+            let staffing = self.api.state.the_staffing_of(
+                &staffed
+                    .iter()
+                    .map(|(_held_on, roles)| roles.clone())
+                    .collect::<Vec<_>>(),
+            );
 
             let mut seats = Vec::with_capacity(eligible_for.len());
             for role in &eligible_for {
-                seats.push(self.seat(&mut transaction, role).await?);
+                seats.push(
+                    self.seat(&mut transaction, role, &staffed, &staffing)
+                        .await?,
+                );
             }
 
             Ok(Lobby { roles: seats })
@@ -1974,7 +2124,13 @@ impl Conversation {
     /// this is not it).
     ///
     /// [ADR-0028]: ../../../docs/adr/0028-the-audit-log-records-decisions-not-traffic.md
-    async fn seat(&self, transaction: &mut Transaction, role: &Role) -> Result<Seat, StoreError> {
+    async fn seat(
+        &self,
+        transaction: &mut Transaction,
+        role: &Role,
+        staffed: &[(Loop, StaffedBy)],
+        staffing: &[(LoopId, Staffing)],
+    ) -> Result<Seat, StoreError> {
         let mut occupants = Vec::new();
         for occupant in self.api.state.occupants_of(&role.id) {
             if let Some(user) = transaction.user(&occupant).await? {
@@ -1987,6 +2143,20 @@ impl Conversation {
             name: role.name.clone(),
             max_occupants: role.max_occupants,
             occupants,
+            staffs: staffed
+                .iter()
+                .filter(|(_held_on, by)| by.roles.contains(&role.id))
+                .filter_map(|(held_on, _by)| {
+                    staffing
+                        .iter()
+                        .find(|(loop_id, _)| loop_id == &held_on.id)
+                        .map(|(_, state)| StaffedLoop {
+                            id: held_on.id.as_str().to_owned(),
+                            name: held_on.name.clone(),
+                            staffing: StaffingAsSeen::of(state),
+                        })
+                })
+                .collect(),
         })
     }
 
@@ -3296,7 +3466,10 @@ mod tests {
         let seat = said["roles"][0].as_object().expect("a seat");
         let mut named: Vec<&String> = seat.keys().collect();
         named.sort();
-        assert_eq!(named, ["id", "max_occupants", "name", "occupants"]);
+        assert_eq!(
+            named,
+            ["id", "max_occupants", "name", "occupants", "staffs"]
+        );
     }
 
     /// A socket in a session is sent the presence document and not the lobby: it renders one
@@ -5099,6 +5272,11 @@ mod tests {
                 "name",
                 "permission",
                 "priority",
+                // Whether a human is behind the loop, and whether this session's role is
+                // one of them: facts about the loop and about this console's own
+                // configuration, and neither of them about a talker (v1 §1).
+                "staffing",
+                "staffs",
                 "subscribed",
                 "talking",
                 "volume"
@@ -5634,5 +5812,202 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_default()
+    }
+
+    // ---- Staffing state (#48) ---------------------------------------------------------
+
+    /// An administrator marking a role as staffing a loop, mid-shift.
+    async fn the_role_staffs(lobby: &ALobby, role: &RoleId, held_on: &LoopId, staffs: bool) {
+        let mut transaction = lobby.api.store.begin().await.expect("a transaction");
+        transaction
+            .set_staffing(role, held_on, staffs)
+            .await
+            .expect("the flag to be set");
+        transaction.commit().await.expect("the edit to land");
+    }
+
+    /// What this document says about one loop's staffing state, as JSON, and whether the
+    /// session's own role staffs it.
+    fn staffing(said: &Outgoing, at: usize) -> (serde_json::Value, serde_json::Value) {
+        let written = as_json(said);
+
+        (
+            written["loops"][at]["staffing"].clone(),
+            written["loops"][at]["staffs"].clone(),
+        )
+    }
+
+    /// **Staffing state is in the document, per loop** — the word the board draws and the
+    /// reasons the ledger spells out, as one object so the word cannot be rendered without
+    /// them.
+    ///
+    /// An occupant who has not taken the loop up is `away — not subscribed`, which is the
+    /// reason that means nobody set the console up rather than somebody stepping away
+    /// (ADR-0065).
+    #[tokio::test]
+    async fn the_document_carries_each_loop_s_staffing_state() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        the_role_staffs(&lobby, &flight, &air_to_ground, true).await;
+        let mut socket = lobby.a_socket();
+
+        let assumed = said(&mut socket, &assuming(&flight)).await;
+
+        let (state, _mark) = staffing(&assumed, 0);
+        assert_eq!(state["state"], "away");
+        assert_eq!(state["away"][0]["reason"], "not-subscribed");
+        assert_eq!(state["away"][0]["occupants"], 1);
+
+        all(&mut socket, &subscribing(&air_to_ground)).await;
+        let received = said(&mut socket, &counting(&air_to_ground, 1)).await;
+
+        assert_eq!(staffing(&received, 0).0["state"], "staffed");
+    }
+
+    /// **A loop with no staffing roles has no staffing state** (ADR-0056), and the document
+    /// says so by carrying none rather than by naming a fourth word.
+    #[tokio::test]
+    async fn a_loop_nothing_staffs_carries_no_staffing_state_and_no_mark() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let mut socket = lobby.a_socket();
+
+        let assumed = said(&mut socket, &assuming(&flight)).await;
+
+        assert_eq!(
+            staffing(&assumed, 0),
+            (serde_json::Value::Null, serde_json::Value::Bool(false))
+        );
+    }
+
+    /// Removing the last staffing role takes the state off the card mid-session, and the
+    /// console is not told anything went wrong, because nothing did (ADR-0056).
+    #[tokio::test]
+    async fn losing_the_last_staffing_role_takes_the_state_away_without_an_error() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        the_role_staffs(&lobby, &flight, &air_to_ground, true).await;
+        let mut socket = lobby.a_socket();
+        all(&mut socket, &assuming(&flight)).await;
+
+        the_role_staffs(&lobby, &flight, &air_to_ground, false).await;
+        let pushed = socket
+            .pushed_presence()
+            .await
+            .expect("the socket to answer")
+            .pop()
+            .expect("the document to move");
+
+        assert_eq!(
+            staffing(&pushed, 0),
+            (serde_json::Value::Null, serde_json::Value::Bool(false))
+        );
+    }
+
+    /// **The mark is a fact about this operator's own console**, so it is on the loop
+    /// whether or not they are subscribed: its second state — *you would staff this and are
+    /// not subscribed* — is this flag beside the subscription the console already has
+    /// (ADR-0065).
+    #[tokio::test]
+    async fn the_mark_is_carried_whether_or_not_the_session_is_subscribed() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        the_role_staffs(&lobby, &flight, &air_to_ground, true).await;
+        let mut socket = lobby.a_socket();
+        let assumed = said(&mut socket, &assuming(&flight)).await;
+
+        assert_eq!(staffing(&assumed, 0).1, serde_json::Value::Bool(true));
+
+        let taken_up = said(&mut socket, &subscribing(&air_to_ground)).await;
+
+        assert_eq!(staffing(&taken_up, 0).1, serde_json::Value::Bool(true));
+    }
+
+    /// **Marking a staffing role subscribes nobody and changes no console** (ADR-0065). The
+    /// role default is the only thing that seeds one, and an auto-subscribe at every assume
+    /// is the re-imposition ADR-0052 rejects.
+    #[tokio::test]
+    async fn marking_a_staffing_role_puts_nothing_on_a_console() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        the_role_staffs(&lobby, &flight, &air_to_ground, true).await;
+        let mut socket = lobby.a_socket();
+
+        let assumed = said(&mut socket, &assuming(&flight)).await;
+
+        assert_eq!(
+            as_json(&assumed)["loops"][0]["subscribed"],
+            serde_json::Value::Bool(false),
+            "the staffing flag subscribed somebody"
+        );
+    }
+
+    /// **The lobby carries the reason in full, ledger-style** (v1 §2): it is read once and
+    /// deliberately, by somebody about to be in a position to fix what it says.
+    #[tokio::test]
+    async fn the_lobby_carries_the_staffing_state_of_the_loops_each_role_staffs() {
+        let lobby = ALobby::with(&[("Flight Director", Some(1))]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        lobby
+            .a_loop_reachable_by("Sim", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        the_role_staffs(&lobby, &flight, &air_to_ground, true).await;
+        let mut socket = lobby.a_socket();
+
+        let said = as_json(&said(&mut socket, HELLO).await);
+
+        let staffs = &said["roles"][0]["staffs"];
+        assert_eq!(staffs[0]["name"], "Air-to-ground");
+        assert_eq!(staffs[0]["staffing"]["state"], "vacant");
+        assert_eq!(
+            staffs[1],
+            serde_json::Value::Null,
+            "a loop this role does not staff was listed against the seat"
+        );
+    }
+
+    /// The lobby says why, not just that: `away — not subscribed` tells somebody about to
+    /// take the seat that its loops need setting up before they do.
+    #[tokio::test]
+    async fn the_lobby_says_why_the_loops_a_role_staffs_are_away() {
+        let lobby = ALobby::with(&[("Flight Director", None)]).await;
+        let flight = lobby.role_named("Flight Director").await;
+        lobby
+            .a_loop_reachable_by("Air-to-ground", &flight, Permission::Emit)
+            .await;
+        let air_to_ground = lobby.loop_named("Air-to-ground").await;
+        the_role_staffs(&lobby, &flight, &air_to_ground, true).await;
+        lobby.somebody_occupies(&flight, "gene").await;
+        let mut socket = lobby.a_socket();
+
+        let said = as_json(&said(&mut socket, HELLO).await);
+
+        let staffing = &said["roles"][0]["staffs"][0]["staffing"];
+        assert_eq!(staffing["state"], "away");
+        assert_eq!(staffing["away"][0]["reason"], "not-subscribed");
+        assert_eq!(staffing["away"][0]["occupants"], 1);
     }
 }

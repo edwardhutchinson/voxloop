@@ -261,12 +261,9 @@ impl LoopHealth {
 /// win over beacon loss — the suppression v1 §6 asks for, generalised — and it is why there is
 /// exactly one reason per occupant rather than a list.
 ///
-/// *Off console* belongs between the first two and arrives with #47. Staffing state itself —
-/// counted across every occupant of every staffing role — is #48, and this is the one fact
-/// about each occupant it is built from.
+/// *Off console* sits between the first two. Staffing state — counted across every occupant
+/// of every staffing role — is built from this fact about each occupant and from no other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// #48 reads this; until then it is asked of in tests and by nothing else.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum NotHearing {
     /// The signalling channel is gone. Nothing this session reports is arriving, beacon
     /// counts included, so this is the one reason that stands in for all the others.
@@ -288,6 +285,93 @@ pub(crate) enum NotHearing {
     NotReceiving,
     /// The operator has silenced it in their own ears.
     Muted,
+}
+
+impl NotHearing {
+    /// The five, **in the order a reason is chosen in** and so in the order they are
+    /// counted and read out: furthest upstream first.
+    ///
+    /// It is written out rather than derived, because the order is the model here and a
+    /// list that happened to agree with the enum today is one that silently stops agreeing
+    /// when somebody adds a sixth reason in the middle.
+    const FURTHEST_UPSTREAM_FIRST: [Self; 5] = [
+        Self::Unreachable,
+        Self::OffConsole,
+        Self::NotSubscribed,
+        Self::NotReceiving,
+        Self::Muted,
+    ];
+
+    /// The word the presence document and the lobby carry.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreachable => "unreachable",
+            Self::OffConsole => "off-console",
+            Self::NotSubscribed => "not-subscribed",
+            Self::NotReceiving => "not-receiving",
+            Self::Muted => "muted",
+        }
+    }
+}
+
+/// One loop and the roles marked as staffing it, as Configuration answered it.
+///
+/// **It is handed in as a value** ([ADR-0039]): which roles staff which loops is durable
+/// configuration and this module reads no store, so the two sides meet the way blast radius
+/// makes them meet. A loop with no staffing roles is simply not in the list handed over,
+/// which is how [ADR-0056]'s absence arrives here — there is no fourth value to represent it
+/// with and nothing to configure.
+///
+/// [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+/// [ADR-0056]: ../../docs/adr/0056-a-loop-with-no-staffing-roles-has-no-staffing-state.md
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StaffedBy {
+    pub(crate) held_on: LoopId,
+    pub(crate) roles: Vec<RoleId>,
+}
+
+/// Whether a human is behind a loop (v1 §1).
+///
+/// Three values and no partial one: it is computed across **every occupant of every**
+/// staffing role for the loop, so one occupant going quiet moves nothing while another is
+/// still hearing it. The fourth case — a loop with no staffing roles — is the absence of
+/// this type rather than a value of it ([ADR-0056]).
+///
+/// [ADR-0056]: ../../docs/adr/0056-a-loop-with-no-staffing-roles-has-no-staffing-state.md
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Staffing {
+    /// An occupant of a staffing role is **demonstrably hearing** it ([ADR-0005]): their
+    /// channel is up, they have not stepped away, the loop is on their console unmuted, and
+    /// its beacon is arriving.
+    ///
+    /// [ADR-0005]: ../../docs/adr/0005-occupancy-means-listening-not-signed-in.md
+    Staffed,
+    /// Such occupants exist and none of them is hearing it, **with the reason** — counted,
+    /// because they can be away for different reasons at once and no ordering across people
+    /// is defensible ([ADR-0065]).
+    ///
+    /// In [`NotHearing::FURTHEST_UPSTREAM_FIRST`] order and never empty: the variant is
+    /// only ever reached by counting at least one occupant who is not hearing it.
+    ///
+    /// [ADR-0065]: ../../docs/adr/0065-the-staffing-flag-reports-it-never-subscribes.md
+    Away(Vec<(NotHearing, usize)>),
+    /// Nobody occupies a staffing role. **A service principal is not an occupant**: its
+    /// binding gives reach and never occupancy ([ADR-0027]), and it holds no session, so
+    /// nothing here can count it.
+    ///
+    /// [ADR-0027]: ../../docs/adr/0027-a-service-principal-acts-through-a-role.md
+    Vacant,
+}
+
+impl Staffing {
+    /// The word the board carries and the sentence in the ledger is built from.
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Staffed => "staffed",
+            Self::Away(_) => "away",
+            Self::Vacant => "vacant",
+        }
+    }
 }
 
 /// One loop's beacon, as this session's client has counted it.
@@ -1059,6 +1143,32 @@ pub(crate) struct Standing {
     ///
     /// [ADR-0017]: ../../docs/adr/0017-loop-health-is-measured-not-asserted.md
     pub(crate) health: Option<LoopHealth>,
+    /// Whether a human is behind this loop, or nothing where it has no staffing roles
+    /// ([ADR-0056]).
+    ///
+    /// It is a fact about the **loop** rather than about this session, and it is in every
+    /// document whose reach holds the loop: what it answers — *is somebody covering this
+    /// position* — is asked by whoever is about to key, not by whoever is staffing it.
+    ///
+    /// The absence is not a fourth value and never renders as one. A loop that loses its
+    /// last staffing role moves from a state to nothing, which is a legitimate
+    /// configuration change arriving mid-session like any other.
+    ///
+    /// [ADR-0056]: ../../docs/adr/0056-a-loop-with-no-staffing-roles-has-no-staffing-state.md
+    pub(crate) staffing: Option<Staffing>,
+    /// Whether **this session's role** staffs this loop.
+    ///
+    /// The mark the console draws in both views, in two states — *you staff this*, and *you
+    /// would staff this and are not subscribed* (v1 §8). Only the first half is here: the
+    /// second is this field beside `subscribed`, derived on the client from the document it
+    /// already has rather than computed twice ([ADR-0065]).
+    ///
+    /// It is carried whether or not anything is wrong, because it is a fact about the
+    /// operator's own console rather than an alarm — a mark appearing for the first time at
+    /// the moment something is wrong is the rendering that decision rejects.
+    ///
+    /// [ADR-0065]: ../../docs/adr/0065-the-staffing-flag-reports-it-never-subscribes.md
+    pub(crate) staffs: bool,
 }
 
 /// One listener and every loop whose beacon it counts.
@@ -1937,6 +2047,7 @@ impl StateAuthority {
         &self,
         session: &SessionId,
         within: Vec<InReach>,
+        staffed: &[StaffedBy],
     ) -> Option<(u64, Presence)> {
         self.write(|live| {
             // The reach is recorded before anything is projected from it, because two other
@@ -1955,6 +2066,10 @@ impl StateAuthority {
             let now = Instant::now();
             let spoken_on = live.the_loops_being_spoken_on(now);
             let at_priority = live.the_loops_spoken_on_at_priority(now);
+            // Every occupant of every staffing role, which is every session on the
+            // deployment rather than this one — and worked out after this session's reach
+            // was recorded, because what an occupant is hearing is read within their own.
+            let staffing = live.the_staffing_of(staffed, now);
             let ladder = live.ladder;
 
             let held = live.sessions.iter_mut().find(|held| &held.id == session)?;
@@ -1980,6 +2095,17 @@ impl StateAuthority {
                         muted: held.mutes.contains(&held_on.id),
                         volume: held.volume_of(&held_on.id),
                         health: held.health_of(&held_on.id, ladder, now),
+                        staffing: staffing
+                            .iter()
+                            .find(|(loop_id, _)| loop_id == &held_on.id)
+                            .map(|(_, staffing)| staffing.clone()),
+                        // The loop is marked on this console because this session's role is
+                        // one of the roles staffing it. Nothing about what anybody is
+                        // hearing comes into it: the mark is a fact about the configuration
+                        // this operator sat down into.
+                        staffs: staffed.iter().any(|staffed| {
+                            staffed.held_on == held_on.id && staffed.roles.contains(&held.role)
+                        }),
                         held_on: held_on.clone(),
                     })
                     .collect(),
@@ -2243,6 +2369,28 @@ impl StateAuthority {
     /// *nobody is in that seat*, which is the answer the lobby exists to give.
     ///
     /// [ADR-0005]: ../../docs/adr/0005-occupancy-means-listening-not-signed-in.md
+    /// Whether a human is behind each of these loops (v1 §1).
+    ///
+    /// The live half of staffing state. Which roles staff which loops is Configuration's and
+    /// arrives as a value; who occupies those roles and what they are hearing is this
+    /// module's, and the two meet here by the rule they always meet by ([ADR-0039]).
+    ///
+    /// The loops handed in are the ones with staffing roles, so every one of them has an
+    /// answer. A loop that is not in the list has no staffing state at all, and nothing here
+    /// invents one for it ([ADR-0056]).
+    ///
+    /// It is the same computation the presence document carries — one function, called from
+    /// the two places that need it, so the lobby and the console cannot come to disagree
+    /// about whether somebody is behind a loop.
+    ///
+    /// [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+    /// [ADR-0056]: ../../docs/adr/0056-a-loop-with-no-staffing-roles-has-no-staffing-state.md
+    pub(crate) fn the_staffing_of(&self, staffed: &[StaffedBy]) -> Vec<(LoopId, Staffing)> {
+        let now = Instant::now();
+
+        self.read(|live| live.the_staffing_of(staffed, now))
+    }
+
     pub(crate) fn occupants_of(&self, role: &RoleId) -> Vec<UserId> {
         self.read(|live| {
             live.sessions
@@ -2311,6 +2459,65 @@ fn ended(mut session: Session, why: Ended) -> Relinquished {
 }
 
 impl Live {
+    /// The staffing state of each of these loops, computed over every occupant of every
+    /// role that staffs it (v1 §1).
+    ///
+    /// **There is no partial value.** One occupant hearing it makes the loop `staffed`
+    /// however many others are not, because the question is *is a human behind this loop*
+    /// and one is. Where none of them is, every one of them is counted, because occupants
+    /// can be away for different reasons at once and **no ordering across people is
+    /// defensible** — a mute is one click from hearing and so is a subscription ([ADR-0065]).
+    /// Within one occupant the reason is the one furthest upstream, which
+    /// [`Session::not_hearing`] decides.
+    ///
+    /// Nothing is stored: like the audience and the document, it is worked out from the
+    /// live facts each time it is asked for.
+    ///
+    /// [ADR-0065]: ../../docs/adr/0065-the-staffing-flag-reports-it-never-subscribes.md
+    fn the_staffing_of(&self, staffed: &[StaffedBy], now: Instant) -> Vec<(LoopId, Staffing)> {
+        staffed
+            .iter()
+            .map(|staffing| (staffing.held_on.clone(), self.staffing_of(staffing, now)))
+            .collect()
+    }
+
+    fn staffing_of(&self, staffing: &StaffedBy, now: Instant) -> Staffing {
+        let occupants = self
+            .sessions
+            .iter()
+            .filter(|held| staffing.roles.contains(&held.role));
+
+        let mut counted = [0usize; NotHearing::FURTHEST_UPSTREAM_FIRST.len()];
+        let mut anybody = false;
+        for occupant in occupants {
+            anybody = true;
+            match occupant.not_hearing(&staffing.held_on, self.ladder, now) {
+                // Demonstrably hearing it, so the loop is staffed and the rest of the
+                // occupants change nothing about that.
+                None => return Staffing::Staffed,
+                Some(reason) => {
+                    let at = NotHearing::FURTHEST_UPSTREAM_FIRST
+                        .iter()
+                        .position(|upstream| *upstream == reason)
+                        .expect("every reason is in the order it is chosen in");
+                    counted[at] += 1;
+                }
+            }
+        }
+
+        if !anybody {
+            return Staffing::Vacant;
+        }
+
+        Staffing::Away(
+            NotHearing::FURTHEST_UPSTREAM_FIRST
+                .into_iter()
+                .zip(counted)
+                .filter(|(_reason, occupants)| *occupants > 0)
+                .collect(),
+        )
+    }
+
     /// Who hears this talker, and on which loop.
     ///
     /// The rule is one line and every clause in it is load-bearing: **for each loop the
@@ -2575,7 +2782,7 @@ mod tests {
         assert!(live.occupants_of(&role).is_empty());
         assert!(!live.is_held_by(&assumed.session, &user));
         assert!(live.the_role_of(&assumed.session).is_none());
-        assert!(live.presence(&assumed.session, Vec::new()).is_none());
+        assert!(live.presence(&assumed.session, Vec::new(), &[]).is_none());
         assert!(live.sign_ins_holding_a_session().is_empty());
     }
 
@@ -2805,7 +3012,7 @@ mod tests {
             .expect("the seat to be free");
 
         let (version, presence) = live
-            .presence(&assumed.session, vec![a_loop("air-to-ground")])
+            .presence(&assumed.session, vec![a_loop("air-to-ground")], &[])
             .expect("a document for a live session");
 
         assert_eq!(version, 1);
@@ -2826,6 +3033,10 @@ mod tests {
                 muted: false,
                 volume: Volume::UNITY,
                 health: None,
+                // Nothing staffs it, so it has no staffing state and this session's role
+                // does not answer for it (ADR-0056).
+                staffing: None,
+                staffs: false,
             }]
         );
     }
@@ -2842,15 +3053,16 @@ mod tests {
             .expect("the seat to be free");
 
         let (first, _) = live
-            .presence(&assumed.session, vec![a_loop("air-to-ground")])
+            .presence(&assumed.session, vec![a_loop("air-to-ground")], &[])
             .expect("a document");
         let (again, _) = live
-            .presence(&assumed.session, vec![a_loop("air-to-ground")])
+            .presence(&assumed.session, vec![a_loop("air-to-ground")], &[])
             .expect("a document");
         let (moved, _) = live
             .presence(
                 &assumed.session,
                 vec![a_loop("air-to-ground"), a_loop("flight-director")],
+                &[],
             )
             .expect("a document");
 
@@ -2873,11 +3085,12 @@ mod tests {
             .assume(taking(&theirs, &them, &capcom, Some(1)))
             .expect("the seat to be free");
 
-        live.presence(&one.session, vec![a_loop("air-to-ground")])
+        live.presence(&one.session, vec![a_loop("air-to-ground")], &[])
             .expect("a document");
-        live.presence(&one.session, Vec::new()).expect("a document");
+        live.presence(&one.session, Vec::new(), &[])
+            .expect("a document");
         let (theirs, _) = live
-            .presence(&two.session, vec![a_loop("air-to-ground")])
+            .presence(&two.session, vec![a_loop("air-to-ground")], &[])
             .expect("a document");
 
         assert_eq!(theirs, 1, "one session's version counted the other's");
@@ -2887,7 +3100,7 @@ mod tests {
 
     /// Which loops a document says this session is monitoring, by name.
     fn monitoring(live: &StateAuthority, session: &SessionId, within: Vec<InReach>) -> Vec<String> {
-        live.presence(session, within)
+        live.presence(session, within, &[])
             .expect("a live session")
             .1
             .loops
@@ -2965,17 +3178,19 @@ mod tests {
             .expect("the seat to be free");
         let reach = vec![a_loop("flight")];
         let (first, _) = live
-            .presence(&assumed.session, reach.clone())
+            .presence(&assumed.session, reach.clone(), &[])
             .expect("a document");
 
         live.subscribe(&assumed.session, &a_loop("flight").id);
         let (moved, _) = live
-            .presence(&assumed.session, reach.clone())
+            .presence(&assumed.session, reach.clone(), &[])
             .expect("a document");
         assert_eq!(moved, first + 1);
 
         live.subscribe(&assumed.session, &a_loop("flight").id);
-        let (again, _) = live.presence(&assumed.session, reach).expect("a document");
+        let (again, _) = live
+            .presence(&assumed.session, reach, &[])
+            .expect("a document");
         assert_eq!(
             again, moved,
             "the version moved for a document that had not"
@@ -3075,7 +3290,7 @@ mod tests {
 
     /// Where the merged ladder stands, as the document would carry it.
     fn the_media_path(live: &StateAuthority, session: &SessionId) -> MediaPath {
-        live.presence(session, Vec::new())
+        live.presence(session, Vec::new(), &[])
             .expect("a live session")
             .1
             .media_path
@@ -3187,13 +3402,13 @@ mod tests {
             })
             .expect("the seat to be free");
         let (first, _) = live
-            .presence(&assumed.session, Vec::new())
+            .presence(&assumed.session, Vec::new(), &[])
             .expect("a document");
 
         live.the_client_says(&assumed.session, MediaPath::Connected);
         live.the_server_sees(&assumed.session, MediaPath::Connected);
         let (then, _) = live
-            .presence(&assumed.session, Vec::new())
+            .presence(&assumed.session, Vec::new(), &[])
             .expect("a document");
 
         assert!(then > first, "the document moved and the version did not");
@@ -3201,7 +3416,7 @@ mod tests {
         // And it does not move for a reading that changes nothing.
         live.the_client_says(&assumed.session, MediaPath::Connected);
         let (again, _) = live
-            .presence(&assumed.session, Vec::new())
+            .presence(&assumed.session, Vec::new(), &[])
             .expect("a document");
         assert_eq!(again, then);
     }
@@ -3272,7 +3487,7 @@ mod tests {
         live.the_client_says(&assumed.session, MediaPath::Connected);
         live.the_server_sees(&assumed.session, MediaPath::Connected);
 
-        assert!(live.presence(&assumed.session, Vec::new()).is_none());
+        assert!(live.presence(&assumed.session, Vec::new(), &[]).is_none());
     }
 
     // ---- Arming, keying and the fan-out (#41) ------------------------------------------
@@ -3288,7 +3503,7 @@ mod tests {
 
     /// The loops one session is armed on, as its own document has them.
     fn armed(live: &StateAuthority, session: &SessionId, within: Vec<InReach>) -> Vec<String> {
-        live.presence(session, within)
+        live.presence(session, within, &[])
             .expect("a document")
             .1
             .loops
@@ -3300,7 +3515,7 @@ mod tests {
 
     /// The loops one session's document says are being spoken on.
     fn talking(live: &StateAuthority, session: &SessionId, within: Vec<InReach>) -> Vec<String> {
-        live.presence(session, within)
+        live.presence(session, within, &[])
             .expect("a document")
             .1
             .loops
@@ -3340,11 +3555,11 @@ mod tests {
         let session = a_session(&live, &store, "flight").await;
         let reach = vec![a_loop_to_emit_on("air-to-ground"), a_loop_to_emit_on("sim")];
 
-        live.presence(&session, reach.clone());
+        live.presence(&session, reach.clone(), &[]);
         live.arm(&session, &LoopId::presented("air-to-ground".to_owned()));
         live.subscribe(&session, &LoopId::presented("sim".to_owned()));
 
-        let (_, presence) = live.presence(&session, reach).expect("a document");
+        let (_, presence) = live.presence(&session, reach, &[]).expect("a document");
         let air_to_ground = &presence.loops[0];
         let sim = &presence.loops[1];
 
@@ -3366,7 +3581,7 @@ mod tests {
         let live = StateAuthority::empty();
         let session = a_session(&live, &store, "flight").await;
         let reach = vec![a_loop_to_emit_on("air-to-ground")];
-        live.presence(&session, reach.clone());
+        live.presence(&session, reach.clone(), &[]);
 
         live.arm(&session, &LoopId::presented("air-to-ground".to_owned()));
         live.arm(&session, &LoopId::presented("air-to-ground".to_owned()));
@@ -3390,14 +3605,14 @@ mod tests {
         let held_on = LoopId::presented("air-to-ground".to_owned());
         let emitting = vec![a_loop_to_emit_on("air-to-ground")];
 
-        live.presence(&session, emitting.clone());
+        live.presence(&session, emitting.clone(), &[]);
         live.arm(&session, &held_on);
         live.subscribe(&session, &held_on);
 
         // The cell goes to `none`, so the loop leaves the document altogether.
-        live.presence(&session, Vec::new());
+        live.presence(&session, Vec::new(), &[]);
 
-        let (_, back) = live.presence(&session, emitting).expect("a document");
+        let (_, back) = live.presence(&session, emitting, &[]).expect("a document");
         assert!(
             !back.loops[0].armed,
             "an arm came back on its own when the cell did"
@@ -3415,11 +3630,11 @@ mod tests {
         let (_directory, store) = a_temporary_store().await;
         let live = StateAuthority::empty();
         let session = a_session(&live, &store, "flight").await;
-        live.presence(&session, vec![a_loop_to_emit_on("air-to-ground")]);
+        live.presence(&session, vec![a_loop_to_emit_on("air-to-ground")], &[]);
         live.arm(&session, &LoopId::presented("air-to-ground".to_owned()));
 
         let (_, presence) = live
-            .presence(&session, vec![a_loop("air-to-ground")])
+            .presence(&session, vec![a_loop("air-to-ground")], &[])
             .expect("a document");
 
         assert_eq!(presence.loops.len(), 1, "the loop left reach as well");
@@ -3439,8 +3654,8 @@ mod tests {
         let listener = a_session(&live, &store, "capcom").await;
         let air_to_ground = LoopId::presented("air-to-ground".to_owned());
 
-        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")]);
-        live.presence(&listener, vec![a_loop("air-to-ground")]);
+        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")], &[]);
+        live.presence(&listener, vec![a_loop("air-to-ground")], &[]);
         live.arm(&talker, &air_to_ground);
         live.subscribe(&listener, &air_to_ground);
 
@@ -3461,8 +3676,8 @@ mod tests {
         let talker = a_session(&live, &store, "flight").await;
         let listener = a_session(&live, &store, "capcom").await;
         let air_to_ground = LoopId::presented("air-to-ground".to_owned());
-        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")]);
-        live.presence(&listener, vec![a_loop("air-to-ground")]);
+        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")], &[]);
+        live.presence(&listener, vec![a_loop("air-to-ground")], &[]);
         live.arm(&talker, &air_to_ground);
         live.subscribe(&listener, &air_to_ground);
 
@@ -3491,8 +3706,8 @@ mod tests {
         let talker = a_session(&live, &store, "flight").await;
         let listener = a_session(&live, &store, "capcom").await;
         let reach = vec![a_loop_to_emit_on("air-to-ground"), a_loop_to_emit_on("sim")];
-        live.presence(&talker, reach.clone());
-        live.presence(&listener, reach);
+        live.presence(&talker, reach.clone(), &[]);
+        live.presence(&listener, reach, &[]);
 
         // Armed on one, and the listener is monitoring the other.
         live.arm(&talker, &LoopId::presented("air-to-ground".to_owned()));
@@ -3510,14 +3725,14 @@ mod tests {
         let talker = a_session(&live, &store, "flight").await;
         let listener = a_session(&live, &store, "capcom").await;
         let air_to_ground = LoopId::presented("air-to-ground".to_owned());
-        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")]);
-        live.presence(&listener, vec![a_loop("air-to-ground")]);
+        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")], &[]);
+        live.presence(&listener, vec![a_loop("air-to-ground")], &[]);
         live.arm(&talker, &air_to_ground);
         live.subscribe(&listener, &air_to_ground);
         assert_eq!(heard_by(&live, &talker).len(), 1);
 
         // The listener's cell goes to `none`. The subscription stands and stops being heard.
-        live.presence(&listener, Vec::new());
+        live.presence(&listener, Vec::new(), &[]);
 
         assert!(
             heard_by(&live, &talker).is_empty(),
@@ -3532,7 +3747,7 @@ mod tests {
         let live = StateAuthority::empty();
         let talker = a_session(&live, &store, "flight").await;
         let air_to_ground = LoopId::presented("air-to-ground".to_owned());
-        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")]);
+        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")], &[]);
         live.arm(&talker, &air_to_ground);
         live.subscribe(&talker, &air_to_ground);
 
@@ -3550,8 +3765,8 @@ mod tests {
         let talker = a_session(&live, &store, "flight").await;
         let listener = a_session(&live, &store, "capcom").await;
         let reach = vec![a_loop_to_emit_on("air-to-ground"), a_loop_to_emit_on("sim")];
-        live.presence(&talker, reach.clone());
-        live.presence(&listener, reach);
+        live.presence(&talker, reach.clone(), &[]);
+        live.presence(&listener, reach, &[]);
 
         for held_on in ["air-to-ground", "sim"] {
             live.arm(&talker, &LoopId::presented(held_on.to_owned()));
@@ -3575,7 +3790,7 @@ mod tests {
         let (_directory, store) = a_temporary_store().await;
         let live = StateAuthority::empty();
         let talker = a_session(&live, &store, "flight").await;
-        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")]);
+        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")], &[]);
 
         assert!(
             live.the_routing_if_it_moved().is_some(),
@@ -3600,7 +3815,7 @@ mod tests {
         let air_to_ground = LoopId::presented("air-to-ground".to_owned());
         let emitting = vec![a_loop_to_emit_on("air-to-ground")];
         for session in [&one, &other] {
-            live.presence(session, emitting.clone());
+            live.presence(session, emitting.clone(), &[]);
             live.arm(session, &air_to_ground);
         }
 
@@ -3633,13 +3848,13 @@ mod tests {
         let talker = a_session(&live, &store, "capcom").await;
         let air_to_ground = LoopId::presented("air-to-ground".to_owned());
         let emitting = vec![a_loop_to_emit_on("air-to-ground")];
-        live.presence(&blind, emitting.clone());
-        live.presence(&talker, emitting.clone());
+        live.presence(&blind, emitting.clone(), &[]);
+        live.presence(&talker, emitting.clone(), &[]);
         live.arm(&blind, &air_to_ground);
         live.arm(&talker, &air_to_ground);
         live.the_client_keys(&talker);
 
-        let (_, presence) = live.presence(&blind, emitting).expect("a document");
+        let (_, presence) = live.presence(&blind, emitting, &[]).expect("a document");
 
         assert!(presence.loops[0].armed);
         assert!(!presence.loops[0].subscribed, "the arm subscribed somebody");
@@ -3657,7 +3872,7 @@ mod tests {
         assert!(!live.is_keyed(&session));
         assert!(
             !live
-                .presence(&session, Vec::new())
+                .presence(&session, Vec::new(), &[])
                 .expect("a document")
                 .1
                 .keyed
@@ -3667,7 +3882,7 @@ mod tests {
 
         assert!(live.is_keyed(&session));
         assert!(
-            live.presence(&session, Vec::new())
+            live.presence(&session, Vec::new(), &[])
                 .expect("a document")
                 .1
                 .keyed
@@ -3681,10 +3896,14 @@ mod tests {
         let (_directory, store) = a_temporary_store().await;
         let live = StateAuthority::empty();
         let session = a_session(&live, &store, "flight").await;
-        let (before, _) = live.presence(&session, Vec::new()).expect("a document");
+        let (before, _) = live
+            .presence(&session, Vec::new(), &[])
+            .expect("a document");
 
         live.the_client_keys(&session);
-        let (after, _) = live.presence(&session, Vec::new()).expect("a document");
+        let (after, _) = live
+            .presence(&session, Vec::new(), &[])
+            .expect("a document");
 
         assert_eq!(after, before + 1);
     }
@@ -3865,7 +4084,7 @@ mod tests {
         live.unheard_from_for(&talker, Duration::from_secs(12));
 
         let (_, presence) = live
-            .presence(&talker, vec![a_loop_to_emit_on("air-to-ground")])
+            .presence(&talker, vec![a_loop_to_emit_on("air-to-ground")], &[])
             .expect("a document");
         assert!(!presence.keyed);
     }
@@ -3887,7 +4106,9 @@ mod tests {
         ] {
             live.unheard_from_for(&session, unheard_for);
 
-            let (_, presence) = live.presence(&session, reach.clone()).expect("a document");
+            let (_, presence) = live
+                .presence(&session, reach.clone(), &[])
+                .expect("a document");
             assert_eq!(
                 presence.connection, rung,
                 "unheard from for {unheard_for:?}"
@@ -3905,14 +4126,18 @@ mod tests {
         let live = StateAuthority::empty();
         let session = a_session(&live, &store, "flight").await;
         let reach = vec![a_loop_to_emit_on("air-to-ground")];
-        let (first, _) = live.presence(&session, reach.clone()).expect("a document");
+        let (first, _) = live
+            .presence(&session, reach.clone(), &[])
+            .expect("a document");
 
         live.unheard_from_for(&session, Duration::from_secs(3));
-        let (aged, _) = live.presence(&session, reach.clone()).expect("a document");
+        let (aged, _) = live
+            .presence(&session, reach.clone(), &[])
+            .expect("a document");
         assert_eq!(aged, first, "the version moved for an age nothing renders");
 
         live.unheard_from_for(&session, Duration::from_secs(6));
-        let (moved, _) = live.presence(&session, reach).expect("a document");
+        let (moved, _) = live.presence(&session, reach, &[]).expect("a document");
         assert_eq!(moved, first + 1);
     }
 
@@ -3920,7 +4145,7 @@ mod tests {
 
     /// The one loop's standing on one session's console, as its own document has it.
     fn standing_of(live: &StateAuthority, session: &SessionId, within: Vec<InReach>) -> Standing {
-        live.presence(session, within)
+        live.presence(session, within, &[])
             .expect("a document")
             .1
             .loops
@@ -3985,7 +4210,7 @@ mod tests {
         let (talker, listener) = a_talker_and_a_listener(&live, &store).await;
         let other = a_session(&live, &store, "gnc").await;
         let air_to_ground = LoopId::presented("air-to-ground".to_owned());
-        live.presence(&other, vec![a_loop("air-to-ground")]);
+        live.presence(&other, vec![a_loop("air-to-ground")], &[]);
         live.subscribe(&other, &air_to_ground);
 
         live.mute(&listener, &air_to_ground);
@@ -4007,8 +4232,8 @@ mod tests {
         let talker = a_session(&live, &store, "flight").await;
         let listener = a_session(&live, &store, "capcom").await;
         let reach = vec![a_loop_to_emit_on("air-to-ground"), a_loop_to_emit_on("sim")];
-        live.presence(&talker, reach.clone());
-        live.presence(&listener, reach);
+        live.presence(&talker, reach.clone(), &[]);
+        live.presence(&listener, reach, &[]);
         for held_on in ["air-to-ground", "sim"] {
             live.arm(&talker, &LoopId::presented(held_on.to_owned()));
             live.subscribe(&listener, &LoopId::presented(held_on.to_owned()));
@@ -4152,12 +4377,14 @@ mod tests {
         let live = StateAuthority::empty();
         let session = a_session(&live, &store, "flight").await;
         let reach = vec![a_loop("air-to-ground")];
-        let (first, _) = live.presence(&session, reach.clone()).expect("a document");
+        let (first, _) = live
+            .presence(&session, reach.clone(), &[])
+            .expect("a document");
         let turned_down = Volume::presented(40).expect("a volume");
 
         assert!(live.set_the_volume(&session, &a_loop("air-to-ground").id, turned_down));
 
-        let (moved, presence) = live.presence(&session, reach).expect("a document");
+        let (moved, presence) = live.presence(&session, reach, &[]).expect("a document");
         assert_eq!(presence.loops[0].volume, turned_down);
         assert_eq!(moved, first + 1);
     }
@@ -4181,6 +4408,7 @@ mod tests {
             .presence(
                 &assumed.session,
                 vec![a_loop("air-to-ground"), a_loop("sim")],
+                &[],
             )
             .expect("a document");
         assert_eq!(presence.loops[0].volume, Volume::UNITY);
@@ -4197,7 +4425,7 @@ mod tests {
         let turned_down = Volume::presented(10).expect("a volume");
         live.set_the_volume(&session, &a_loop("sim").id, turned_down);
 
-        live.presence(&session, vec![a_loop("air-to-ground")]);
+        live.presence(&session, vec![a_loop("air-to-ground")], &[]);
 
         assert_eq!(
             standing_of(&live, &session, vec![a_loop("sim")]).volume,
@@ -4238,8 +4466,8 @@ mod tests {
         let listener = a_session(live, store, "capcom").await;
         let air_to_ground = LoopId::presented("air-to-ground".to_owned());
 
-        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")]);
-        live.presence(&listener, vec![a_loop("air-to-ground")]);
+        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")], &[]);
+        live.presence(&listener, vec![a_loop("air-to-ground")], &[]);
         live.arm(&talker, &air_to_ground);
         live.subscribe(&listener, &air_to_ground);
 
@@ -4250,7 +4478,7 @@ mod tests {
 
     /// The loops one session's document marks as carrying a priority transmission.
     fn marked(live: &StateAuthority, session: &SessionId, within: Vec<InReach>) -> Vec<String> {
-        live.presence(session, within)
+        live.presence(session, within, &[])
             .expect("a document")
             .1
             .loops
@@ -4268,8 +4496,8 @@ mod tests {
         let talker = a_session(live, store, "flight").await;
         let listener = a_session(live, store, "capcom").await;
         let reach = vec![a_loop_to_emit_on("air-to-ground"), a_loop_to_emit_on("sim")];
-        live.presence(&talker, reach.clone());
-        live.presence(&listener, reach.clone());
+        live.presence(&talker, reach.clone(), &[]);
+        live.presence(&listener, reach.clone(), &[]);
         for held_on in ["air-to-ground", "sim"] {
             live.arm(&talker, &LoopId::presented(held_on.to_owned()));
             live.subscribe(&listener, &LoopId::presented(held_on.to_owned()));
@@ -4321,7 +4549,7 @@ mod tests {
         let live = StateAuthority::empty();
         let (talker, listener) = a_talker_and_a_listener(&live, &store).await;
         let unmonitored = a_session(&live, &store, "gnc").await;
-        live.presence(&unmonitored, vec![a_loop("air-to-ground")]);
+        live.presence(&unmonitored, vec![a_loop("air-to-ground")], &[]);
         live.mute(&listener, &LoopId::presented("air-to-ground".to_owned()));
 
         live.the_client_keys(&talker);
@@ -4350,8 +4578,8 @@ mod tests {
         let other = a_session(&live, &store, "gnc").await;
         let unsubscribed = a_session(&live, &store, "eecom").await;
         let air_to_ground = LoopId::presented("air-to-ground".to_owned());
-        live.presence(&other, vec![a_loop_to_emit_on("air-to-ground")]);
-        live.presence(&unsubscribed, vec![a_loop("air-to-ground")]);
+        live.presence(&other, vec![a_loop_to_emit_on("air-to-ground")], &[]);
+        live.presence(&unsubscribed, vec![a_loop("air-to-ground")], &[]);
         live.arm(&other, &air_to_ground);
         live.mute(&listener, &air_to_ground);
         live.the_client_keys(&other);
@@ -4385,7 +4613,7 @@ mod tests {
         assert!(marked(&live, &listener, vec![a_loop("air-to-ground")]).is_empty());
         assert!(
             !live
-                .presence(&talker, vec![a_loop_to_emit_on("air-to-ground")])
+                .presence(&talker, vec![a_loop_to_emit_on("air-to-ground")], &[])
                 .expect("a document")
                 .1
                 .priority
@@ -4418,11 +4646,15 @@ mod tests {
         let live = StateAuthority::empty();
         let session = a_session(&live, &store, "flight").await;
         live.the_client_keys(&session);
-        let (before, ordinary) = live.presence(&session, Vec::new()).expect("a document");
+        let (before, ordinary) = live
+            .presence(&session, Vec::new(), &[])
+            .expect("a document");
         assert!(!ordinary.priority);
 
         live.the_client_keys_priority(&session);
-        let (after, elevated) = live.presence(&session, Vec::new()).expect("a document");
+        let (after, elevated) = live
+            .presence(&session, Vec::new(), &[])
+            .expect("a document");
 
         assert!(elevated.priority);
         assert_eq!(
@@ -4511,7 +4743,7 @@ mod tests {
         live.the_client_is_there(&session);
         assert!(
             !live
-                .presence(&session, Vec::new())
+                .presence(&session, Vec::new(), &[])
                 .expect("a document")
                 .1
                 .priority,
@@ -4681,7 +4913,7 @@ mod tests {
         live.subscribe(&session, &sim);
         live.mute(&session, &flight);
         // Reach is recorded when a document is projected, and `sim` is not in it.
-        live.presence(&session, vec![a_loop("flight")]);
+        live.presence(&session, vec![a_loop("flight")], &[]);
 
         let counting = live.the_beacons_if_they_moved().expect("an answer");
 
@@ -4717,7 +4949,7 @@ mod tests {
         let session = a_session(&live, &store, "flight").await;
         let flight = LoopId::presented("flight".to_owned());
         live.subscribe(&session, &flight);
-        live.presence(&session, vec![a_loop("flight")]);
+        live.presence(&session, vec![a_loop("flight")], &[]);
         live.the_beacons_went_unheard_for(&session, PAST_THE_WINDOW);
 
         live.unheard_from_for(&session, Duration::from_secs(6));
@@ -4773,7 +5005,7 @@ mod tests {
         let live = StateAuthority::empty();
         let session = a_session(&live, &store, "flight").await;
         let flight = LoopId::presented("flight".to_owned());
-        live.presence(&session, vec![a_loop("flight")]);
+        live.presence(&session, vec![a_loop("flight")], &[]);
         assert_eq!(
             live.why_not_hearing(&session, &flight),
             Some(NotHearing::NotSubscribed)
@@ -4825,7 +5057,7 @@ mod tests {
 
     /// What one session's own document says it has claimed about itself.
     fn asserted_by(live: &StateAuthority, session: &SessionId) -> Option<Asserted> {
-        live.presence(session, Vec::new())
+        live.presence(session, Vec::new(), &[])
             .expect("a document")
             .1
             .off_console
@@ -4865,11 +5097,17 @@ mod tests {
         live.off_console(&session);
 
         live.last_active_was(&session, Duration::from_secs(5));
-        let (first, _) = live.presence(&session, Vec::new()).expect("a document");
+        let (first, _) = live
+            .presence(&session, Vec::new(), &[])
+            .expect("a document");
         live.last_active_was(&session, Duration::from_millis(5_400));
-        let (within_the_same_second, _) = live.presence(&session, Vec::new()).expect("a document");
+        let (within_the_same_second, _) = live
+            .presence(&session, Vec::new(), &[])
+            .expect("a document");
         live.last_active_was(&session, Duration::from_secs(6));
-        let (a_second_later, _) = live.presence(&session, Vec::new()).expect("a document");
+        let (a_second_later, _) = live
+            .presence(&session, Vec::new(), &[])
+            .expect("a document");
 
         assert_eq!(
             within_the_same_second, first,
@@ -4976,12 +5214,12 @@ mod tests {
         let listener = a_session(&live, &store, "capcom").await;
         let air_to_ground = LoopId::presented("air-to-ground".to_owned());
         let emitting = vec![a_loop_to_emit_on("air-to-ground")];
-        live.presence(&talker, emitting.clone());
-        live.presence(&listener, emitting.clone());
+        live.presence(&talker, emitting.clone(), &[]);
+        live.presence(&listener, emitting.clone(), &[]);
         live.arm(&talker, &air_to_ground);
         live.subscribe(&listener, &air_to_ground);
         live.the_client_keys(&talker);
-        live.presence(&listener, emitting.clone());
+        live.presence(&listener, emitting.clone(), &[]);
 
         assert_eq!(
             heard_by(&live, &talker),
@@ -4990,7 +5228,7 @@ mod tests {
         );
 
         live.off_console(&listener);
-        live.presence(&listener, emitting.clone());
+        live.presence(&listener, emitting.clone(), &[]);
 
         assert_eq!(
             live.the_routing_if_it_moved(),
@@ -5039,7 +5277,7 @@ mod tests {
         let live = StateAuthority::empty();
         let session = a_session(&live, &store, "flight").await;
         let flight = LoopId::presented("flight".to_owned());
-        live.presence(&session, vec![a_loop("flight")]);
+        live.presence(&session, vec![a_loop("flight")], &[]);
         live.subscribe(&session, &flight);
         live.the_client_counted(&session, &counted("flight", 12));
 
@@ -5071,6 +5309,323 @@ mod tests {
                 .map(|session_held| session_held.occupant.clone())
                 .expect("a session")
         })
+    }
+
+    /// Whether a human is behind that loop, as this session's own document has it.
+    fn staffing_of(
+        live: &StateAuthority,
+        session: &SessionId,
+        within: Vec<InReach>,
+        staffed: &[StaffedBy],
+    ) -> Option<Staffing> {
+        live.presence(session, within, staffed)
+            .expect("a document")
+            .1
+            .loops
+            .into_iter()
+            .next()
+            .expect("one loop in reach")
+            .staffing
+    }
+
+    /// One loop and the roles staffing it, as the grid hands the pairs over.
+    fn staffed_by(held_on: &str, roles: &[&RoleId]) -> StaffedBy {
+        StaffedBy {
+            held_on: LoopId::presented(held_on.to_owned()),
+            roles: roles.iter().map(|role| (*role).clone()).collect(),
+        }
+    }
+
+    /// A second person in the same seat, for the counting a multi-occupant role is the whole
+    /// case for.
+    async fn another_occupant(
+        live: &StateAuthority,
+        store: &Store,
+        who: &str,
+        role: &RoleId,
+    ) -> SessionId {
+        let (sign_in, user, _their_own_role) =
+            a_seat(store, who, &format!("{who}'s own role")).await;
+
+        live.assume(taking(&sign_in, &user, role, None))
+            .expect("the seat to take another")
+            .session
+    }
+
+    /// Somebody hearing the loop: it is on their console, its beacon is arriving, and they
+    /// have neither muted it nor stepped away.
+    fn hearing(live: &StateAuthority, session: &SessionId, held_on: &LoopId) {
+        live.presence(session, vec![a_loop(held_on.as_str())], &[]);
+        live.subscribe(session, held_on);
+        live.the_client_counted(session, &counted(held_on.as_str(), 12));
+    }
+
+    /// **A loop with no staffing roles has no staffing state at all** ([ADR-0056]). It is not
+    /// `vacant`: two people may be talking on it right now.
+    ///
+    /// [ADR-0056]: ../../docs/adr/0056-a-loop-with-no-staffing-roles-has-no-staffing-state.md
+    #[tokio::test]
+    async fn a_loop_nothing_staffs_has_no_staffing_state() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let flight = LoopId::presented("flight".to_owned());
+        hearing(&live, &session, &flight);
+
+        assert_eq!(
+            staffing_of(&live, &session, vec![a_loop("flight")], &[]),
+            None,
+            "a loop nobody staffs was given a staffing state"
+        );
+    }
+
+    /// Removing the last staffing role takes the state away, and that is a configuration
+    /// change like any other rather than an error ([ADR-0056]).
+    ///
+    /// [ADR-0056]: ../../docs/adr/0056-a-loop-with-no-staffing-roles-has-no-staffing-state.md
+    #[tokio::test]
+    async fn losing_the_last_staffing_role_leaves_the_loop_with_no_staffing_state() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (sign_in, user, role) = a_seat(&store, "gene", "Flight Director").await;
+        let session = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free")
+            .session;
+        let flight = LoopId::presented("flight".to_owned());
+        hearing(&live, &session, &flight);
+        let staffed = [staffed_by("flight", &[&role])];
+
+        assert_eq!(
+            staffing_of(&live, &session, vec![a_loop("flight")], &staffed),
+            Some(Staffing::Staffed)
+        );
+        assert_eq!(
+            staffing_of(&live, &session, vec![a_loop("flight")], &[]),
+            None
+        );
+    }
+
+    /// `vacant` is nobody in the seat, and it is materially different from `away`: there is
+    /// no console for anybody to fix.
+    ///
+    /// **A service principal cannot produce anything else**: occupancy has exactly one origin
+    /// and it is an assume ([ADR-0005]), which a service principal never makes — its role
+    /// binding gives reach and never occupancy ([ADR-0027]).
+    ///
+    /// [ADR-0005]: ../../docs/adr/0005-occupancy-means-listening-not-signed-in.md
+    /// [ADR-0027]: ../../docs/adr/0027-a-service-principal-acts-through-a-role.md
+    #[tokio::test]
+    async fn a_loop_whose_staffing_roles_nobody_occupies_is_vacant() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let (_sign_in, _user, unoccupied) = a_seat(&store, "gene", "Ground Alarms").await;
+        let flight = LoopId::presented("flight".to_owned());
+        hearing(&live, &session, &flight);
+
+        assert_eq!(
+            staffing_of(
+                &live,
+                &session,
+                vec![a_loop("flight")],
+                &[staffed_by("flight", &[&unoccupied])]
+            ),
+            Some(Staffing::Vacant),
+            "a loop nobody occupies a staffing role on was read as covered"
+        );
+    }
+
+    /// `staffed` means an occupant of a staffing role is **demonstrably hearing** it: the
+    /// loop is on their console and its beacon is arriving ([ADR-0017]).
+    ///
+    /// [ADR-0017]: ../../docs/adr/0017-loop-health-is-measured-not-asserted.md
+    #[tokio::test]
+    async fn an_occupant_demonstrably_hearing_it_staffs_it() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (sign_in, user, role) = a_seat(&store, "gene", "Flight Director").await;
+        let session = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free")
+            .session;
+        let flight = LoopId::presented("flight".to_owned());
+        let staffed = [staffed_by("flight", &[&role])];
+
+        assert_eq!(
+            staffing_of(&live, &session, vec![a_loop("flight")], &staffed),
+            Some(Staffing::Away(vec![(NotHearing::NotSubscribed, 1)])),
+            "a loop nobody has on their console was read as covered"
+        );
+
+        hearing(&live, &session, &flight);
+
+        assert_eq!(
+            staffing_of(&live, &session, vec![a_loop("flight")], &staffed),
+            Some(Staffing::Staffed)
+        );
+    }
+
+    /// **There is no partial value.** One occupant hearing it is the whole answer, however
+    /// many others have stepped away: the question is whether a human is behind the loop.
+    #[tokio::test]
+    async fn one_occupant_hearing_it_staffs_it_whatever_the_others_are_doing() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (sign_in, user, role) = a_seat(&store, "gene", "Flight Director").await;
+        let hearing_it = live
+            .assume(taking(&sign_in, &user, &role, None))
+            .expect("the seat to be free")
+            .session;
+        let away = another_occupant(&live, &store, "flight", &role).await;
+        let flight = LoopId::presented("flight".to_owned());
+        hearing(&live, &hearing_it, &flight);
+        hearing(&live, &away, &flight);
+        live.mute(&away, &flight);
+
+        assert_eq!(
+            staffing_of(
+                &live,
+                &hearing_it,
+                vec![a_loop("flight")],
+                &[staffed_by("flight", &[&role])]
+            ),
+            Some(Staffing::Staffed)
+        );
+    }
+
+    /// **The reason is a count over occupants and it ranks nothing** ([ADR-0065]): a mute is
+    /// one click from hearing and so is a subscription, so no ordering across people is
+    /// defensible. The counts arrive furthest upstream first, which is an order to read them
+    /// in rather than a precedence.
+    ///
+    /// [ADR-0065]: ../../docs/adr/0065-the-staffing-flag-reports-it-never-subscribes.md
+    #[tokio::test]
+    async fn away_counts_every_occupant_by_reason() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (sign_in, user, role) = a_seat(&store, "gene", "Flight Director").await;
+        let muted = live
+            .assume(taking(&sign_in, &user, &role, None))
+            .expect("the seat to be free")
+            .session;
+        let unsubscribed = another_occupant(&live, &store, "flight", &role).await;
+        let also_unsubscribed = another_occupant(&live, &store, "capcom", &role).await;
+        let flight = LoopId::presented("flight".to_owned());
+        hearing(&live, &muted, &flight);
+        live.mute(&muted, &flight);
+        live.presence(&unsubscribed, vec![a_loop("flight")], &[]);
+        live.presence(&also_unsubscribed, vec![a_loop("flight")], &[]);
+
+        assert_eq!(
+            staffing_of(
+                &live,
+                &muted,
+                vec![a_loop("flight")],
+                &[staffed_by("flight", &[&role])]
+            ),
+            Some(Staffing::Away(vec![
+                (NotHearing::NotSubscribed, 2),
+                (NotHearing::Muted, 1),
+            ]))
+        );
+    }
+
+    /// **Within one occupant the reason is the one furthest upstream** — the one still true
+    /// if everything below it were fixed — so somebody unreachable is counted once and as
+    /// unreachable, whatever else is also true of them (v1 §8).
+    #[tokio::test]
+    async fn one_occupant_is_counted_once_under_the_reason_furthest_upstream() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (sign_in, user, role) = a_seat(&store, "gene", "Flight Director").await;
+        let session = live
+            .assume(taking(&sign_in, &user, &role, None))
+            .expect("the seat to be free")
+            .session;
+        let flight = LoopId::presented("flight".to_owned());
+        hearing(&live, &session, &flight);
+        live.mute(&session, &flight);
+        live.off_console(&session);
+        live.unheard_from_for(&session, PAST_THE_WINDOW);
+
+        assert_eq!(
+            staffing_of(
+                &live,
+                &session,
+                vec![a_loop("flight")],
+                &[staffed_by("flight", &[&role])]
+            ),
+            Some(Staffing::Away(vec![(NotHearing::Unreachable, 1)])),
+            "one occupant was counted under more than one reason at once"
+        );
+    }
+
+    /// It is computed across **every** staffing role, not only the one the reader is in.
+    #[tokio::test]
+    async fn staffing_state_reads_every_occupant_of_every_staffing_role() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (sign_in, user, flight_director) = a_seat(&store, "gene", "Flight Director").await;
+        let watching = live
+            .assume(taking(&sign_in, &user, &flight_director, Some(1)))
+            .expect("the seat to be free")
+            .session;
+        let (theirs, them, capcom) = a_seat(&store, "flight", "CAPCOM").await;
+        let hearing_it = live
+            .assume(taking(&theirs, &them, &capcom, Some(1)))
+            .expect("the seat to be free")
+            .session;
+        let flight = LoopId::presented("flight".to_owned());
+        hearing(&live, &hearing_it, &flight);
+        live.presence(&watching, vec![a_loop("flight")], &[]);
+
+        assert_eq!(
+            staffing_of(
+                &live,
+                &watching,
+                vec![a_loop("flight")],
+                &[staffed_by("flight", &[&flight_director, &capcom])]
+            ),
+            Some(Staffing::Staffed),
+            "an occupant of the other staffing role was left out of the answer"
+        );
+    }
+
+    /// **The mark is a fact about this console's own configuration**, carried whether or not
+    /// anything is wrong: the second state the console draws is this field beside the
+    /// subscription it already has (v1 §8, ADR-0065).
+    #[tokio::test]
+    async fn the_document_says_whether_this_sessions_role_staffs_each_loop() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (sign_in, user, role) = a_seat(&store, "gene", "Flight Director").await;
+        let session = live
+            .assume(taking(&sign_in, &user, &role, Some(1)))
+            .expect("the seat to be free")
+            .session;
+        let (_theirs, _them, somebody_else) = a_seat(&store, "flight", "CAPCOM").await;
+
+        let marked = live
+            .presence(
+                &session,
+                vec![a_loop("flight"), a_loop("air-to-ground")],
+                &[
+                    staffed_by("flight", &[&role]),
+                    staffed_by("air-to-ground", &[&somebody_else]),
+                ],
+            )
+            .expect("a document")
+            .1;
+
+        assert!(
+            marked.loops[0].staffs,
+            "the loop this role staffs was unmarked"
+        );
+        assert!(
+            !marked.loops[1].staffs,
+            "a loop somebody else's role staffs was marked on this console"
+        );
     }
 
     /// One loop in reach, named the way a grid row hands it over.

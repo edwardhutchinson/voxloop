@@ -11,12 +11,20 @@
 //! is why there is one write here and no *clear*, no *grant*, no *deny* and no per-user
 //! anything. Setting `none` is how a permission is taken away.
 //!
+//! **The staffing flag is set here too**, on the same pair and by its own write. It is not a
+//! fifth rung and it is not part of the cell's value: it confers nothing, subscribes nobody
+//! and changes no console ([ADR-0065]), and the two writes are independent for that reason —
+//! an administrator granting `emit` has not said anybody answers for the loop, and one
+//! marking a staffing role has not given anybody reach. Its one rule is that the pair must
+//! hold at least `emit`, and a write that would break it is refused with the reason.
+//!
 //! **Dismissing a loop's `unreviewed` mark lives here** rather than with the loop record,
 //! because what it writes is cells: a deliberate `none` against every role nobody ruled on.
 //! It is per loop, never per cell (v1 §9).
 //!
 //! [ADR-0011]: ../../../docs/adr/0011-a-permission-is-one-cell-on-the-grid.md
 //! [ADR-0015]: ../../../docs/adr/0015-the-admin-console-reads-one-row-at-a-time.md
+//! [ADR-0065]: ../../../docs/adr/0065-the-staffing-flag-reports-it-never-subscribes.md
 
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
@@ -44,6 +52,11 @@ struct CellAsRead {
     /// `none`, `monitor`, `emit` or `control` — the same four words the store holds and the
     /// audit log reads back, so nothing has to be translated to be talked about.
     permission: &'static str,
+    /// Whether this role counts toward the loop's staffing state (v1 §1).
+    ///
+    /// Beside the permission and never inside it: it is not a rung, and a console that read
+    /// it as one would offer *counts as cover* as something granted by raising reach.
+    staffs: bool,
 }
 
 /// One cell of a role's row: the loop, and what the role holds on it.
@@ -55,6 +68,7 @@ struct OnALoop {
     #[serde(rename = "loop")]
     held_on: LoopAsRead,
     permission: &'static str,
+    staffs: bool,
 }
 
 /// One cell of a loop's column: the role, and what it holds on the loop.
@@ -62,6 +76,7 @@ struct OnALoop {
 struct ByARole {
     role: RoleAsRead,
     permission: &'static str,
+    staffs: bool,
 }
 
 impl CellAsRead {
@@ -70,6 +85,7 @@ impl CellAsRead {
             role: RoleAsRead::of(&cell.role),
             held_on: LoopAsRead::of(&cell.held_on),
             permission: cell.permission.as_str(),
+            staffs: cell.staffs,
         }
     }
 
@@ -118,12 +134,23 @@ struct HeldAsRead {
     #[serde(rename = "loop")]
     held_on: String,
     permission: &'static str,
+    staffs: bool,
 }
 
 /// What the console sends to set a cell: the one value it is to hold.
 #[derive(Deserialize)]
 pub(in crate::transport) struct Setting {
     permission: String,
+}
+
+/// What the console sends to mark a role as staffing a loop, or to stop marking it.
+///
+/// A flag rather than a *mark* and an *unmark*: the pair is the whole address and the value
+/// is one of two, so this is the shape a cell write has rather than the shape eligibility
+/// has — where the grant is present or absent and there is nothing to send.
+#[derive(Deserialize)]
+pub(in crate::transport) struct Staffing {
+    staffs: bool,
 }
 
 /// Read a role's row. `SystemAdministration`. A read, so it is not audited.
@@ -144,6 +171,7 @@ async fn read_the_row(api: &Api, role: &RoleId) -> Result<Response, StoreError> 
                 .map(|cell| OnALoop {
                     held_on: LoopAsRead::of(&cell.held_on),
                     permission: cell.permission.as_str(),
+                    staffs: cell.staffs,
                 })
                 .collect(),
         })
@@ -176,6 +204,7 @@ async fn read_the_column(api: &Api, held_on: &LoopId) -> Result<Response, StoreE
                 .map(|cell| ByARole {
                     role: RoleAsRead::of(&cell.role),
                     permission: cell.permission.as_str(),
+                    staffs: cell.staffs,
                 })
                 .collect(),
         })
@@ -220,6 +249,7 @@ async fn read_the_matrix(api: &Api) -> Result<Response, StoreError> {
                     role: cell.role.id.as_str().to_owned(),
                     held_on: cell.held_on.id.as_str().to_owned(),
                     permission: cell.permission.as_str(),
+                    staffs: cell.staffs,
                 })
                 .collect(),
         })
@@ -263,6 +293,49 @@ pub(in crate::transport) async fn set(
             async |transaction: &mut Transaction| transaction.a_cell(&role, &held_on).await,
             async |transaction: &mut Transaction| {
                 Ok(transaction.set_cell(&role, &held_on, permission).await?)
+            },
+            CellAsRead::read_through,
+        )
+        .await,
+    )
+}
+
+/// Mark a role as staffing a loop, or stop marking it. `SystemAdministration`, audited with
+/// before and after.
+///
+/// **It subscribes nobody and changes no console** ([ADR-0065]). The write goes to the same
+/// cell the permission does and is audited under its own event, because the two say
+/// different things: a log filtered to *what changed what this role may do* must not turn up
+/// the day somebody marked it as cover.
+///
+/// Refused where the pair holds less than `emit` — a role that cannot answer cannot staff
+/// (v1 §1) — and the refusal is audited like every other refused administration write.
+///
+/// [ADR-0065]: ../../../docs/adr/0065-the-staffing-flag-reports-it-never-subscribes.md
+pub(in crate::transport) async fn set_staffing(
+    State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
+    Path((role, held_on)): Path<(String, String)>,
+    Json(asked): Json<Staffing>,
+) -> Response {
+    let Some(acting) = acting(&caller) else {
+        return unreachable_caller();
+    };
+
+    let role = RoleId::presented(role);
+    let held_on = LoopId::presented(held_on);
+
+    answers::or_unavailable(
+        administer(
+            &api,
+            acting,
+            AuditEvent::StaffingRoleSet,
+            "role or loop",
+            async |transaction: &mut Transaction| transaction.a_cell(&role, &held_on).await,
+            async |transaction: &mut Transaction| {
+                transaction
+                    .set_staffing(&role, &held_on, asked.staffs)
+                    .await
             },
             CellAsRead::read_through,
         )
