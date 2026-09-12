@@ -72,6 +72,17 @@ pub(crate) enum AdministrationRefused {
     #[error("that order does not name every loop exactly once")]
     IncompleteOrder,
 
+    /// **A role that cannot answer cannot staff** (v1 §1). The staffing flag is set per
+    /// (role, loop) and only where that pair holds at least `emit`, because staffing state
+    /// answers *is a human behind this loop* and somebody who may only listen to it is not
+    /// cover.
+    ///
+    /// It is refused rather than ignored, because the two orders the pair of writes can
+    /// arrive in would otherwise differ: marking first and granting `emit` afterwards would
+    /// silently leave the loop unstaffed by a role the administrator believes staffs it.
+    #[error("a role that may not emit on a loop cannot staff it")]
+    CannotStaff,
+
     #[error(transparent)]
     Store(#[from] StoreError),
 }

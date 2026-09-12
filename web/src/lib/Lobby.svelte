@@ -3,10 +3,16 @@
 	//
 	// It answers one question — *should I assume a role, and which?* — and deliberately
 	// nothing else (ADR-0023). No audio, no authority, no talking indicators, no
-	// configuration. The roles this person may assume and who is in each seat is the whole
-	// of it, and the staffing state of the loops those roles staff joins it later, carried
-	// in full rather than as a word: the lobby is read once and deliberately, by somebody
-	// about to be in a position to fix what it says.
+	// configuration. The roles this person may assume, who is in each seat, and **the
+	// staffing state of the loops those roles staff, with the reason in full** — ledger-style
+	// rather than board-style, because the lobby is read once and deliberately, by somebody
+	// about to be in a position to fix what it says. `away — 2 not subscribed` tells them the
+	// seat's loops need setting up before they take it.
+	//
+	// It is not reach: a role reaches loops it does not staff, and those are not this page's
+	// business. The sentence is `staffing.js`'s, the same one the ledger says, because a
+	// second implementation is how two surfaces come to disagree about whether somebody is
+	// behind a loop.
 	//
 	// **Assuming is the act this page is for**, and it is the only one on it. An occupied
 	// single-occupant seat is offered as unavailable and says so in words rather than being
@@ -17,6 +23,8 @@
 	// The document arrives from the frame rather than from a socket of this page's own,
 	// because the socket belongs to the tab and is opened at sign-in — an administrator
 	// reading the admin console has not left the lobby, and their socket has not closed.
+	import { theSentence } from './staffing.js';
+
 	let { lobby, lost, refused, relinquished, onAssume } = $props();
 
 	// A seat nobody is in is the answer this page exists to give, so it is said in words
@@ -73,6 +81,7 @@
 					<th>Role</th>
 					<th>Occupied by</th>
 					<th>Max occupants</th>
+					<th>Loops it staffs</th>
 					<th class="acts">Assume</th>
 				</tr>
 			</thead>
@@ -82,6 +91,24 @@
 						<td>{role.name}</td>
 						<td class:quiet={role.occupants.length === 0}>{occupancy(role)}</td>
 						<td class:quiet={role.max_occupants === null}>{limit(role)}</td>
+						<td>
+							<!-- A role that staffs nothing says so, rather than leaving a cell empty:
+							     *this seat answers for no loop* is an answer, and a blank is not. -->
+							{#if role.staffs.length === 0}
+								<span class="quiet">None</span>
+							{:else}
+								<ul>
+									{#each role.staffs as held_on (held_on.id)}
+										<li>
+											<span class="name">{held_on.name}</span>
+											<span class="meaning" class:nobody={held_on.staffing.state !== 'staffed'}>
+												{theSentence(held_on.staffing)}
+											</span>
+										</li>
+									{/each}
+								</ul>
+							{/if}
+						</td>
 						<td class="acts">
 							{#if isFull(role)}
 								<span class="quiet">Occupied</span>
@@ -95,3 +122,18 @@
 		</table>
 	{/if}
 </section>
+
+<style>
+	/* The loops one seat answers for, listed down its own cell. There is no bullet and no
+	   indent: it is a list because it is one, and a row of a table is not the place for a
+	   second level of furniture. */
+	ul {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	li + li {
+		margin-top: var(--space-2);
+	}
+</style>

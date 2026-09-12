@@ -107,6 +107,18 @@ pub(crate) enum AuditEvent {
     ///
     /// [ADR-0011]: ../../../docs/adr/0011-a-permission-is-one-cell-on-the-grid.md
     GridCellEdited,
+    /// A (role, loop) pair marked as staffing that loop, or unmarked (v1 §1).
+    ///
+    /// Its own event rather than a second flavour of [`AuditEvent::GridCellEdited`], because
+    /// the two writes say different things: one is voice authority and the other is a report
+    /// about who counts as cover, and it **confers nothing** ([ADR-0065]). A log filtered to
+    /// *what changed what this role may do* must not turn up the day somebody marked it.
+    ///
+    /// It is audited because it is an administration write and every one of those is
+    /// (v1 §12), not because the flag is a decision about anybody's reach.
+    ///
+    /// [ADR-0065]: ../../../docs/adr/0065-the-staffing-flag-reports-it-never-subscribes.md
+    StaffingRoleSet,
     /// A loop's `unreviewed` mark dismissed, recording a deliberate `none` for every role
     /// nobody had ruled on. It is per loop, never per cell (v1 §9).
     LoopReviewed,
@@ -177,6 +189,7 @@ impl AuditEvent {
             Self::LoopDeleted => "loop_deleted",
             Self::LoopOrderEdited => "loop_order_edited",
             Self::GridCellEdited => "grid_cell_edited",
+            Self::StaffingRoleSet => "staffing_role_set",
             Self::LoopReviewed => "loop_reviewed",
             Self::EligibilityGranted => "eligibility_granted",
             Self::EligibilityRevoked => "eligibility_revoked",
@@ -214,6 +227,7 @@ impl AuditEvent {
             "loop_deleted" => Some(Self::LoopDeleted),
             "loop_order_edited" => Some(Self::LoopOrderEdited),
             "grid_cell_edited" => Some(Self::GridCellEdited),
+            "staffing_role_set" => Some(Self::StaffingRoleSet),
             "loop_reviewed" => Some(Self::LoopReviewed),
             "eligibility_granted" => Some(Self::EligibilityGranted),
             "eligibility_revoked" => Some(Self::EligibilityRevoked),
@@ -493,8 +507,12 @@ impl Record for Cell {
         format!("{} on {}", self.role.name, self.held_on.name)
     }
 
-    /// A cell as it stood: the pair, the one value it holds, and whether it is being
-    /// enforced.
+    /// A cell as it stood: the pair, the one value it holds, whether that value is being
+    /// enforced, and whether the role counts toward the loop's staffing state.
+    ///
+    /// The staffing flag is in it for the reason *whether a password is set* is in a user's:
+    /// without it, the write whose entire effect is on the flag would record two identical
+    /// lines and say nothing.
     ///
     /// The review state is a fact about the loop rather than about the cell, and it is here
     /// anyway, because without it a `control` granted on an unreviewed loop and the same
@@ -502,11 +520,12 @@ impl Record for Cell {
     /// cell write that rules on the last of a column would record no sign that it had.
     fn snapshot(&self) -> Snapshot {
         Snapshot(format!(
-            "role={} loop={} permission={} enforced={}",
+            "role={} loop={} permission={} enforced={} staffs={}",
             self.role.name,
             self.held_on.name,
             self.permission.as_str(),
             yes_or_no(!self.held_on.is_unreviewed),
+            yes_or_no(self.staffs),
         ))
     }
 }

@@ -19,7 +19,9 @@
 	import Confirm from './Confirm.svelte';
 	import Icon from './Icon.svelte';
 	import Rungs from './Rungs.svelte';
-	import { dismissUnreviewed, loopColumn, setCell, whatWentWrong } from './server.js';
+	import Staffs from './Staffs.svelte';
+	import { dismissUnreviewed, loopColumn, setCell, setStaffing, whatWentWrong } from './server.js';
+	import { carries } from './rungs.js';
 
 	let { loop } = $props();
 
@@ -57,6 +59,15 @@
 		await read(loop);
 	}
 
+	// The second write on the same pair. It says who answers for this loop, and it grants
+	// nothing to anybody (ADR-0065).
+	async function staff(role, staffs) {
+		setting = role.id;
+		await attempt(() => setStaffing(role.id, loop, staffs));
+		setting = null;
+		await read(loop);
+	}
+
 	async function rule() {
 		confirming = null;
 		await attempt(() => dismissUnreviewed(loop));
@@ -83,6 +94,12 @@
 				Who may hear this loop, say anything on it, and hold operational authority over it. An
 				absent permission and a <strong>none</strong> are the same thing to the server; the difference
 				is only whether anybody has ruled on it.
+			</p>
+			<p>
+				The roles marked as <strong>staffing</strong> this loop are the ones its staffing state is
+				computed over — <em>is a human behind this loop</em>. Marking one subscribes nobody and
+				changes no console. A loop with no staffing roles has no staffing state at all, and the
+				console shows nothing where the word goes.
 			</p>
 		</header>
 
@@ -111,6 +128,7 @@
 				<tr>
 					<th>Role</th>
 					<th>Permission</th>
+					<th>Staffing</th>
 				</tr>
 			</thead>
 			<tbody>
@@ -123,6 +141,15 @@
 								of="{cell.role.name} on {column.loop.name}"
 								busy={setting === cell.role.id}
 								onset={(permission) => set(cell.role, permission)}
+							/>
+						</td>
+						<td>
+							<Staffs
+								staffs={cell.staffs}
+								mayEmit={carries(cell.permission, 'emit')}
+								of="{cell.role.name} on {column.loop.name}"
+								busy={setting === cell.role.id}
+								onset={(staffs) => staff(cell.role, staffs)}
 							/>
 						</td>
 					</tr>

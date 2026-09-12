@@ -393,6 +393,15 @@ fn routes(api: &Api) -> RouteTable<Api> {
         // rather than patched. There is no route that clears one: setting `none` is how a
         // permission is taken away.
         .put("/api/grid/{role}/{loop}", SystemAdministration, grid::set)
+        // The staffing flag is the same pair and a second write, because it is a second
+        // thing to say about them: this role counts toward that loop's staffing state, and
+        // it confers nothing ([ADR-0065]). It is a flag rather than a mark and an unmark,
+        // so it is set like the cell beside it.
+        .put(
+            "/api/grid/{role}/{loop}/staffing",
+            SystemAdministration,
+            grid::set_staffing,
+        )
         // A grant is addressed by its pair and holds no value, so it is made and unmade
         // rather than set: an eligibility is present or absent, and there is no rung for a
         // body to carry. The user comes first because that is what the audit entry names.
@@ -1313,7 +1322,7 @@ mod tests {
     /// two halves speak.
     #[tokio::test]
     async fn carries_the_lobby_and_a_session_over_a_real_socket() {
-        use futures_util::{SinkExt, StreamExt};
+        use futures_util::SinkExt;
         use tokio_tungstenite::tungstenite::protocol::Role;
 
         let directory = tempfile::tempdir().expect("a temporary directory");
@@ -1371,13 +1380,9 @@ mod tests {
             .await
             .expect("the hello to be sent");
 
-        let said = socket
-            .next()
-            .await
-            .expect("the socket to say something")
-            .expect("a readable message")
-            .into_text()
-            .expect("text");
+        // Past the heartbeats, which ride the same socket on their own clock and can land
+        // between the hello and the answer to it.
+        let said = next_said(&mut socket).await;
         assert!(
             said.contains(r#""message":"lobby""#) && said.contains(r#""version":1"#),
             "the socket answered {said}"
@@ -3300,6 +3305,131 @@ mod tests {
             )
             .await
         }
+
+        /// Mark a role as staffing a loop, or stop marking it — the second write on the
+        /// same pair, from the same two pages.
+        async fn staffs(&self, held: &str, role: &str, on: &str, staffs: bool) -> Answer {
+            self.holding(
+                held,
+                "PUT",
+                &format!("/api/grid/{role}/{on}/staffing"),
+                &format!(r#"{{"staffs":{staffs}}}"#),
+            )
+            .await
+        }
+    }
+
+    /// The staffing flag is set per (role, loop) and **only where the role may emit on that
+    /// loop** (v1 §1): a role that cannot answer cannot staff.
+    #[tokio::test]
+    async fn a_role_that_may_not_emit_on_a_loop_cannot_be_marked_as_staffing_it() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        let flight = box_of.a_ruled_on_loop_called(&held, "FLIGHT").await;
+        box_of.sets(&held, &role, &flight, "monitor").await;
+
+        let refused = box_of.staffs(&held, &role, &flight, true).await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::BAD_REQUEST,
+            "{:?}",
+            refused.body
+        );
+        assert!(
+            refused.body.contains("cannot staff it"),
+            "the refusal did not say why: {:?}",
+            refused.body
+        );
+
+        box_of.sets(&held, &role, &flight, "emit").await;
+        let marked = box_of.staffs(&held, &role, &flight, true).await;
+
+        assert_eq!(marked.status, StatusCode::OK, "{:?}", marked.body);
+        assert!(
+            marked.body.contains(r#""staffs":true"#),
+            "the answer did not carry the flag: {:?}",
+            marked.body
+        );
+    }
+
+    /// Setting the flag is a configuration write like any other: audited, with before and
+    /// after, and under **its own event** — a log filtered to *what changed what this role
+    /// may do* must not turn up the day somebody marked it as cover (ADR-0065).
+    #[tokio::test]
+    async fn marking_a_staffing_role_is_audited_and_changes_no_permission() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        let flight = box_of.a_ruled_on_loop_called(&held, "FLIGHT").await;
+        box_of.sets(&held, &role, &flight, "emit").await;
+
+        box_of.staffs(&held, &role, &flight, true).await;
+
+        let entries = box_of.entries().await;
+        assert_eq!(entries[0].event, AuditEvent::StaffingRoleSet);
+        let write = entries[0].write.as_ref().expect("a configuration write");
+        assert_eq!(write.target_name, "Flight Director on FLIGHT");
+        assert_eq!(
+            write.before.as_ref().map(Snapshot::as_str),
+            Some("role=Flight Director loop=FLIGHT permission=emit enforced=yes staffs=no")
+        );
+        assert_eq!(
+            write.after.as_ref().map(Snapshot::as_str),
+            Some("role=Flight Director loop=FLIGHT permission=emit enforced=yes staffs=yes")
+        );
+    }
+
+    /// Both administration pages read the flag, because the cell is set from either of them
+    /// and a page that could not see it would offer a control against nothing.
+    #[tokio::test]
+    async fn the_row_and_the_column_both_carry_the_staffing_flag() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        let flight = box_of.a_ruled_on_loop_called(&held, "FLIGHT").await;
+        box_of.sets(&held, &role, &flight, "emit").await;
+        box_of.staffs(&held, &role, &flight, true).await;
+
+        let row = box_of
+            .get_holding(&held, &format!("/api/roles/{role}/grid"))
+            .await;
+        let column = box_of
+            .get_holding(&held, &format!("/api/loops/{flight}/grid"))
+            .await;
+
+        assert!(
+            row.body.contains(r#""staffs":true"#),
+            "the row did not carry the flag: {:?}",
+            row.body
+        );
+        assert!(
+            column.body.contains(r#""staffs":true"#),
+            "the column did not carry the flag: {:?}",
+            column.body
+        );
+    }
+
+    /// Lowering the cell below `emit` clears the flag with it, rather than refusing the
+    /// revocation: the grid is not held under the staffing model.
+    #[tokio::test]
+    async fn lowering_a_cell_below_emit_stops_the_role_staffing_the_loop() {
+        let box_of = ABox::already_administered().await;
+        let held = box_of.signed_in_as("root").await;
+        let role = box_of.a_role_called(&held, "Flight Director").await;
+        let flight = box_of.a_ruled_on_loop_called(&held, "FLIGHT").await;
+        box_of.sets(&held, &role, &flight, "emit").await;
+        box_of.staffs(&held, &role, &flight, true).await;
+
+        let lowered = box_of.sets(&held, &role, &flight, "monitor").await;
+
+        assert_eq!(lowered.status, StatusCode::OK, "{:?}", lowered.body);
+        assert!(
+            lowered.body.contains(r#""staffs":false"#),
+            "the flag outlived the permission it stood on: {:?}",
+            lowered.body
+        );
     }
 
     /// A role page **is** the row and a loop page **is** the column ([ADR-0015]) — the same
@@ -3377,11 +3507,11 @@ mod tests {
         assert_eq!(write.target_name, "Flight Director on FLIGHT");
         assert_eq!(
             write.before.as_ref().map(Snapshot::as_str),
-            Some("role=Flight Director loop=FLIGHT permission=emit enforced=yes")
+            Some("role=Flight Director loop=FLIGHT permission=emit enforced=yes staffs=no")
         );
         assert_eq!(
             write.after.as_ref().map(Snapshot::as_str),
-            Some("role=Flight Director loop=FLIGHT permission=control enforced=yes")
+            Some("role=Flight Director loop=FLIGHT permission=control enforced=yes staffs=no")
         );
         assert_eq!(
             write.blast_radius,

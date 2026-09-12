@@ -115,13 +115,14 @@ async fn create(
         }
         Err(AdministrationRefused::Store(error)) => return Err(error),
         // Unreachable, and listed rather than swept up by a wildcard: creating a user takes
-        // no administrator away from the deployment, and the other three refusals are about
-        // roles and loops, which this route never touches. A refusal added later has to be
+        // no administrator away from the deployment, and the other four refusals are
+        // about roles, loops and the grid, which this route never touches. A refusal added later has to be
         // ruled on here rather than compiling silently into this sentence.
         Err(
             AdministrationRefused::LastSystemAdministrator
             | AdministrationRefused::NobodyMayOccupy
-            | AdministrationRefused::IncompleteOrder,
+            | AdministrationRefused::IncompleteOrder
+            | AdministrationRefused::CannotStaff,
         ) => {
             return Ok(answers::cannot("That user could not be created."));
         }

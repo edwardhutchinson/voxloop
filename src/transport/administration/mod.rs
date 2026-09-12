@@ -248,6 +248,12 @@ fn refusal_of(refusal: &AdministrationRefused) -> (String, StatusCode) {
             "A role must admit at least one occupant.".to_owned(),
             StatusCode::BAD_REQUEST,
         ),
+        AdministrationRefused::CannotStaff => (
+            "A role that may not emit on a loop cannot staff it. Grant it emit on that loop \
+             first, or leave the loop to the roles that can answer for it."
+                .to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
         AdministrationRefused::IncompleteOrder => (
             "That order does not name every loop exactly once. Read the loops again and set it \
              from what is there."
