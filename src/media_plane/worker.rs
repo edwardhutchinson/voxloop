@@ -527,7 +527,7 @@ struct Beacon {
 
 /// The payload type a beacon is produced under. It is the producer's own number on the direct
 /// transport and is rewritten for each carriage, so it only has to agree with itself.
-const THE_BEACON_S_PAYLOAD_TYPE: u8 = 100;
+const THE_BEACON_PAYLOAD_TYPE: u8 = 100;
 
 /// Opus's silence frame: one 20 ms CELT frame at full band, mono, decoding to nothing.
 const OPUS_SILENCE: [u8; 3] = [0xf8, 0xff, 0xfe];
@@ -557,7 +557,7 @@ impl Beacon {
 
 /// One RTP packet, version 2, no padding, no extension, no marker, carrying Opus silence.
 fn a_silent_packet(sequence: u16, timestamp: u32, ssrc: u32) -> Vec<u8> {
-    let mut packet = vec![0x80, THE_BEACON_S_PAYLOAD_TYPE];
+    let mut packet = vec![0x80, THE_BEACON_PAYLOAD_TYPE];
     packet.extend_from_slice(&sequence.to_be_bytes());
     packet.extend_from_slice(&timestamp.to_be_bytes());
     packet.extend_from_slice(&ssrc.to_be_bytes());
@@ -716,6 +716,13 @@ async fn every_loop_runs_a_beacon(owned: &Owned, held: &mut Paths, loops: &[Dest
         for path in held.paths.values_mut() {
             path.stop_counting(loop_gone);
         }
+        // And it is forgotten as something anybody was told to count, so what is remembered
+        // stays what was instructed **of the loops there are**. Keeping it would leave a
+        // destination in here that nothing can ever satisfy, which is a memory of an
+        // instruction quietly becoming a superset of one.
+        for counted in held.counting.values_mut() {
+            counted.retain(|named| named != loop_gone);
+        }
     }
 
     for named in loops {
@@ -729,7 +736,7 @@ async fn every_loop_runs_a_beacon(owned: &Owned, held: &mut Paths, loops: &[Dest
             .beacons_on
             .produce(ProducerOptions::new(
                 MediaKind::Audio,
-                a_beacon_s_stream(ssrc),
+                what_a_beacon_sends(ssrc),
             ))
             .await
         {
@@ -764,11 +771,14 @@ async fn every_loop_runs_a_beacon(owned: &Owned, held: &mut Paths, loops: &[Dest
 }
 
 /// What a beacon's producer says it is sending: Opus, under one synchronisation source.
-fn a_beacon_s_stream(ssrc: u32) -> RtpParameters {
+///
+/// One per beacon, because every beacon is produced on the one direct transport and a
+/// transport tells its producers apart by exactly this.
+fn what_a_beacon_sends(ssrc: u32) -> RtpParameters {
     RtpParameters {
         codecs: vec![RtpCodecParameters::Audio {
             mime_type: MimeTypeAudio::Opus,
-            payload_type: THE_BEACON_S_PAYLOAD_TYPE,
+            payload_type: THE_BEACON_PAYLOAD_TYPE,
             clock_rate: NonZeroU32::new(48_000).expect("48000 is not zero"),
             channels: NonZeroU8::new(2).expect("2 is not zero"),
             parameters: RtpCodecParametersParameters::default(),
@@ -827,50 +837,18 @@ async fn one_more_beacon(
     if path.counting.contains_key(on) {
         return;
     }
-    let Some(can_decode) = path.can_decode.clone() else {
-        // The client has not said what it can decode yet, and is told when it has.
+
+    let Some((carriage, what_to_build)) =
+        a_paused_carriage(router, path, listener, beacon, "a loop's beacon").await
+    else {
+        // Nothing is counted on a carriage that was not built, so the loop reads as not
+        // received — which is the truth about that listener.
         return;
     };
-    if !router.can_consume(&beacon, &can_decode) {
-        tracing::warn!(
-            target: module::MEDIA_PLANE,
-            listener = listener.as_str(),
-            "a client cannot decode a beacon, and will read every loop as not received"
-        );
-        return;
-    }
-    let downlink = path.down.clone();
-
-    let carriage = match downlink
-        .consume({
-            let mut options = ConsumerOptions::new(beacon, can_decode);
-            options.paused = true;
-            options
-        })
-        .await
-    {
-        Ok(carriage) => carriage,
-        Err(error) => {
-            tracing::error!(
-                target: module::MEDIA_PLANE,
-                %error,
-                listener = listener.as_str(),
-                "a beacon could not be carried, so a loop will read as not received"
-            );
-            return;
-        }
-    };
-
-    let what_to_build = serde_json::json!({
-        "id": carriage.id(),
-        "producerId": carriage.producer_id(),
-        "kind": carriage.kind(),
-        "rtpParameters": carriage.rtp_parameters(),
-    });
 
     if let Some(path) = held.paths.get_mut(listener) {
         let _ = path.telling.send(Negotiated::OneMoreBeacon {
-            beacon: Negotiation::presented(what_to_build),
+            beacon: what_to_build,
             on: on.clone(),
         });
         path.counting.insert(on.clone(), carriage);
@@ -1228,24 +1206,56 @@ async fn one_more_talker(
     if path.hearing.contains_key(talker) {
         return;
     }
-    let Some(can_decode) = path.can_decode.clone() else {
-        // The client has not said what it can decode yet. The answer is kept and replayed
-        // when it does.
+
+    let Some((carriage, what_to_build)) =
+        a_paused_carriage(router, path, listener, uplink, "a talker").await
+    else {
         return;
     };
-    if !router.can_consume(&uplink, &can_decode) {
+
+    if let Some(path) = held.paths.get_mut(listener) {
+        let _ = path.telling.send(Negotiated::OneMoreTalker {
+            talker: what_to_build,
+            heard_on: on.clone(),
+        });
+        path.hearing.insert(talker.clone(), Heard { carriage, on });
+    }
+}
+
+/// Build one paused carriage on this listener's downlink, and what their client needs in order
+/// to build the far end of it.
+///
+/// **The two things a listener is sent are built exactly alike**, and this is that shape
+/// written once: what the client says it can decode is checked against what it would be sent,
+/// the carriage is built **paused**, and the description goes back for the client to answer.
+///
+/// What differs stays with the callers, because it is the only part that is not this: what the
+/// carriage is filed under — a talker, or a loop — and which message says so. `carrying` is for
+/// the log, so that a carriage that could not be built says which of the two it was.
+async fn a_paused_carriage(
+    router: &Router,
+    path: &Path,
+    listener: &SessionId,
+    of: ProducerId,
+    carrying: &'static str,
+) -> Option<(Consumer, Negotiation)> {
+    // Nothing where the client has not said what it can decode yet: the answer is kept above
+    // and replayed when it does.
+    let can_decode = path.can_decode.clone()?;
+    if !router.can_consume(&of, &can_decode) {
         tracing::warn!(
             target: module::MEDIA_PLANE,
             listener = listener.as_str(),
+            carrying,
             "a client cannot decode what this deployment carries, and will hear nothing"
         );
-        return;
+        return None;
     }
-    let downlink = path.down.clone();
 
-    let carriage = match downlink
+    let carriage = match path
+        .down
         .consume({
-            let mut options = ConsumerOptions::new(uplink, can_decode);
+            let mut options = ConsumerOptions::new(of, can_decode);
             options.paused = true;
             options
         })
@@ -1257,9 +1267,10 @@ async fn one_more_talker(
                 target: module::MEDIA_PLANE,
                 %error,
                 listener = listener.as_str(),
-                "a carriage could not be built, so somebody is not hearing a talker"
+                carrying,
+                "a carriage could not be built, so a listener is not being sent something"
             );
-            return;
+            return None;
         }
     };
 
@@ -1270,13 +1281,7 @@ async fn one_more_talker(
         "rtpParameters": carriage.rtp_parameters(),
     });
 
-    if let Some(path) = held.paths.get_mut(listener) {
-        let _ = path.telling.send(Negotiated::OneMoreTalker {
-            talker: Negotiation::presented(what_to_build),
-            heard_on: on.clone(),
-        });
-        path.hearing.insert(talker.clone(), Heard { carriage, on });
-    }
+    Some((carriage, Negotiation::presented(what_to_build)))
 }
 
 /// Nobody hears this talker any more, because there is no longer a talker to hear.
@@ -1660,7 +1665,7 @@ mod tests {
             "not RTP version 2, or carrying padding or extensions"
         );
         assert_eq!(
-            packet[1], THE_BEACON_S_PAYLOAD_TYPE,
+            packet[1], THE_BEACON_PAYLOAD_TYPE,
             "marked, or under another type"
         );
         assert_eq!(&packet[2..4], &7_u16.to_be_bytes());

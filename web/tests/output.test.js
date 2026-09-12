@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { outputsAsTheyStand, whatMoved } from '../src/lib/output.js';
+import { outputsAsTheyStand, watchTheOutput, whatMoved } from '../src/lib/output.js';
 
 // What `enumerateDevices` answers, cut to what is read from it. The `default` entry is the
 // browser's name for whatever the operating system is sending sound to, and its label says
@@ -73,4 +73,30 @@ test('outputs with no labels to read are not compared', () => {
 	const after = outputsAsTheyStand([blank(theDefault(speakers)), blank(speakers)]);
 
 	assert.equal(whatMoved(before, after), null);
+});
+
+// **A confirmed check tone at assume, and `devicechange` monitoring thereafter** (ADR-0017),
+// in that order: what the operator heard the tone on is the path the watch is measured from,
+// so nothing is compared until they have said they heard it.
+test('nothing is reported until the operator has confirmed what they heard the tone on', async () => {
+	let listed = [theDefault(headset), headset, speakers];
+	const moved = [];
+	const devices = {
+		enumerateDevices: async () => listed,
+		addEventListener: (_event, listener) => (devices.changed = listener),
+		removeEventListener: () => {}
+	};
+	const watch = watchTheOutput({ devices, onMoved: (now) => moved.push(now) });
+
+	listed = [theDefault(speakers), headset, speakers];
+	await devices.changed();
+
+	assert.deepEqual(moved, [], 'a change was reported against a baseline nobody had confirmed');
+
+	await watch.settle();
+	listed = [theDefault(headset), headset, speakers];
+	await devices.changed();
+
+	assert.deepEqual(moved, [{ swapped: 'Default - Headset' }]);
+	watch.stop();
 });

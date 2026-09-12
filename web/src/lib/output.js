@@ -76,8 +76,15 @@ export function whatMoved(before, after) {
  * Watch the outputs for as long as a session lasts, and say when one moves.
  *
  * Answers with `settle`, which takes the outputs as they stand now as the ones to compare
- * against — called when the operator confirms the check tone, because what they just heard it
- * on is the path they are relying on — and `stop`.
+ * against, and `stop`.
+ *
+ * **Nothing is compared until `settle` has been called**, and the caller calls it when the
+ * operator confirms the check tone: the order is a confirmed tone at assume and `devicechange`
+ * monitoring *thereafter* (ADR-0017). A baseline taken when the console opened would be one
+ * nobody has heard anything on, so the first change after it would be measured from a path
+ * nobody had confirmed — which is the property this exists to provide, arriving hollow. A
+ * change before that confirmation is taken as the outputs as they now stand and said to
+ * nobody, because the operator is already being asked to check the very thing it would report.
  *
  * `devices` is `navigator.mediaDevices`, handed in so that nothing here reaches for a global.
  */
@@ -98,7 +105,6 @@ export function watchTheOutput({ devices, onMoved }) {
 		if (moved && !stopped) onMoved(moved);
 	}
 
-	settle();
 	devices.addEventListener('devicechange', changed);
 
 	return {
