@@ -563,6 +563,27 @@ struct Session {
     /// [ADR-0013]: ../../docs/adr/0013-arming-is-independent-of-subscription.md
     /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
     arms: Vec<LoopId>,
+    /// Whether the arm set was last moved by something other than this session.
+    ///
+    /// **Only a change the session did not ask for is marked** ([ADR-0058]). A deliberate arm
+    /// and a preset are the routine mid-key changes — a preset is one by design, and the most
+    /// routine thing in the system — so marking those would fire the signal constantly and
+    /// train the operator straight past it. What is left is the change no hand on this desk
+    /// made: an administrator pulling an `emit` cell while somebody is mid-sentence, and
+    /// anything later that moves an arm set from outside the session.
+    ///
+    /// **It costs one flag on the update**, which is the whole of the mechanism: the server
+    /// applies both kinds of change and is the one thing that knows which is which.
+    ///
+    /// It stands until the operator does something that shows they have read the console, which
+    /// is the kind of evidence the one asserted state is already cleared by ([ADR-0016]) —
+    /// [`StateAuthority::the_mark_is_answered`], and deliberately not quite the same set of
+    /// acts. There is no dismissal of its own: a mark that had to be clicked away would be a
+    /// second control on the strip an operator reads in the second before keying.
+    ///
+    /// [ADR-0016]: ../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+    /// [ADR-0058]: ../../docs/adr/0058-the-transmit-bar-is-live-while-keyed.md
+    arms_moved_elsewhere: bool,
     /// The loops this session has silenced in its own ears.
     ///
     /// **A mute is not an unsubscribe** (v1 §5), so it is a list beside the subscription set
@@ -837,6 +858,51 @@ impl Session {
         None
     }
 
+    /// Which bucket of a talker's audience this session is in, over that talker's whole arm
+    /// set (v1 §6).
+    ///
+    /// **Hearing any one of the armed loops is hearing**, so the arm set is read until the
+    /// first loop this session is hearing and the answer is settled there. Where none of them
+    /// is being heard, what separates the warning from the bucket nobody is shown is whether
+    /// this session took **any** of the loops up: somebody monitoring one of them and not
+    /// hearing it believes they are covering it, and that is the whole of what
+    /// `present, not hearing` means ([ADR-0034]).
+    ///
+    /// It is deliberately not the furthest-upstream reason staffing state reads
+    /// ([`Session::not_hearing`]). The two questions differ: staffing asks *why is this
+    /// position unanswered*, of people who are meant to be on the loop, and this asks *does
+    /// this person think they are listening*. So an operator who stepped away from a loop they
+    /// never subscribed to is in the third bucket here and `off console` there, and both are
+    /// right.
+    ///
+    /// Nothing where the grid does not let this session near any of the armed loops.
+    ///
+    /// [ADR-0034]: ../../docs/adr/0034-the-transmit-bar-is-always-visible-and-the-audience-is-a-count.md
+    fn in_the_audience_for(
+        &self,
+        armed_on: &[LoopId],
+        by: Ladder,
+        now: Instant,
+    ) -> Option<InTheAudience> {
+        let mut monitors_one = false;
+        let mut in_reach_of_one = false;
+
+        for armed in armed_on {
+            if self.not_hearing(armed, by, now).is_none() {
+                return Some(InTheAudience::Hearing);
+            }
+
+            monitors_one |= self.monitors(armed);
+            in_reach_of_one |= self.reach.iter().any(|within| &within.id == armed);
+        }
+
+        match (monitors_one, in_reach_of_one) {
+            (true, _) => Some(InTheAudience::PresentNotHearing),
+            (false, true) => Some(InTheAudience::NotSubscribed),
+            (false, false) => None,
+        }
+    }
+
     /// How loud that loop plays in this operator's ears. Unity for a loop they have not set.
     fn volume_of(&self, held_on: &LoopId) -> Volume {
         self.volumes
@@ -861,11 +927,23 @@ impl Session {
     /// [ADR-0051]: ../../docs/adr/0051-personalisation-is-scoped-to-the-smallest-thing-it-is-about.md
     fn take_the_arms_out_of_reach(&mut self) {
         let reach = &self.reach;
+        let held = self.arms.len();
         self.arms.retain(|armed| {
             reach
                 .iter()
                 .any(|within| &within.id == armed && within.permission.carries(Permission::Emit))
         });
+
+        // **Provenance costs one flag on the update** ([ADR-0058]). This is the one change to
+        // an arm set in v1 that no hand on the operator's desk made, and the operator may be
+        // mid-sentence when it lands — so the fact that it was somebody else is recorded here,
+        // where the change is made, rather than inferred later from a set that moved.
+        //
+        // It is only ever raised, never lowered: a deliberate act is what answers it, and an
+        // arm this revocation left alone is not that.
+        //
+        // [ADR-0058]: ../../docs/adr/0058-the-transmit-bar-is-live-while-keyed.md
+        self.arms_moved_elsewhere |= self.arms.len() != held;
     }
 }
 
@@ -1235,6 +1313,73 @@ pub(crate) struct Asserted {
     pub(crate) last_active: Duration,
 }
 
+/// Who would actually hear an emission, counted (v1 §6, [ADR-0034]).
+///
+/// **Three buckets, and the split is the point.** A subscriber list that silently includes
+/// people who cannot hear you answers *who chose to listen* when the operator asked *who will
+/// hear me*, and the two answers come apart exactly when it matters: a mute, a colleague who
+/// stepped away, a console nobody can reach, a loop whose beacon is not arriving.
+///
+/// **It is computed and stored nowhere.** Like staffing state and the document itself, it is
+/// worked out from the live facts each time it is asked for, which is what keeps it from being
+/// a cached answer about a headset somebody has since pulled out.
+///
+/// **It is per person, never per destination.** The fan-out names a listener once per loop it
+/// reaches them on, because the recording tap is per (talker, destination) ([ADR-0009]); the
+/// bar answers *how many people will hear me*, and one colleague on three armed loops is one
+/// person. Hearing any one of the armed loops is hearing.
+///
+/// [ADR-0009]: ../../docs/adr/0009-recording-taps-plain-rtp-on-loopback.md
+/// [ADR-0034]: ../../docs/adr/0034-the-transmit-bar-is-always-visible-and-the-audience-is-a-count.md
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Audience {
+    /// People who would hear this emission: the loop is on their console, unmuted, its beacon
+    /// is arriving, they have not stepped away and they can be reached.
+    ///
+    /// **The reassurance**, and the count that renders in the warning colour at zero — where
+    /// it blocks nothing, because the console does not overrule an operator about their own
+    /// operation ([ADR-0034]).
+    ///
+    /// [ADR-0034]: ../../docs/adr/0034-the-transmit-bar-is-always-visible-and-the-audience-is-a-count.md
+    pub(crate) hearing: usize,
+    /// People who took one of these loops up and will not hear it: muted, off console,
+    /// unreachable, or not receiving its beacon.
+    ///
+    /// **The warning, and the console's only one about mute** ([ADR-0034]). It is the count
+    /// that says *these people believe they are covering this loop and will not hear you*, and
+    /// it is the compensating signal for mute defeating an announcement, a directive and a
+    /// hail.
+    ///
+    /// [ADR-0034]: ../../docs/adr/0034-the-transmit-bar-is-always-visible-and-the-audience-is-a-count.md
+    pub(crate) present_not_hearing: usize,
+    /// People in reach of one of these loops who did not take it up.
+    ///
+    /// **Computed and never displayed.** It is not actionable — a loop exists precisely so
+    /// that an emitter can stop tracking who is on the other end — and a third count beside
+    /// the other two would be read as another flavour of the warning. It is computed anyway
+    /// because the three-way split is what makes the second bucket mean anything: without it,
+    /// *not hearing* would swallow everybody who simply chose not to listen.
+    ///
+    /// It surfaces in exactly one place, and not as a number: the hail picker, where hailing
+    /// is what makes these people actionable ([ADR-0048]).
+    ///
+    /// [ADR-0048]: ../../docs/adr/0048-the-hail-picker-is-the-only-place-the-console-names-a-person.md
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) not_subscribed: usize,
+}
+
+/// Which of the three a person is in, for one arm set.
+///
+/// Nothing at all where the grid does not let them near any of the armed loops: the buckets
+/// partition the people **in reach**, and somebody who was never asked is not somebody who
+/// chose not to listen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InTheAudience {
+    Hearing,
+    PresentNotHearing,
+    NotSubscribed,
+}
+
 /// The presence document: everything one session may see, as of one moment.
 ///
 /// It is a **projection** rather than a record. Nothing here is stored and read back — it is
@@ -1242,11 +1387,11 @@ pub(crate) struct Asserted {
 /// be true at the same instant rather than assembled from several that were each true at
 /// some point ([ADR-0019]).
 ///
-/// What it carries today is the session, the role it is bound to, the loops in reach and
-/// which of them the session is monitoring, with the arms (#41), the talking indicator and
-/// loop health (#46) beside each. Staffing state (#48) and the audience (#49) land in it one
-/// ticket at a time, and each of them is a field the server has committed to keeping true from
-/// the moment it appears.
+/// What it carries is the session, the role it is bound to, the loops in reach and which of
+/// them the session is monitoring, with the arms (#41), the talking indicator, loop health
+/// (#46) and staffing state (#48) beside each — and, about the session as a whole, the
+/// audience of its arm set and whether anything but this session last moved that set (#49).
+/// Each of them is a field the server has committed to keeping true.
 ///
 /// **Occupancy is deliberately not in it** ([ADR-0048]): the hail picker's roster is a
 /// snapshot fetched when the picker opens, and pushing deployment-wide occupancy at every
@@ -1331,6 +1476,28 @@ pub(crate) struct Presence {
     ///
     /// [ADR-0016]: ../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
     pub(crate) off_console: Option<Asserted>,
+    /// Who would actually hear this session's arm set, counted (v1 §6).
+    ///
+    /// It is in the document because the transmit bar renders it, and it is the whole of
+    /// VoxLoop's compensation for emitting to several places at once: the receiver is told
+    /// nothing about a transmission's other destinations ([ADR-0057]), so the emitter is told
+    /// everything about their own.
+    ///
+    /// **It is here whether or not this session is keyed**, because the bar answers *who am I
+    /// about to talk to* before the key goes down and *who am I talking to* under it, with the
+    /// same words ([ADR-0058]).
+    ///
+    /// [ADR-0057]: ../../docs/adr/0057-the-receiver-is-never-told-where-else-a-transmission-went.md
+    /// [ADR-0058]: ../../docs/adr/0058-the-transmit-bar-is-live-while-keyed.md
+    pub(crate) audience: Audience,
+    /// Whether the arm set below was last moved by something other than this session.
+    ///
+    /// **The mark, and the third place the console renders provenance** ([ADR-0058]), after
+    /// the observed-or-asserted split and the directed subscription: a state somebody else
+    /// moved must not look like one you set. A deliberate arm and a preset are not marked.
+    ///
+    /// [ADR-0058]: ../../docs/adr/0058-the-transmit-bar-is-live-while-keyed.md
+    pub(crate) arms_moved_elsewhere: bool,
     pub(crate) loops: Vec<Standing>,
 }
 
@@ -1443,6 +1610,8 @@ impl StateAuthority {
                 // hand; an arm set restored the same way would put somebody on the air the
                 // instant they assumed, which is why nothing remembers one.
                 arms: Vec::new(),
+                // Nothing has taken an arm from a set that has never held one.
+                arms_moved_elsewhere: false,
                 // Nor is anything muted, whatever the last session in this seat had: a mute
                 // is never remembered (ADR-0050), and one restored here would silence a loop
                 // before the operator had looked at anything.
@@ -1713,6 +1882,30 @@ impl StateAuthority {
             if let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) {
                 held.off_console = false;
                 held.last_active = Instant::now();
+            }
+        });
+    }
+
+    /// The operator has done something that shows they have read what is on their console, so
+    /// the mark on an arm set somebody else moved comes off.
+    ///
+    /// **It is the same kind of evidence the one asserted state is cleared by** ([ADR-0016])
+    /// and deliberately not the same set of acts: a key going **up** is a hand letting go of
+    /// something it was already holding, and the operator the mark was raised for — the one
+    /// an administrator pulled a cell out from under mid-sentence — sends exactly that message
+    /// next. Which acts count is Transport's ruling, because the messages are Transport's.
+    ///
+    /// There is no dismissal of its own. A mark that had to be clicked away would be a second
+    /// control on the strip an operator reads in the second before keying, and the act that
+    /// answers it is one they were going to take anyway.
+    ///
+    /// Nothing where the id names no session.
+    ///
+    /// [ADR-0016]: ../../docs/adr/0016-displayed-state-is-observed-or-asserted.md
+    pub(crate) fn the_mark_is_answered(&self, session: &SessionId) {
+        self.write(|live| {
+            if let Some(held) = live.sessions.iter_mut().find(|held| &held.id == session) {
+                held.arms_moved_elsewhere = false;
             }
         });
     }
@@ -2070,6 +2263,10 @@ impl StateAuthority {
             // deployment rather than this one — and worked out after this session's reach
             // was recorded, because what an occupant is hearing is read within their own.
             let staffing = live.the_staffing_of(staffed, now);
+            // The same shape again, and for the same reason: the audience of this arm set is
+            // read off every other session's console, so it is worked out while every one of
+            // them can be seen and before this one is borrowed to be written into.
+            let audience = live.the_audience_of(session, now);
             let ladder = live.ladder;
 
             let held = live.sessions.iter_mut().find(|held| &held.id == session)?;
@@ -2081,6 +2278,8 @@ impl StateAuthority {
                 keyed: held.is_transmitting(ladder, now),
                 priority: held.is_at_priority(ladder, now),
                 off_console: held.asserted(now),
+                audience,
+                arms_moved_elsewhere: held.arms_moved_elsewhere,
                 // **The narrowing happens here and nowhere else.** The session's set holds
                 // whatever it holds; the reach handed in decides what is rendered, so a
                 // subscription outside it is inert rather than lost ([ADR-0051]).
@@ -2516,6 +2715,45 @@ impl Live {
                 .filter(|(_reason, occupants)| *occupants > 0)
                 .collect(),
         )
+    }
+
+    /// The audience of this session's arm set: who would actually hear it, counted (v1 §6).
+    ///
+    /// **It is a projection over every session at once**, which is why it is here rather than
+    /// on the session: what one operator's audience looks like is decided by what everybody
+    /// else has on their console, and nothing durable is read to work it out ([ADR-0039]).
+    ///
+    /// **A person is counted once, in one bucket**, and a user occupies at most one role at a
+    /// time — so a session is a person, and per (role, user) and per session are the same
+    /// count.
+    ///
+    /// **The talker is not in their own audience.** Hearing yourself back over the network is
+    /// a fault in an intercom, and counting yourself is that fault arriving as a number.
+    ///
+    /// **Nothing here asks whether the talker is keyed, or whether their own paths are up.**
+    /// The answer is the same one before the key goes down and under it ([ADR-0058]), and a
+    /// count that collapsed when the talker's own channel went would be answering a question
+    /// about this console with a fact about somebody else's. What the operator's own
+    /// withdrawal costs them is said in words, beside the key control.
+    ///
+    /// [ADR-0039]: ../../docs/adr/0039-live-state-is-in-process-behind-one-state-authority.md
+    /// [ADR-0058]: ../../docs/adr/0058-the-transmit-bar-is-live-while-keyed.md
+    fn the_audience_of(&self, talker: &SessionId, now: Instant) -> Audience {
+        let Some(talking) = self.sessions.iter().find(|held| &held.id == talker) else {
+            return Audience::default();
+        };
+
+        let mut audience = Audience::default();
+        for listener in self.sessions.iter().filter(|held| held.id != talking.id) {
+            match listener.in_the_audience_for(&talking.arms, self.ladder, now) {
+                Some(InTheAudience::Hearing) => audience.hearing += 1,
+                Some(InTheAudience::PresentNotHearing) => audience.present_not_hearing += 1,
+                Some(InTheAudience::NotSubscribed) => audience.not_subscribed += 1,
+                None => {}
+            }
+        }
+
+        audience
     }
 
     /// Who hears this talker, and on which loop.
@@ -5625,6 +5863,401 @@ mod tests {
         assert!(
             !marked.loops[1].staffs,
             "a loop somebody else's role staffs was marked on this console"
+        );
+    }
+
+    /// The audience of this session's arm set, as its own document carries it.
+    fn audience_of(live: &StateAuthority, session: &SessionId, within: Vec<InReach>) -> Audience {
+        live.presence(session, within, &[])
+            .expect("a document")
+            .1
+            .audience
+    }
+
+    /// Both loops, on a row that may speak on either.
+    ///
+    /// The reach is handed back to every projection, and an arm outside it is taken away
+    /// ([ADR-0013]) — so a test asking about an arm set of two has to hand back the reach that
+    /// holds both of them, or it is asking about an arm set of one.
+    ///
+    /// [ADR-0013]: ../../docs/adr/0013-arming-is-independent-of-subscription.md
+    fn both_to_emit_on() -> Vec<InReach> {
+        vec![a_loop_to_emit_on("air-to-ground"), a_loop_to_emit_on("sim")]
+    }
+
+    /// A talker armed on both loops, and a listener in reach of both and monitoring neither,
+    /// so that a question about one person hearing two destinations has two destinations to be
+    /// asked about and nothing taken up in advance.
+    async fn a_talker_armed_on_two_loops(
+        live: &StateAuthority,
+        store: &Store,
+    ) -> (SessionId, SessionId) {
+        let talker = a_session(live, store, "flight").await;
+        let listener = a_session(live, store, "capcom").await;
+        let reach = vec![a_loop_to_emit_on("air-to-ground"), a_loop_to_emit_on("sim")];
+
+        live.presence(&talker, reach.clone(), &[]);
+        live.presence(&listener, reach, &[]);
+        for held_on in ["air-to-ground", "sim"] {
+            live.arm(&talker, &LoopId::presented(held_on.to_owned()));
+        }
+
+        (talker, listener)
+    }
+
+    /// **The audience is per person and never per destination** (v1 §6). The fan-out counts a
+    /// listener once per loop, because the recording tap is per (talker, destination); the bar
+    /// answers *how many people will hear me*, and one colleague on two of the armed loops is
+    /// one person.
+    #[tokio::test]
+    async fn somebody_hearing_two_armed_loops_is_one_person_hearing() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_armed_on_two_loops(&live, &store).await;
+
+        for held_on in ["air-to-ground", "sim"] {
+            let held_on = LoopId::presented(held_on.to_owned());
+            live.subscribe(&listener, &held_on);
+            live.the_client_counted(&listener, &counted(held_on.as_str(), 12));
+        }
+
+        assert_eq!(
+            audience_of(&live, &talker, both_to_emit_on()),
+            Audience {
+                hearing: 1,
+                present_not_hearing: 0,
+                not_subscribed: 0
+            },
+            "one listener on two armed loops was counted twice"
+        );
+    }
+
+    /// **Hearing one of them is hearing.** The question the bar answers is *will my voice
+    /// reach this person*, and a colleague who has one of the armed loops up will hear it
+    /// however many of the others they have not.
+    #[tokio::test]
+    async fn hearing_one_armed_loop_out_of_two_is_hearing() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_armed_on_two_loops(&live, &store).await;
+        let sim = LoopId::presented("sim".to_owned());
+
+        live.subscribe(&listener, &sim);
+        live.the_client_counted(&listener, &counted(sim.as_str(), 12));
+
+        assert_eq!(
+            audience_of(&live, &talker, both_to_emit_on()).hearing,
+            1,
+            "somebody monitoring one of the armed loops was not counted as hearing"
+        );
+    }
+
+    /// **`present, not hearing` is the console's only warning about mute** (ADR-0034). The
+    /// subscription stands, so this person believes they are covering the loop; the audio
+    /// stops in their ears alone, and nothing else on the console says so.
+    #[tokio::test]
+    async fn a_subscriber_who_muted_the_loop_is_present_and_not_hearing() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_armed_on_two_loops(&live, &store).await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+
+        live.subscribe(&listener, &air_to_ground);
+        live.the_client_counted(&listener, &counted(air_to_ground.as_str(), 12));
+        live.mute(&listener, &air_to_ground);
+
+        assert_eq!(
+            audience_of(&live, &talker, both_to_emit_on()),
+            Audience {
+                hearing: 0,
+                present_not_hearing: 1,
+                not_subscribed: 0
+            },
+            "a mute was not warned about"
+        );
+    }
+
+    /// Off console is the one asserted reason among observed ones (ADR-0016), and it counts
+    /// here like the rest: this person is not in the chair, and their subscription says they
+    /// meant to be covering the loop.
+    #[tokio::test]
+    async fn a_subscriber_who_stepped_away_is_present_and_not_hearing() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_armed_on_two_loops(&live, &store).await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+
+        live.subscribe(&listener, &air_to_ground);
+        live.the_client_counted(&listener, &counted(air_to_ground.as_str(), 12));
+        live.off_console(&listener);
+
+        assert_eq!(
+            audience_of(&live, &talker, both_to_emit_on()).present_not_hearing,
+            1,
+            "somebody who said they were away was counted as hearing"
+        );
+    }
+
+    /// **A session with no signalling channel has its fan-out closed** (ADR-0018), so nothing
+    /// reaches it whatever it last subscribed to.
+    #[tokio::test]
+    async fn a_subscriber_nobody_can_reach_is_present_and_not_hearing() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_armed_on_two_loops(&live, &store).await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+
+        live.subscribe(&listener, &air_to_ground);
+        live.the_client_counted(&listener, &counted(air_to_ground.as_str(), 12));
+        live.unheard_from_for(&listener, PAST_THE_WINDOW);
+
+        assert_eq!(
+            audience_of(&live, &talker, both_to_emit_on()).present_not_hearing,
+            1,
+            "a session nobody can reach was counted as hearing"
+        );
+    }
+
+    /// **Beacon loss soundly proves deafness** (ADR-0017): this console is subscribed to the
+    /// loop and demonstrably receiving nothing on it, which is the case a subscriber list
+    /// cannot tell from a quiet loop.
+    #[tokio::test]
+    async fn a_subscriber_the_beacon_is_not_reaching_is_present_and_not_hearing() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_armed_on_two_loops(&live, &store).await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+
+        live.subscribe(&listener, &air_to_ground);
+        live.the_beacons_went_unheard_for(&listener, PAST_THE_WINDOW);
+
+        assert_eq!(
+            audience_of(&live, &talker, both_to_emit_on()).present_not_hearing,
+            1,
+            "a console receiving nothing on the loop was counted as hearing"
+        );
+    }
+
+    /// **The third bucket is the people who chose not to listen, and it is never the
+    /// warning** (ADR-0034). It is computed — the three-way split is the point — and it is
+    /// what the count that *is* shown would silently swallow if the split were two-way.
+    ///
+    /// The listener here has stepped away as well, which is deliberate: an assertion from
+    /// somebody who never took the loop up is not a warning about a colleague who believes
+    /// they are covering it, so it does not become one.
+    #[tokio::test]
+    async fn somebody_who_never_took_the_loop_up_is_the_third_bucket_and_not_the_warning() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_armed_on_two_loops(&live, &store).await;
+        live.off_console(&listener);
+
+        assert_eq!(
+            audience_of(&live, &talker, both_to_emit_on()),
+            Audience {
+                hearing: 0,
+                present_not_hearing: 0,
+                not_subscribed: 1
+            },
+            "somebody who did not subscribe was warned about"
+        );
+    }
+
+    /// Hearing yourself back over the network is a fault in an intercom, and counting
+    /// yourself is the same fault arriving as a number.
+    #[tokio::test]
+    async fn the_audience_never_counts_the_talker_themselves() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let talker = a_session(&live, &store, "flight").await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")], &[]);
+        live.arm(&talker, &air_to_ground);
+        live.subscribe(&talker, &air_to_ground);
+        live.the_client_counted(&talker, &counted(air_to_ground.as_str(), 12));
+
+        assert_eq!(
+            audience_of(&live, &talker, vec![a_loop_to_emit_on("air-to-ground")]),
+            Audience {
+                hearing: 0,
+                present_not_hearing: 0,
+                not_subscribed: 0
+            },
+            "the talker was in their own audience"
+        );
+    }
+
+    /// **The three buckets partition the people in reach of the armed set** (v1 §6). Somebody
+    /// whose role does not reach a loop is not a person who chose not to listen: they were
+    /// never asked, and a count that included them would answer a question nobody put.
+    #[tokio::test]
+    async fn nobody_out_of_reach_of_the_armed_set_is_in_any_bucket() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let talker = a_session(&live, &store, "flight").await;
+        let elsewhere = a_session(&live, &store, "capcom").await;
+        live.presence(&talker, vec![a_loop_to_emit_on("air-to-ground")], &[]);
+        live.presence(&elsewhere, vec![a_loop("sim")], &[]);
+        live.arm(&talker, &LoopId::presented("air-to-ground".to_owned()));
+
+        assert_eq!(
+            audience_of(&live, &talker, vec![a_loop_to_emit_on("air-to-ground")]),
+            Audience {
+                hearing: 0,
+                present_not_hearing: 0,
+                not_subscribed: 0
+            },
+            "somebody the grid does not let near the loop was counted"
+        );
+    }
+
+    /// An arm set with nothing in it reaches nobody, and the bar says `0 hearing` rather than
+    /// nothing at all: it renders in the warning colour and blocks no transmission
+    /// (ADR-0034).
+    #[tokio::test]
+    async fn an_empty_arm_set_has_nobody_in_any_bucket() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_armed_on_two_loops(&live, &store).await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        live.subscribe(&listener, &air_to_ground);
+        live.the_client_counted(&listener, &counted(air_to_ground.as_str(), 12));
+
+        for held_on in ["air-to-ground", "sim"] {
+            live.disarm(&talker, &LoopId::presented(held_on.to_owned()));
+        }
+
+        assert_eq!(
+            audience_of(&live, &talker, both_to_emit_on()).hearing,
+            0,
+            "an arm set with nothing in it had an audience"
+        );
+    }
+
+    /// **The bar stays live while keyed** (ADR-0058), and it answers *who am I about to talk
+    /// to* and *who am I talking to* with the same words — so the audience is the same answer
+    /// computed the same way, before the key goes down and while it is held.
+    #[tokio::test]
+    async fn the_audience_is_the_same_answer_before_the_key_and_under_it() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_armed_on_two_loops(&live, &store).await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        live.subscribe(&listener, &air_to_ground);
+        live.the_client_counted(&listener, &counted(air_to_ground.as_str(), 12));
+
+        let before = audience_of(&live, &talker, both_to_emit_on());
+        live.the_client_keys(&talker);
+
+        assert_eq!(
+            audience_of(&live, &talker, both_to_emit_on()),
+            before,
+            "keying changed the answer the operator read a moment before"
+        );
+    }
+
+    /// **A withdrawal does not empty the audience, and that is deliberate.** The counts answer
+    /// *who has these loops up and can hear them*, which is a fact about everybody else's
+    /// console; whether this session's own voice can leave the building is a fact about this
+    /// one, and the bar says it in words directly above them.
+    ///
+    /// They are the three independent axes (v1 §6) kept independent. Folding one into the
+    /// other would make `0 hearing` mean two different things — *nobody is listening* and
+    /// *your path is down* — and it would read as the first, which is the loop state an
+    /// operator acts on. It would also have to be done for the signalling channel and not for
+    /// the audio path, because only one of them closes the fan-out, so the bar would answer
+    /// the same question two ways depending on which failure it was having.
+    #[tokio::test]
+    async fn a_talker_with_no_signalling_channel_still_has_an_audience() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let (talker, listener) = a_talker_armed_on_two_loops(&live, &store).await;
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        live.subscribe(&listener, &air_to_ground);
+        live.the_client_counted(&listener, &counted(air_to_ground.as_str(), 12));
+
+        live.unheard_from_for(&talker, PAST_THE_WINDOW);
+
+        assert_eq!(
+            audience_of(&live, &talker, both_to_emit_on()).hearing,
+            1,
+            "a withdrawal was reported as an empty loop rather than as a withdrawal"
+        );
+    }
+
+    /// **Only a change the session did not ask for is marked** (ADR-0058). An administrator
+    /// pulling an `emit` cell is the change no hand on this desk made, and the operator may be
+    /// mid-sentence when it lands.
+    #[tokio::test]
+    async fn an_arm_a_revocation_took_is_marked_on_the_document() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let emitting = vec![a_loop_to_emit_on("air-to-ground")];
+        live.presence(&session, emitting.clone(), &[]);
+        live.arm(&session, &LoopId::presented("air-to-ground".to_owned()));
+
+        let (_, unmarked) = live.presence(&session, emitting, &[]).expect("a document");
+        assert!(
+            !unmarked.arms_moved_elsewhere,
+            "an arm set nobody has touched was marked as moved"
+        );
+
+        // The cell goes to `monitor`: the loop is still in reach and the arm is gone.
+        let (_, marked) = live
+            .presence(&session, vec![a_loop("air-to-ground")], &[])
+            .expect("a document");
+
+        assert!(
+            marked.arms_moved_elsewhere,
+            "a revocation took an arm and said nothing"
+        );
+    }
+
+    /// **A change the operator's own hand made is not marked** (ADR-0058). A deliberate arm
+    /// and a preset are the routine mid-key changes, and marking them would fire the signal
+    /// constantly and train the operator straight past it.
+    #[tokio::test]
+    async fn the_operators_own_disarm_is_not_marked() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        let emitting = vec![a_loop_to_emit_on("air-to-ground")];
+        let air_to_ground = LoopId::presented("air-to-ground".to_owned());
+        live.presence(&session, emitting.clone(), &[]);
+        live.arm(&session, &air_to_ground);
+        live.disarm(&session, &air_to_ground);
+
+        let (_, presence) = live.presence(&session, emitting, &[]).expect("a document");
+
+        assert!(
+            !presence.arms_moved_elsewhere,
+            "the operator was told their own disarm was somebody else's"
+        );
+    }
+
+    /// The mark stands until the operator does something that shows they have read the
+    /// console, which is the kind of evidence the one asserted state is cleared by (ADR-0016).
+    /// Which acts count is Transport's ruling; that it comes off when one arrives is this
+    /// side's.
+    #[tokio::test]
+    async fn an_act_that_shows_the_console_was_read_answers_the_mark() {
+        let (_directory, store) = a_temporary_store().await;
+        let live = StateAuthority::empty();
+        let session = a_session(&live, &store, "flight").await;
+        live.presence(&session, vec![a_loop_to_emit_on("air-to-ground")], &[]);
+        live.arm(&session, &LoopId::presented("air-to-ground".to_owned()));
+        live.presence(&session, vec![a_loop("air-to-ground")], &[]);
+
+        live.the_mark_is_answered(&session);
+
+        let (_, presence) = live
+            .presence(&session, vec![a_loop("air-to-ground")], &[])
+            .expect("a document");
+
+        assert!(
+            !presence.arms_moved_elsewhere,
+            "the mark outlived the act that answered it"
         );
     }
 

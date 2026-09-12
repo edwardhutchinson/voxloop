@@ -74,6 +74,18 @@
 	// the failure the rule was written to remove, arriving through the other door.
 	let latchDropped = $state(false);
 
+	// **How long the key has been latched open, in whole seconds** (v1 §8, ADR-0034). A hot
+	// latch is announced by a persistent banner *with a running age*, and the age is what makes
+	// the banner more than chrome: a sentence that has been on screen for either two seconds
+	// or eleven minutes says nothing about which, and the difference between those two is the
+	// whole of what an operator needs from it.
+	//
+	// It is this console's own clock, like the channel's staleness is, because the latch is
+	// this desk's own state: the server is told a key is down and is never told it is being
+	// held open (ADR-0022), so there is nothing in the document to read this from and nothing
+	// there that could be made to carry it without moving the version five times a second.
+	let latchedFor = $state(0);
+
 	// One reading of the modes for the life of this console. **The console ORs nothing and
 	// times nothing** — the OR is the seam's and the modes are `modes.js`'s, and doing either
 	// here is how a latch ends up derived from a press (ADR-0022).
@@ -91,9 +103,25 @@
 		// before it on the way down. The server marks the loops and audits the press; nothing
 		// here draws it, because whether a transmission is at priority is the document's.
 		onPriority,
-		onLatched: (is) => (latched = is),
+		onLatched: (is) => {
+			latched = is;
+			// The age starts at the latch and starts again at every latch, so a key latched,
+			// released and latched again reads as the seconds it has actually been open.
+			latchedFor = 0;
+		},
 		onDropped: (source) => (dropped = source),
 		onLatchDropped: () => (latchDropped = true)
+	});
+
+	// The clock runs only while the key is latched open, and it is torn down with the console
+	// like the input sources are. One second is the resolution the banner is read at; anything
+	// finer would be motion, which this console renders nowhere but the talking indicator.
+	$effect(() => {
+		if (!latched) return;
+
+		const ticking = setInterval(() => (latchedFor += 1), 1000);
+
+		return () => clearInterval(ticking);
 	});
 
 	// The listeners go when this page does. A role given up is not a role anybody can key, and
@@ -175,6 +203,14 @@
 		latched,
 		dropped,
 		latchDropped,
+		// The document's two counts, in this console's own words like the media path and the
+		// mark beside it are. Nothing is computed here: the numbers are the server's, and
+		// renaming them is the whole of what this line does.
+		audience: {
+			hearing: presence.audience.hearing,
+			presentNotHearing: presence.audience.present_not_hearing
+		},
+		armsMovedElsewhere: presence.arms_moved_elsewhere,
 		onDown: keys.onScreen[MOMENTARY].down,
 		onUp: keys.onScreen[MOMENTARY].up,
 		onLatchDown: keys.onScreen[LATCHED].down,
@@ -348,6 +384,26 @@
 		<p class="stale" role="status">
 			VoxLoop was last confirmed {staleFor} s ago. This is what it last said, and it is not being kept
 			up to date.
+		</p>
+	{/if}
+
+	<!-- **A hot latch is announced by a persistent banner with a running age** (v1 §8,
+	     ADR-0034), and the key control rendering live in the bar is the other half of it: a
+	     banner on its own becomes chrome, and an operator who has stopped seeing it is the
+	     hazard this is here for. It sits above both views because it is a fact about the
+	     desk rather than about any loop, so it is on screen whichever view is showing.
+
+	     **The age is what makes it more than a sentence.** *The key is open* has been true for
+	     two seconds or for eleven minutes, and nothing else on this page distinguishes those —
+	     which is the whole of what somebody who has walked away from a live microphone needs
+	     to be told.
+
+	     It is `status` rather than `alert`: a latch is something the operator did, deliberately
+	     and on purpose, and an assertive announcement every time somebody latched would train
+	     them past the one that matters. -->
+	{#if latched}
+		<p class="hot" role="status">
+			The key is latched open — {latchedFor} s. You are transmitting until you unlatch it.
 		</p>
 	{/if}
 

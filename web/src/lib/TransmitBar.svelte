@@ -50,8 +50,23 @@
 	// Whether the transmission *is* at priority is the server's answer like the lamp is, so the
 	// lamp says it — an elevated latch shows as elevated with no new surface.
 	//
-	// The two audience counts are #49's, and the presets that sit beside the key control are
-	// #56's.
+	// **The audience is two counts and no names** (ADR-0034). Sixteen names is more than
+	// anyone reads in the second before keying, and the two numbers that remain are the two
+	// that change a decision: the first is reassurance and the second is a warning. The third
+	// bucket — people in reach who did not take the loop up — is computed on the server and
+	// never sent here, which is where that promise is kept: the document is the API, so a
+	// count the console must not render is a count the console is not handed.
+	//
+	// **`0 hearing` blocks nothing.** It renders in the warning colour and the key control is
+	// untouched: emitting to a loop nobody is hearing is legal, and blocking it — or
+	// interposing a dialog — would be the console overruling an operator about their own
+	// operation.
+	//
+	// **There is no third count.** The bar could say *3 of 6 have this turned down* and does
+	// not: it would sit beside `present, not hearing` and be read as another flavour of it,
+	// and a volume is persisted precisely because it is safe to be stale, so it can be wrong.
+	//
+	// The presets that sit beside the key control are #56's.
 
 	import Icon from './Icon.svelte';
 	import { CONFIRMED, DISCONNECTED, UNCONFIRMED } from './session.js';
@@ -84,6 +99,11 @@
 	// `priority` is the server's answer about whether this session's transmission is at
 	// priority, read out of the document beside `keyed`; `onPriorityDown`/`onPriorityUp` are
 	// what the priority control publishes to Input, as a button and nothing more.
+	//
+	// `audience` is who would actually hear this arm set, as the document counts them: the
+	// two buckets it carries, and no third. `armsMovedElsewhere` is the document's answer to
+	// *did anything but this session last move that set* — the mark, and the server is the
+	// only thing that can say it, because it is the thing that applies both kinds of change.
 	let {
 		mediaPath,
 		connection = CONFIRMED,
@@ -99,7 +119,9 @@
 		onLatchUp,
 		priority = false,
 		onPriorityDown,
-		onPriorityUp
+		onPriorityUp,
+		audience = { hearing: 0, presentNotHearing: 0 },
+		armsMovedElsewhere = false
 	} = $props();
 
 	// **The armed set in words** (ADR-0034), and the same words in both views. It is a list
@@ -109,6 +131,11 @@
 	const destinations = $derived(
 		armedOn.length === 0 ? 'nothing' : new Intl.ListFormat('en').format(armedOn)
 	);
+
+	// The counts as they are rendered, read straight out of the document and computed nowhere
+	// else: what the operator is told is what the server has committed to keeping true.
+	const hearing = $derived(audience.hearing);
+	const presentNotHearing = $derived(audience.presentNotHearing);
 
 	// **The console must not place a focusable control where an operator's hands rest**
 	// (v1 §4). A key pressed with focus on a control is refused, so a key control that took
@@ -178,6 +205,28 @@
 	     *who am I about to talk to*, and an operator whose path has dropped is owed that answer
 	     more than anybody: it is what they are coming back to. Only the key control goes. -->
 	<p class="armed">Armed on {destinations}.</p>
+
+	{#if armsMovedElsewhere}
+		<!-- **Only a change this session did not ask for is marked** (ADR-0058). A preset is a
+		     mid-key change by design and the most routine one in the system, and a deliberate
+		     arm is the operator's own hand; marking either would fire the signal constantly
+		     and train an operator straight past it. What is left is the change nobody here
+		     made, and the operator may be mid-sentence when it lands — so it is said in words
+		     beside the set it is about, and it stands until they do something deliberate. -->
+		<p class="moved" role="status">
+			A permission change moved this set. Your own hand did not, so read it again before you key.
+		</p>
+	{/if}
+
+	<!-- **The audience, before keying and while keyed, in the same words** (ADR-0034,
+	     ADR-0058). Two counts and no names: the first is what says the voice is going
+	     somewhere and the second is what says somebody who means to be covering this will not
+	     hear it. It is the whole of VoxLoop's compensation for emitting to several places at
+	     once, because the receiving side is told nothing (ADR-0057). -->
+	<p class="audience">
+		<span class:unheard={hearing === 0}>{hearing} hearing</span>
+		<span class:warned={presentNotHearing > 0}>{presentNotHearing} present, not hearing</span>
+	</p>
 
 	{#if dropped}
 		<!-- **A source that dies while keyed forces an unkey and says so locally** (ADR-0021).
@@ -274,12 +323,13 @@
 </section>
 
 <style>
-	/* Four names for one rendering, deliberately, the way `.refusal` and `.destructive` are:
+	/* Five names for one rendering, deliberately, the way `.refusal` and `.destructive` are:
 	   a fault that clears itself, a channel that cannot confirm, a fault that has withdrawn
-	   emission and a latch that was taken away read alike and are not the same thing, so a
-	   rule that later tells them apart has somewhere to go. `.impaired` is the media path's
-	   rung and `.unconfirmed` is the signalling channel's, and they are two classes rather
-	   than one because the two ladders are two ladders (`CONTEXT.md`).
+	   emission, a latch that was taken away and an arm set somebody else moved read alike and
+	   are not the same thing, so a rule that later tells them apart has somewhere to go.
+	   `.impaired` is the media path's rung and `.unconfirmed` is the signalling channel's, and
+	   they are two classes rather than one because the two ladders are two ladders
+	   (`CONTEXT.md`).
 
 	   The colour is v1 §8's — *this is true and you should look at it* — and it is never what
 	   carries the state: the sentence says which of the two withdrawal conditions applies and
@@ -287,7 +337,8 @@
 	.impaired,
 	.unconfirmed,
 	.withdrawn,
-	.dropped {
+	.dropped,
+	.moved {
 		margin: 0;
 		color: var(--warning);
 	}
@@ -295,6 +346,27 @@
 	.armed {
 		margin: 0;
 		font-size: var(--type-2);
+	}
+
+	/* The two counts on one line, in the order they are read: the reassurance, then the
+	   warning. They are spans inside one paragraph rather than two paragraphs, because they
+	   are one answer — *who will hear me* — and a reader who takes in only the first half of
+	   it has been told something that is not true. */
+	.audience {
+		display: flex;
+		gap: var(--space-3);
+		margin: 0;
+		font-size: var(--type-2);
+	}
+
+	/* Two names for one rendering, deliberately. `0 hearing` is *this reaches nobody* and it
+	   blocks nothing; a count of people who took the loop up and will not hear it is *these
+	   people believe they are covering this*, which is the console's only warning about mute
+	   (ADR-0034). They are different facts with different fixes, so a rule that later tells
+	   them apart has somewhere to go, and the words say both without the colour. */
+	.unheard,
+	.warned {
+		color: var(--warning);
 	}
 
 	.keying {
